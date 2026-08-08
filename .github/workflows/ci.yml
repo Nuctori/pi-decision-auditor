@@ -83,6 +83,8 @@ jobs:
             echo "E2E FAILED: no run output"
             exit 1
           fi
+          echo "=== pi output (first 60 lines) ==="
+          head -60 "$GITHUB_WORKSPACE/e2e/out.txt"
           cd "$GITHUB_WORKSPACE/e2e"
           echo "=== chain.md ==="
           cat docs/decisions/chain.md
