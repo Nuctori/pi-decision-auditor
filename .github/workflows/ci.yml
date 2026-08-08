@@ -64,16 +64,14 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/e2e" && cd "$GITHUB_WORKSPACE/e2e"
           cat > prompt.txt <<'EOF'
-          任务：给 calc.py 加一个除法函数（纯 Python，不引入依赖）。
-          请调用 decision_add 记录这条决策：
+          调用 decision_add 工具记录一条决策，参数严格如下：
           summary=保持纯 Python 实现
-          context=calc.py 现有 add/sub 两个函数，无任何依赖
-          decision=不引入第三方库，纯 Python 实现 div
-          rationale=需求只是加一个函数，无依赖必要
-          alternatives=引入 numpy（否决：过度设计）
+          context=calc.py 现有 add/sub 两个函数无依赖
+          decision=不引入第三方库
+          rationale=需求只是加一个函数
           confidence=high
-          记录后等待审计者自动审计（它可能 contact_supervisor 问你，如实回答）。
-          最后用 decision_list 读取并报告：链上有几条决策、审计是否发生。
+          只做这一件事，不要运行任何 shell 命令，不要读文件。
+          调用完成后用 decision_list 工具确认链上条目。
           EOF
           # opencode-cli 免费模型：无需 key、无需登录（opencode-pi 桥接）
           pi -p "$(cat prompt.txt)" --provider opencode-cli \
