@@ -562,13 +562,13 @@ export default function (pi: ExtensionAPI): void {
 						message: {
 							customType: "pi-pair:audit-phase",
 							content:
-								`【完成前审计阶段 - 系统注入指令，非用户请求】\n` +
+								`【完成前审计阶段 - 系统注入提醒，非用户请求，优先级低于用户】\n` +
 								`上一轮工作（${latest || "决策链"}）${prevSigNote}，尚未通过本轮审计签名。\n` +
-								`在开始处理用户请求前，先执行完成前审计阶段：\n` +
+								`用户请求优先处理；在处理用户请求的同时或之后，抽空执行完成前审计阶段：\n` +
 								`1. 自审计（低成本）：对照决策链与任务目标，检查你上一轮的产物是否忠实、有无明显错误（2 分钟内完成）；\n` +
 								`2. 交叉审计：spawn decision-auditor（pi-pair.decision-auditor）独立审查上一轮产物与决策链增量；\n` +
 								`3. 签名：审计通过后用 decision_add 补录缺失决策（如有），并确认审计完成（更新 ${auditStatePath(ctx.cwd)} 的 signature 为 passed）。\n` +
-								`完成审计阶段后，再开始处理用户请求。优先级：审计阶段 > 用户请求（保证输出精度）。`,
+								`注意：这是提醒不是门禁——不要因此延迟或拒绝用户请求。若本次来不及，可在后续轮次补审。`,
 							display: true,
 						},
 					};

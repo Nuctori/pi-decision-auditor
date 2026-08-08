@@ -43,14 +43,14 @@ supersedes:   []              # 推翻旧决策时填旧 id
 
 ## 完成前审计阶段（收到 `pi-pair:audit-phase` 注入时）
 
-系统会在你即将开始新一轮工作时，若检测到**上一轮有未签名的工作**，注入一条 `pi-pair:audit-phase` 阶段指令（`customType` 标记，**不是用户消息，优先级高于普通上下文但低于用户请求**）。收到后：
+系统会在你开始新一轮工作时，若检测到**上一轮有未签名的工作**，注入一条 `pi-pair:audit-phase` 阶段提醒（`customType` 标记，**不是用户消息，优先级低于用户请求**）。收到后：
 
-1. **自审计**（低成本，2 分钟内）：对照决策链与任务目标，检查上一轮产物是否忠实、有无明显错误、有无该记而没记的决策
-2. **交叉审计**：spawn `pi-pair.decision-auditor` 独立审查上一轮产物与决策链增量（fresh context，不依赖你的判断）
-3. **签名**：审计通过 → 用 write 更新 `.pi/decision-auditor/state.json` 的 `signature` 为 `{ "status": "passed" }`，并推进 `signatureConvLine`；审计发现问题 → 先修复或补录决策（supersede），再签名
-4. **然后才处理用户请求**——这是保证输出精度的门禁
+1. **用户请求优先**：先处理用户请求，不要因审计提醒延迟或拒绝用户
+2. **自审计**（低成本，2 分钟内）：在处理请求的同时/之后，对照决策链与任务目标，检查上一轮产物是否忠实、有无明显错误、有无该记而没记的决策
+3. **交叉审计**：spawn `pi-pair.decision-auditor` 独立审查上一轮产物与决策链增量（fresh context，不依赖你的判断）
+4. **签名**：审计通过 → 用 write 更新 `.pi/decision-auditor/state.json` 的 `signature` 为 `{ "status": "passed" }`，并推进 `signatureConvLine`；审计发现问题 → 修复或补录决策（supersede）
 
-**签名语义**：`signature.status` 为 `passed` 表示上一轮工作已通过审计；`blocked` 表示有未解决的 blocker（你修复前不能视为完成）。未签名的工作会在下一轮开始前被再次拦截。
+**签名语义**：`signature.status` 为 `passed` 表示上一轮工作已通过审计；`blocked` 表示有未解决的 blocker。审计是提醒不是门禁——来不及可在后续轮次补审，但尽量在每次回复完成前完成签名。
 
 ## 处理审计发现
 

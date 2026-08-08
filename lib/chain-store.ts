@@ -262,7 +262,10 @@ export function needsSignoff(cwd: string): boolean {
 }
 
 /** 记录本轮审计签名（agent 完成审计阶段后调用）。 */
-export function recordSignature(cwd: string, sig: Omit<AuditSignature, "at">): void {
+export function recordSignature(
+	cwd: string,
+	sig: Omit<AuditSignature, "at">,
+): void {
 	const state = readAuditState(cwd);
 	const totalLines = convLogLineCount(cwd);
 	writeAuditState(cwd, {
