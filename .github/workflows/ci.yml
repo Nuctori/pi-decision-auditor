@@ -48,6 +48,12 @@ jobs:
         run: pi install npm:pi-subagents
       - name: Install opencode-pi (free no-key model bridge)
         run: pi install npm:opencode-pi
+      - name: Install opencode CLI (required by opencode-pi bridge)
+        run: |
+          curl -fsSL https://opencode.ai/install | bash
+          echo "$HOME/.opencode/bin" >> $GITHUB_PATH
+      - name: Verify opencode CLI
+        run: opencode --version
       - name: Install plugin (local path)
         run: pi install "$GITHUB_WORKSPACE"
       - name: Register auditor agent (local-path workaround)
