@@ -68,10 +68,22 @@ jobs:
           记录后等待审计者自动审计（它可能 contact_supervisor 问你，如实回答）。
           最后用 decision_list 读取并报告：链上有几条决策、审计是否发生。
           EOF
+          # opencode-go 是免费额度模型：周限额用尽时（429 GoUsageLimitError）跳过 E2E，不红
           pi -p "$(cat prompt.txt)" --model opencode-go/deepseek-v4-flash \
-            2>&1 | tee /tmp/e2e/out.txt
+            2>&1 | tee /tmp/e2e/out.txt || true
+          if grep -q "GoUsageLimitError" /tmp/e2e/out.txt; then
+            echo "SKIP: opencode-go weekly free quota exhausted"
+            echo "SKIPPED" > /tmp/e2e/skipped.txt
+            exit 0
+          fi
+          grep -q "Error" /tmp/e2e/out.txt && exit 1 || true
       - name: Verify chain and audit state
+        if: ${{ !cancelled() }}
         run: |
+          if [ -f /tmp/e2e/skipped.txt ]; then
+            echo "E2E skipped: opencode-go free quota exhausted"
+            exit 0
+          fi
           cd "$GITHUB_WORKSPACE/e2e"
           echo "=== chain.md ==="
           cat docs/decisions/chain.md
