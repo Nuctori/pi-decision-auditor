@@ -31,7 +31,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: unit
     env:
-      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
       PI_OFFLINE: "1"
       PI_DECISION_AUDITOR_INJECT: "off"
     steps:
@@ -47,6 +46,8 @@ jobs:
         run: echo "$(npm config get prefix)/bin" >> $GITHUB_PATH
       - name: Install pi-subagents (auditor dependency)
         run: pi install npm:pi-subagents
+      - name: Install opencode-pi (free no-key model bridge)
+        run: pi install npm:opencode-pi
       - name: Install plugin (local path)
         run: pi install "$GITHUB_WORKSPACE"
       - name: Register auditor agent (local-path workaround)
@@ -68,20 +69,19 @@ jobs:
           记录后等待审计者自动审计（它可能 contact_supervisor 问你，如实回答）。
           最后用 decision_list 读取并报告：链上有几条决策、审计是否发生。
           EOF
-          # opencode-go 是免费额度模型：周限额用尽时（429 GoUsageLimitError）跳过 E2E，不红
-          pi -p "$(cat prompt.txt)" --model opencode-go/deepseek-v4-flash \
+          # opencode-cli 免费模型：无需 key、无需登录（opencode-pi 桥接）
+          pi -p "$(cat prompt.txt)" --provider opencode-cli \
+            --model opencode/deepseek-v4-flash-free \
             2>&1 | tee "$GITHUB_WORKSPACE/e2e/out.txt" || true
-          if grep -q "GoUsageLimitError" "$GITHUB_WORKSPACE/e2e/out.txt"; then
-            echo "SKIP: opencode-go weekly free quota exhausted"
-            exit 0
+          if grep -q "Error" "$GITHUB_WORKSPACE/e2e/out.txt"; then
+            echo "E2E FAILED: see out.txt"
+            exit 1
           fi
-          grep -q "Error" "$GITHUB_WORKSPACE/e2e/out.txt" && exit 1 || true
       - name: Verify chain and audit state
         run: |
-          if [ ! -f "$GITHUB_WORKSPACE/e2e/out.txt" ] || \
-             grep -q "GoUsageLimitError" "$GITHUB_WORKSPACE/e2e/out.txt"; then
-            echo "E2E skipped: opencode-go quota exhausted (or no output)"
-            exit 0
+          if [ ! -f "$GITHUB_WORKSPACE/e2e/out.txt" ]; then
+            echo "E2E FAILED: no run output"
+            exit 1
           fi
           cd "$GITHUB_WORKSPACE/e2e"
           echo "=== chain.md ==="
@@ -97,4 +97,4 @@ jobs:
             && echo "PASS: lock released"
           grep -qE "审计报告|一致|偏离|需裁决" "$GITHUB_WORKSPACE/e2e/out.txt" \
             && echo "PASS: audit report present" \
-            || echo "WARN: report text not matched (model may vary)"
+            || echo "WARN: report text not matched (print mode exits early)"
