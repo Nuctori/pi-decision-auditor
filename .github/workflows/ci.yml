@@ -55,7 +55,7 @@ jobs:
           cp "$GITHUB_WORKSPACE/agents/decision-auditor.md" ~/.pi/agent/agents/
       - name: Run E2E - decision_add auto-triggers audit
         run: |
-          mkdir -p /tmp/e2e && cd /tmp/e2e
+          mkdir -p "$GITHUB_WORKSPACE/e2e" && cd "$GITHUB_WORKSPACE/e2e"
           cat > prompt.txt <<'EOF'
           任务：给 calc.py 加一个除法函数（纯 Python，不引入依赖）。
           请调用 decision_add 记录这条决策：
@@ -69,10 +69,10 @@ jobs:
           最后用 decision_list 读取并报告：链上有几条决策、审计是否发生。
           EOF
           pi -p "$(cat prompt.txt)" --model opencode-go/deepseek-v4-flash \
-            --timeout 600000 2>&1 | tee /tmp/e2e/out.txt
+            2>&1 | tee /tmp/e2e/out.txt
       - name: Verify chain and audit state
         run: |
-          cd /tmp/e2e
+          cd "$GITHUB_WORKSPACE/e2e"
           echo "=== chain.md ==="
           cat docs/decisions/chain.md
           echo "=== state.json ==="
