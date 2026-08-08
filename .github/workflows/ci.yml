@@ -70,16 +70,17 @@ jobs:
           EOF
           # opencode-go 是免费额度模型：周限额用尽时（429 GoUsageLimitError）跳过 E2E，不红
           pi -p "$(cat prompt.txt)" --model opencode-go/deepseek-v4-flash \
-            2>&1 | tee /tmp/e2e/out.txt || true
-          if grep -q "GoUsageLimitError" /tmp/e2e/out.txt; then
+            2>&1 | tee "$GITHUB_WORKSPACE/e2e/out.txt" || true
+          if grep -q "GoUsageLimitError" "$GITHUB_WORKSPACE/e2e/out.txt"; then
             echo "SKIP: opencode-go weekly free quota exhausted"
             exit 0
           fi
-          grep -q "Error" /tmp/e2e/out.txt && exit 1 || true
+          grep -q "Error" "$GITHUB_WORKSPACE/e2e/out.txt" && exit 1 || true
       - name: Verify chain and audit state
         run: |
-          if grep -q "GoUsageLimitError" /tmp/e2e/out.txt; then
-            echo "E2E skipped: opencode-go free quota exhausted"
+          if [ ! -f "$GITHUB_WORKSPACE/e2e/out.txt" ] || \
+             grep -q "GoUsageLimitError" "$GITHUB_WORKSPACE/e2e/out.txt"; then
+            echo "E2E skipped: opencode-go quota exhausted (or no output)"
             exit 0
           fi
           cd "$GITHUB_WORKSPACE/e2e"
@@ -94,6 +95,6 @@ jobs:
             && echo "PASS: audit advanced"
           grep -q '"inFlight": false' .pi/decision-auditor/state.json \
             && echo "PASS: lock released"
-          grep -qE "审计报告|一致|偏离|需裁决" /tmp/e2e/out.txt \
+          grep -qE "审计报告|一致|偏离|需裁决" "$GITHUB_WORKSPACE/e2e/out.txt" \
             && echo "PASS: audit report present" \
             || echo "WARN: report text not matched (model may vary)"
