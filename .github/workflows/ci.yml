@@ -48,11 +48,11 @@ jobs:
       - name: Install pi-subagents (auditor dependency)
         run: pi install npm:pi-subagents
       - name: Install plugin (local path)
-        run: pi install ./pi-decision-auditor
+        run: pi install "$GITHUB_WORKSPACE"
       - name: Register auditor agent (local-path workaround)
         run: |
           mkdir -p ~/.pi/agent/agents
-          cp agents/decision-auditor.md ~/.pi/agent/agents/
+          cp "$GITHUB_WORKSPACE/agents/decision-auditor.md" ~/.pi/agent/agents/
       - name: Run E2E - decision_add auto-triggers audit
         run: |
           mkdir -p /tmp/e2e && cd /tmp/e2e
