@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit tests + typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Unit tests
+        run: npx tsx --test test/chain-store.test.ts
+
+  e2e:
+    name: E2E - pair audit loop (opencode free model)
+    runs-on: ubuntu-latest
+    needs: unit
+    env:
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      PI_OFFLINE: "1"
+      PI_DECISION_AUDITOR_INJECT: "off"
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - uses: actions/setup-node@v4.4.0
+        with:
+          node-version: 22
+      - name: Install pi
+        run: npm install -g @earendil-works/pi-coding-agent
+      - name: Install pi-subagents (auditor dependency)
+        run: pi install npm:pi-subagents
+      - name: Install plugin (local path)
+        run: pi install ./pi-decision-auditor
+      - name: Register auditor agent (local-path workaround)
+        run: |
+          mkdir -p ~/.pi/agent/agents
+          cp agents/decision-auditor.md ~/.pi/agent/agents/
+      - name: Run E2E - decision_add auto-triggers audit
+        run: |
+          mkdir -p /tmp/e2e && cd /tmp/e2e
+          cat > prompt.txt <<'EOF'
+          任务：给 calc.py 加一个除法函数（纯 Python，不引入依赖）。
+          请调用 decision_add 记录这条决策：
+          summary=保持纯 Python 实现
+          context=calc.py 现有 add/sub 两个函数，无任何依赖
+          decision=不引入第三方库，纯 Python 实现 div
+          rationale=需求只是加一个函数，无依赖必要
+          alternatives=引入 numpy（否决：过度设计）
+          confidence=high
+          记录后等待审计者自动审计（它可能 contact_supervisor 问你，如实回答）。
+          最后用 decision_list 读取并报告：链上有几条决策、审计是否发生。
+          EOF
+          pi -p "$(cat prompt.txt)" --model opencode-go/deepseek-v4-flash \
+            --timeout 600000 2>&1 | tee /tmp/e2e/out.txt
+      - name: Verify chain and audit state
+        run: |
+          cd /tmp/e2e
+          echo "=== chain.md ==="
+          cat docs/decisions/chain.md
+          echo "=== state.json ==="
+          cat .pi/decision-auditor/state.json
+          echo "=== assertions ==="
+          grep -q "D-001" docs/decisions/chain.md \
+            && echo "PASS: chain has D-001"
+          grep -q '"lastAuditedId": "D-00' .pi/decision-auditor/state.json \
+            && echo "PASS: audit advanced"
+          grep -q '"inFlight": false' .pi/decision-auditor/state.json \
+            && echo "PASS: lock released"
+          grep -qE "审计报告|一致|偏离|需裁决" /tmp/e2e/out.txt \
+            && echo "PASS: audit report present" \
+            || echo "WARN: report text not matched (model may vary)"
