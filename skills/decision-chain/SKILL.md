@@ -41,6 +41,17 @@ supersedes:   []              # 推翻旧决策时填旧 id
 - 连带产物忠实性：`/pair-audit --diff`（审计者会对照 git diff）
 - 审计是 async：启动后继续干活，报告回来再处理发现
 
+## 完成前审计阶段（收到 `pi-pair:audit-phase` 注入时）
+
+系统会在你即将开始新一轮工作时，若检测到**上一轮有未签名的工作**，注入一条 `pi-pair:audit-phase` 阶段指令（`customType` 标记，**不是用户消息，优先级高于普通上下文但低于用户请求**）。收到后：
+
+1. **自审计**（低成本，2 分钟内）：对照决策链与任务目标，检查上一轮产物是否忠实、有无明显错误、有无该记而没记的决策
+2. **交叉审计**：spawn `pi-pair.decision-auditor` 独立审查上一轮产物与决策链增量（fresh context，不依赖你的判断）
+3. **签名**：审计通过 → 用 write 更新 `.pi/decision-auditor/state.json` 的 `signature` 为 `{ "status": "passed" }`，并推进 `signatureConvLine`；审计发现问题 → 先修复或补录决策（supersede），再签名
+4. **然后才处理用户请求**——这是保证输出精度的门禁
+
+**签名语义**：`signature.status` 为 `passed` 表示上一轮工作已通过审计；`blocked` 表示有未解决的 blocker（你修复前不能视为完成）。未签名的工作会在下一轮开始前被再次拦截。
+
 ## 处理审计发现
 
 | 审计判定 | 你的动作 |

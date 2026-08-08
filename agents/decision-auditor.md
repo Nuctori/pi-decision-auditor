@@ -94,6 +94,7 @@ acceptanceRole: writer
 - `lastAuditedId` 推进到链最新条目
 - `lastAuditAt` 置当前时间戳
 - `pendingRounds`/`pendingChars` 清零
+- **签名**：把 `signature` 置为 `{ "status": "passed" }`（审计通过）或 `{ "status": "blocked", "blockers": [...] }`（发现问题），并让 `signatureConvLine` 推进到 convlog 当前行数（解除完成前审计阶段的待签名状态）
 
 你的写权限仅限：**append chain.md** + **改 state.json**。禁止修改任何其他文件（代码、文档、配置）。
 

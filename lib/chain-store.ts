@@ -164,6 +164,17 @@ export function renderEntry(e: DecisionEntry): string {
 // ---- 审计状态（上次审计到哪、是否有进行中的审计）----
 // 存 <cwd>/.pi/decision-auditor/state.json，跨会话持久。
 
+export interface AuditSignature {
+	/** 签名状态：passed=审计通过；blocked=发现问题；timeout=超时未完成。 */
+	status: "passed" | "blocked" | "timeout";
+	/** 签名时间（epoch ms）。 */
+	at: number;
+	/** blocker 摘要（blocked 时）。 */
+	blockers?: string[];
+	/** 本轮审计的 runId。 */
+	runId?: string;
+}
+
 export interface AuditState {
 	/** 上次审计覆盖到的最后一条 id（含）。null = 从未审计。 */
 	lastAuditedId: string | null;
@@ -177,6 +188,10 @@ export interface AuditState {
 	pendingChars: number;
 	/** 上次审计时间（epoch ms）。 */
 	lastAuditAt: number;
+	/** 本轮签名（agent_end 强制签名用）。null = 未签名。 */
+	signature: AuditSignature | null;
+	/** 本轮签名对应的 convlog 行号（防止签名过期复用）。 */
+	signatureConvLine: number;
 }
 
 const DEFAULT_STATE: AuditState = {
@@ -186,6 +201,8 @@ const DEFAULT_STATE: AuditState = {
 	roundsSinceAudit: 0,
 	pendingChars: 0,
 	lastAuditAt: 0,
+	signature: null,
+	signatureConvLine: 0,
 };
 
 /** 审计状态文件路径：<cwd>/.pi/decision-auditor/state.json */
@@ -206,10 +223,14 @@ export function readAuditState(cwd: string): AuditState {
 				typeof obj.convExtractedLine === "number" ? obj.convExtractedLine : 0,
 			roundsSinceAudit:
 				typeof obj.roundsSinceAudit === "number" ? obj.roundsSinceAudit : 0,
-			pendingChars:
-				typeof obj.pendingChars === "number" ? obj.pendingChars : 0,
-			lastAuditAt:
-				typeof obj.lastAuditAt === "number" ? obj.lastAuditAt : 0,
+			pendingChars: typeof obj.pendingChars === "number" ? obj.pendingChars : 0,
+			lastAuditAt: typeof obj.lastAuditAt === "number" ? obj.lastAuditAt : 0,
+			signature:
+				obj.signature && typeof obj.signature === "object"
+					? (obj.signature as AuditSignature)
+					: null,
+			signatureConvLine:
+				typeof obj.signatureConvLine === "number" ? obj.signatureConvLine : 0,
 		};
 	} catch {
 		return { ...DEFAULT_STATE };
@@ -223,6 +244,32 @@ export function writeAuditState(cwd: string, state: AuditState): void {
 	const tmp = `${file}.tmp`;
 	fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf-8");
 	fs.renameSync(tmp, file);
+}
+
+/**
+ * 是否有待签名的工作（完成前审计阶段触发条件）。
+ * 判断：convlog 有新增量（本轮有工作）且 最近一次签名未覆盖它。
+ */
+export function needsSignoff(cwd: string): boolean {
+	try {
+		const state = readAuditState(cwd);
+		const totalLines = convLogLineCount(cwd);
+		// 有新增对话且签名未覆盖到当前行 → 需要签名
+		return totalLines > state.signatureConvLine;
+	} catch {
+		return false;
+	}
+}
+
+/** 记录本轮审计签名（agent 完成审计阶段后调用）。 */
+export function recordSignature(cwd: string, sig: Omit<AuditSignature, "at">): void {
+	const state = readAuditState(cwd);
+	const totalLines = convLogLineCount(cwd);
+	writeAuditState(cwd, {
+		...state,
+		signature: { ...sig, at: Date.now() },
+		signatureConvLine: totalLines,
+	});
 }
 
 /** 自 lastAuditedId 之后的新条目（含 lastAuditedId 自身若从未确认）；从未审计则返回全部。 */
@@ -284,30 +331,17 @@ export function readConvTail(cwd: string, maxChars = 12000): string {
 	}
 }
 
-/** convlog 总行数（不含头注释），用于增量提取定位。 */
+/** convlog 总行数（不含头注释），用于增量提取定位。只统计对话行（## 👤 / ## 🤖）。 */
 export function convLogLineCount(cwd: string): number {
 	try {
 		const raw = fs.readFileSync(convlogPath(cwd), "utf-8");
 		const lines = raw.split(/\r?\n/);
-		// 跳过头部注释（# 和 <!-- --> 块）
 		let count = 0;
-		let inComment = false;
 		for (const line of lines) {
 			const t = line.trim();
-			if (inComment) {
-				if (t.includes("-->")) inComment = false;
-				continue;
-			}
-			if (t.startsWith("<!--")) {
-				inComment = true;
-				continue;
-			}
-			if (t.startsWith("## ") || t.startsWith("- ") || t.length === 0) continue;
 			if (t.startsWith("## 👤") || t.startsWith("## 🤖")) {
 				count++;
-				continue;
 			}
-			if (t) count++;
 		}
 		return count;
 	} catch {
@@ -337,7 +371,9 @@ export const DEFAULT_AUDIT_CONFIG: AuditConfig = {
 };
 
 /** 从环境变量覆盖配置（PI_PAIR_BATCH_ROUNDS 等）。 */
-export function resolveAuditConfig(env: Record<string, string | undefined> = process.env): AuditConfig {
+export function resolveAuditConfig(
+	env: Record<string, string | undefined> = process.env,
+): AuditConfig {
 	const num = (k: string, d: number): number => {
 		const v = env[k];
 		if (!v) return d;
@@ -347,8 +383,14 @@ export function resolveAuditConfig(env: Record<string, string | undefined> = pro
 	return {
 		batchRounds: num("PI_PAIR_BATCH_ROUNDS", DEFAULT_AUDIT_CONFIG.batchRounds),
 		batchChars: num("PI_PAIR_BATCH_CHARS", DEFAULT_AUDIT_CONFIG.batchChars),
-		minIntervalRounds: num("PI_PAIR_MIN_INTERVAL", DEFAULT_AUDIT_CONFIG.minIntervalRounds),
-		maxBatchRounds: num("PI_PAIR_MAX_BATCH", DEFAULT_AUDIT_CONFIG.maxBatchRounds),
+		minIntervalRounds: num(
+			"PI_PAIR_MIN_INTERVAL",
+			DEFAULT_AUDIT_CONFIG.minIntervalRounds,
+		),
+		maxBatchRounds: num(
+			"PI_PAIR_MAX_BATCH",
+			DEFAULT_AUDIT_CONFIG.maxBatchRounds,
+		),
 	};
 }
 

@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.2.0] - 2026-08-08
+
+完成前审计阶段（pre-end signoff）：每轮工作开始前，若有未签名工作则注入审计阶段指令。
+
+### 新增：完成前审计阶段（强制签名）
+
+- **阶段注入**：`before_agent_start` 检测到上一轮有未签名工作（`needsSignoff`）时，注入 `pi-pair:audit-phase` 阶段指令（`customType` 标记，非用户消息，优先级高于普通上下文但低于用户请求）
+- **阶段内容**：自审计（agent 对照决策链/目标检查产物）→ 交叉审计（spawn decision-auditor 独立审查）→ 签名（更新 state.json `signature`）
+- **签名语义**：`signature.status` = `passed` / `blocked`（带 blockers）/ `timeout`；未签名工作在下一轮开始前被拦截
+- **不阻塞当前轮**：审计阶段在下一轮开始前执行，agent_end 语义不受影响（end 时无未决审计）
+- **低成本**：无新增对话的轮不触发（`needsSignoff` 零成本判断）；审计阶段预算小（自审计 2 分钟 + 一次增量审计）
+
+### 修复
+
+- `convLogLineCount` 只统计对话行（此前头部注释行被误计）
+- `needsSignoff` / `recordSignature` 状态机（签名后解除待签名）
+
+### 测试
+
+- 13 单测通过（新增 needsSignoff 状态机 + convLogLineCount）
+
 ## [1.1.0] - 2026-08-08
 
 改名 **pi-pair**（原 pi-decision-auditor）+ 捕获机制重做（核心修复）。

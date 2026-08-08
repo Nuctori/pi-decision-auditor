@@ -14,13 +14,16 @@ import {
 	appendConv,
 	auditStatePath,
 	chainPath,
+	convLogLineCount,
 	convlogPath,
 	entriesSinceLastAudit,
 	listEntries,
+	needsSignoff,
 	parseChain,
 	readAuditState,
 	readConvTail,
 	readRaw,
+	recordSignature,
 	resolveAuditConfig,
 	writeAuditState,
 } from "../lib/chain-store.js";
@@ -154,7 +157,11 @@ test("审计状态读写与 entriesSinceLastAudit", () => {
 	assert.equal(entriesSinceLastAudit(dir).length, 3);
 
 	// 审到 D-002 → 只返回 D-003
-	writeAuditState(dir, { ...readAuditState(dir), lastAuditedId: "D-002", inFlight: false });
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		lastAuditedId: "D-002",
+		inFlight: false,
+	});
 	const fresh = entriesSinceLastAudit(dir);
 	assert.equal(fresh.length, 1);
 	assert.equal(fresh[0].id, "D-003");
@@ -239,4 +246,36 @@ test("resolveAuditConfig 环境变量覆盖", () => {
 	assert.equal(cfg.batchChars, 5000);
 	assert.equal(cfg.minIntervalRounds, 1);
 	assert.equal(cfg.maxBatchRounds, 10);
+});
+
+test("needsSignoff 与 recordSignature 状态机", () => {
+	const dir = tmpDir();
+	// 无对话 → 不需要签名
+	assert.equal(needsSignoff(dir), false);
+
+	// 有对话 → 需要签名
+	appendConv(dir, "user", "请加一个函数");
+	assert.equal(needsSignoff(dir), true);
+
+	// 签名后 → 不再需要
+	recordSignature(dir, { status: "passed" });
+	assert.equal(needsSignoff(dir), false);
+
+	// 新对话 → 又需要
+	appendConv(dir, "assistant", "已完成");
+	assert.equal(needsSignoff(dir), true);
+
+	// blocked 签名也解除待签名（记录问题由注入处理）
+	recordSignature(dir, { status: "blocked", blockers: ["产物不忠实"] });
+	const state = readAuditState(dir);
+	assert.equal(state.signature?.status, "blocked");
+	assert.equal(state.signature?.blockers?.length, 1);
+	assert.equal(needsSignoff(dir), false);
+});
+
+test("convLogLineCount 统计对话行", () => {
+	const dir = tmpDir();
+	appendConv(dir, "user", "你好");
+	appendConv(dir, "assistant", "收到");
+	assert.equal(convLogLineCount(dir), 2);
 });

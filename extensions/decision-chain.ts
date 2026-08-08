@@ -17,6 +17,7 @@ import {
 	convlogPath,
 	entriesSinceLastAudit,
 	listEntries,
+	needsSignoff,
 	parseChain,
 	readAuditState,
 	readRaw,
@@ -170,7 +171,9 @@ function buildIncrementalAuditTask(cwd: string): string {
 	lines.push(
 		`对话日志: ${convlogPath(cwd)}（只记用户提示与助手最终回复，供你推导目标与提取决策）`,
 	);
-	lines.push(`审计状态: ${auditStatePath(cwd)}（含 convExtractedLine 定位已提取位置）`);
+	lines.push(
+		`审计状态: ${auditStatePath(cwd)}（含 convExtractedLine 定位已提取位置）`,
+	);
 	lines.push("");
 	lines.push("【第一步：捕获决策（你的新增核心职责）】");
 	lines.push(
@@ -194,9 +197,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 	lines.push(
 		"0. 先推导目标：从对话日志的用户提示推导任务目标。主 agent 自述不可信，以对话记录为准。",
 	);
-	lines.push(
-		"0.5 对照目标审漂移：本次捕获的决策是否服务于目标？",
-	);
+	lines.push("0.5 对照目标审漂移：本次捕获的决策是否服务于目标？");
 	lines.push(
 		"0.7 独立核实：用 read/grep/find + 只读 bash 去仓库核实 Context 事实。不信任记录，事实不符 = 偏离 ✗。",
 	);
@@ -207,15 +208,15 @@ function buildIncrementalAuditTask(cwd: string): string {
 		"2. 推理存疑、证据不足 → contact_supervisor(interview_request) 问主会话要真实上下文；",
 	);
 	lines.push("3. 发现链矛盾 → contact_supervisor(need_decision) 请求裁决；");
-	lines.push(
-		"4. 正确性：决策本身对吗——事实与仓库一致？收益现实？过度设计？",
-	);
+	lines.push("4. 正确性：决策本身对吗——事实与仓库一致？收益现实？过度设计？");
 	lines.push("5. 输出逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 链健康度总评。");
 	lines.push("");
 	lines.push(
 		"【收尾】用 write 工具把 ${auditStatePath(cwd)} 的 inFlight 改为 false，lastAuditedId 推进到链最新条目，lastAuditAt 置当前时间。",
 	);
-	lines.push("写权限仅限：append chain.md + 改 state.json。禁止修改其他任何文件。");
+	lines.push(
+		"写权限仅限：append chain.md + 改 state.json。禁止修改其他任何文件。",
+	);
 	return lines.join("\n");
 }
 
@@ -253,7 +254,11 @@ async function maybeAutoAudit(
 			const runId = result?.runId ?? result?.asyncId ?? "";
 			inFlightAudits.set(cwd, { runId, startedAt: Date.now() });
 			// 审计进行中：置 inFlight（审计者收尾会改 false + 推进 lastAuditedId）
-			writeAuditState(cwd, { ...readAuditState(cwd), inFlight: true, lastAuditAt: Date.now() });
+			writeAuditState(cwd, {
+				...readAuditState(cwd),
+				inFlight: true,
+				lastAuditAt: Date.now(),
+			});
 			return true;
 		} catch {
 			inFlightAudits.delete(cwd);
@@ -366,7 +371,13 @@ export default function (pi: ExtensionAPI): void {
 				supersedes: params.supersedes,
 			});
 			// 自动唤起：新决策落地后立即增量审计（手动 decision_add = 关键决策信号，强制触发）
-			void maybeAutoAudit(pi, rpc, readyPromise, ctx.cwd, Number.MAX_SAFE_INTEGER);
+			void maybeAutoAudit(
+				pi,
+				rpc,
+				readyPromise,
+				ctx.cwd,
+				Number.MAX_SAFE_INTEGER,
+			);
 			return {
 				content: [
 					{
@@ -526,13 +537,44 @@ export default function (pi: ExtensionAPI): void {
 		}
 	});
 
-	// ---- 注入：链状态提醒（可关：PI_DECISION_AUDITOR_INJECT=off）----
+	// ---- 注入：链状态提醒 + 完成前审计阶段指令（可关：PI_DECISION_AUDITOR_INJECT=off）----
 	if (process.env.PI_DECISION_AUDITOR_INJECT !== "off") {
 		pi.on("before_agent_start", async (event, ctx) => {
 			try {
 				const raw = readRaw(ctx.cwd);
 				const entries = parseChain(raw);
-				if (entries.length === 0) return;
+				if (entries.length === 0 && !needsSignoff(ctx.cwd)) return;
+
+				// 完成前审计阶段：上一轮有未签名工作 → 注入阶段指令（非用户消息）
+				if (needsSignoff(ctx.cwd)) {
+					const state = readAuditState(ctx.cwd);
+					const latest = entries
+						.slice(-3)
+						.map((e) => `${e.id} ${e.summary}`)
+						.join("；");
+					const prevSig = state.signature;
+					const prevSigNote = prevSig
+						? prevSig.status === "passed"
+							? "（上一阶段已签名 ✓）"
+							: `（上一阶段签名: ${prevSig.status}${prevSig.blockers?.length ? `，${prevSig.blockers.length} 项 blocker` : ""}）`
+						: "（无历史签名）";
+					return {
+						message: {
+							customType: "pi-pair:audit-phase",
+							content:
+								`【完成前审计阶段 - 系统注入指令，非用户请求】\n` +
+								`上一轮工作（${latest || "决策链"}）${prevSigNote}，尚未通过本轮审计签名。\n` +
+								`在开始处理用户请求前，先执行完成前审计阶段：\n` +
+								`1. 自审计（低成本）：对照决策链与任务目标，检查你上一轮的产物是否忠实、有无明显错误（2 分钟内完成）；\n` +
+								`2. 交叉审计：spawn decision-auditor（pi-pair.decision-auditor）独立审查上一轮产物与决策链增量；\n` +
+								`3. 签名：审计通过后用 decision_add 补录缺失决策（如有），并确认审计完成（更新 ${auditStatePath(ctx.cwd)} 的 signature 为 passed）。\n` +
+								`完成审计阶段后，再开始处理用户请求。优先级：审计阶段 > 用户请求（保证输出精度）。`,
+							display: true,
+						},
+					};
+				}
+
+				// 无待签名工作：轻量链状态提醒
 				const latest = entries
 					.slice(-3)
 					.map((e) => `${e.id} ${e.summary}`)
