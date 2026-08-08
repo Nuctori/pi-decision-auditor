@@ -1,16 +1,16 @@
 {
-  "name": "pi-decision-auditor",
-  "version": "1.0.0",
-  "description": "结对决策审计：捕获 AI 决策推理链到 docs/decisions/chain.md，常驻审计者只审决策链（推理有效性/完整性/链一致性/校准/正确性/忠实性），目标推导自对话日志，缺上下文时按需查询主会话",
+  "name": "pi-pair",
+  "version": "1.1.0",
+  "description": "结对决策审计（pair audit）：自动捕获 AI 决策推理链到 docs/decisions/chain.md，审计者常驻随任务增量被唤起，审决策链（推理/正确性/漂移），目标推导自对话日志，按需查询主会话",
   "license": "MIT",
   "author": "Nuctori",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Nuctori/pi-decision-auditor.git"
+    "url": "git+https://github.com/Nuctori/pi-pair.git"
   },
-  "homepage": "https://github.com/Nuctori/pi-decision-auditor",
+  "homepage": "https://github.com/Nuctori/pi-pair",
   "bugs": {
-    "url": "https://github.com/Nuctori/pi-decision-auditor/issues"
+    "url": "https://github.com/Nuctori/pi-pair/issues"
   },
   "keywords": ["pi-package", "decision-audit", "pair-programming", "audit", "decision-chain"],
   "type": "module",

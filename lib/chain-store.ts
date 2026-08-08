@@ -169,9 +169,24 @@ export interface AuditState {
 	lastAuditedId: string | null;
 	/** 是否有进行中的审计（防重入）。 */
 	inFlight: boolean;
+	/** convlog 已提取到的行号（审计者提取决策后推进）。0 = 从头。 */
+	convExtractedLine: number;
+	/** 距上次审计的轮数（minInterval 判断用）。 */
+	roundsSinceAudit: number;
+	/** 待审增量记账：已累积的 convlog 字符数。 */
+	pendingChars: number;
+	/** 上次审计时间（epoch ms）。 */
+	lastAuditAt: number;
 }
 
-const DEFAULT_STATE: AuditState = { lastAuditedId: null, inFlight: false };
+const DEFAULT_STATE: AuditState = {
+	lastAuditedId: null,
+	inFlight: false,
+	convExtractedLine: 0,
+	roundsSinceAudit: 0,
+	pendingChars: 0,
+	lastAuditAt: 0,
+};
 
 /** 审计状态文件路径：<cwd>/.pi/decision-auditor/state.json */
 export function auditStatePath(cwd: string): string {
@@ -187,6 +202,14 @@ export function readAuditState(cwd: string): AuditState {
 			lastAuditedId:
 				typeof obj.lastAuditedId === "string" ? obj.lastAuditedId : null,
 			inFlight: obj.inFlight === true,
+			convExtractedLine:
+				typeof obj.convExtractedLine === "number" ? obj.convExtractedLine : 0,
+			roundsSinceAudit:
+				typeof obj.roundsSinceAudit === "number" ? obj.roundsSinceAudit : 0,
+			pendingChars:
+				typeof obj.pendingChars === "number" ? obj.pendingChars : 0,
+			lastAuditAt:
+				typeof obj.lastAuditAt === "number" ? obj.lastAuditAt : 0,
 		};
 	} catch {
 		return { ...DEFAULT_STATE };
@@ -259,4 +282,117 @@ export function readConvTail(cwd: string, maxChars = 12000): string {
 	} catch {
 		return "（无对话日志）";
 	}
+}
+
+/** convlog 总行数（不含头注释），用于增量提取定位。 */
+export function convLogLineCount(cwd: string): number {
+	try {
+		const raw = fs.readFileSync(convlogPath(cwd), "utf-8");
+		const lines = raw.split(/\r?\n/);
+		// 跳过头部注释（# 和 <!-- --> 块）
+		let count = 0;
+		let inComment = false;
+		for (const line of lines) {
+			const t = line.trim();
+			if (inComment) {
+				if (t.includes("-->")) inComment = false;
+				continue;
+			}
+			if (t.startsWith("<!--")) {
+				inComment = true;
+				continue;
+			}
+			if (t.startsWith("## ") || t.startsWith("- ") || t.length === 0) continue;
+			if (t.startsWith("## 👤") || t.startsWith("## 🤖")) {
+				count++;
+				continue;
+			}
+			if (t) count++;
+		}
+		return count;
+	} catch {
+		return 0;
+	}
+}
+
+// ---- 待审增量记账（增量累积唤起）----
+// 每轮结束时扩展调用 accumulatePending 记账；达到阈值返回 true 触发审计。
+
+export interface AuditConfig {
+	/** 累积多少轮对话触发审计。 */
+	batchRounds: number;
+	/** 累积多少 convlog 字符触发审计。 */
+	batchChars: number;
+	/** 两次审计最小间隔（轮），防连续决策密集时频繁唤起。 */
+	minIntervalRounds: number;
+	/** 决策稀疏时的强制审计兜底（轮）。 */
+	maxBatchRounds: number;
+}
+
+export const DEFAULT_AUDIT_CONFIG: AuditConfig = {
+	batchRounds: 6,
+	batchChars: 8000,
+	minIntervalRounds: 2,
+	maxBatchRounds: 15,
+};
+
+/** 从环境变量覆盖配置（PI_PAIR_BATCH_ROUNDS 等）。 */
+export function resolveAuditConfig(env: Record<string, string | undefined> = process.env): AuditConfig {
+	const num = (k: string, d: number): number => {
+		const v = env[k];
+		if (!v) return d;
+		const n = Number(v);
+		return Number.isFinite(n) && n > 0 ? Math.round(n) : d;
+	};
+	return {
+		batchRounds: num("PI_PAIR_BATCH_ROUNDS", DEFAULT_AUDIT_CONFIG.batchRounds),
+		batchChars: num("PI_PAIR_BATCH_CHARS", DEFAULT_AUDIT_CONFIG.batchChars),
+		minIntervalRounds: num("PI_PAIR_MIN_INTERVAL", DEFAULT_AUDIT_CONFIG.minIntervalRounds),
+		maxBatchRounds: num("PI_PAIR_MAX_BATCH", DEFAULT_AUDIT_CONFIG.maxBatchRounds),
+	};
+}
+
+/**
+ * 每轮结束时记账：累计一轮的 convlog 增量。
+ * 返回 true 表示达到唤起阈值（应 spawn 审计）。
+ * 规则：
+ *  - 距上次审计 < minIntervalRounds → 只记账不唤起
+ *  - 累积轮数 ≥ batchRounds 或 字符 ≥ batchChars → 唤起
+ *  - 累积轮数 ≥ maxBatchRounds → 强制唤起（决策稀疏兜底）
+ */
+export function accumulatePending(cwd: string, roundChars: number): boolean {
+	const cfg = resolveAuditConfig();
+	const state = readAuditState(cwd);
+	if (state.inFlight) return false;
+
+	const roundsSinceAudit = state.roundsSinceAudit + 1;
+	const newState: AuditState = {
+		...state,
+		roundsSinceAudit,
+		pendingChars: state.pendingChars + roundChars,
+	};
+
+	// 距离上次审计不足 minInterval → 只记账不唤起
+	if (state.lastAuditAt !== 0 && roundsSinceAudit < cfg.minIntervalRounds) {
+		writeAuditState(cwd, newState);
+		return false;
+	}
+
+	const shouldAudit =
+		roundsSinceAudit >= cfg.batchRounds ||
+		newState.pendingChars >= cfg.batchChars ||
+		roundsSinceAudit >= cfg.maxBatchRounds;
+
+	if (shouldAudit) {
+		// 触发后清零累积（审计 spawn 时由扩展写 inFlight）
+		writeAuditState(cwd, {
+			...newState,
+			roundsSinceAudit: 0,
+			pendingChars: 0,
+		});
+	} else {
+		// 未达阈值：写盘累积，供下次判断
+		writeAuditState(cwd, newState);
+	}
+	return shouldAudit;
 }

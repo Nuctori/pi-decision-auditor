@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-// 结对决策审计（pi-decision-auditor）主扩展
-// 提供：decision_add / decision_list 工具、/pair-audit 命令、链状态轻量注入。
+// 结对决策审计（pi-pair）主扩展
+// 提供：decision_add / decision_list 工具、/pair-audit 命令、增量累积自动唤起、链状态轻量注入。
 
 import type {
 	ExtensionAPI,
@@ -8,10 +8,12 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
+	accumulatePending,
 	appendConv,
 	appendDecision,
 	auditStatePath,
 	chainPath,
+	convLogLineCount,
 	convlogPath,
 	entriesSinceLastAudit,
 	listEntries,
@@ -80,7 +82,7 @@ function makeRpc(pi: ExtensionAPI) {
 				requestId,
 				method,
 				params,
-				source: { extension: "pi-decision-auditor" },
+				source: { extension: "pi-pair" },
 			});
 		});
 	};
@@ -113,7 +115,7 @@ function waitForRpcReady(pi: ExtensionAPI, timeoutMs = 5000): Promise<void> {
 			version: RPC_VERSION,
 			requestId: `decision-auditor-ping-${Date.now()}`,
 			method: "ping",
-			source: { extension: "pi-decision-auditor" },
+			source: { extension: "pi-pair" },
 		});
 	});
 }
@@ -143,7 +145,7 @@ function extractText(content: unknown): string {
 
 /** 审计状态：正在跑的标志（进程内去重，避免同批新条目重复 spawn）。 */
 const inFlightAudits = new Map<string, { runId: string; startedAt: number }>();
-const AUDITOR_AGENT = "pi-decision-auditor.decision-auditor";
+const AUDITOR_AGENT = "pi-pair.decision-auditor";
 const IN_FLIGHT_TTL_MS = 5 * 60 * 1000; // 5 分钟：审计通常 1-2 分钟完成；超过视为异常允许重试
 
 /** cwd 是否有进行中的审计（含 TTL 过期清理）。 */
@@ -158,33 +160,45 @@ function hasInFlight(cwd: string): boolean {
 }
 
 /** 用 decision-auditor 审 1 条新决策的审计任务文本。 */
-function buildIncrementalAuditTask(
-	cwd: string,
-	entries: { id: string; summary: string }[],
-): string {
-	const range = entries.map((e) => e.id).join("~");
+function buildIncrementalAuditTask(cwd: string): string {
 	const lines: string[] = [];
 	lines.push(
-		"你是本会话的结对决策审计者（只读）。有新决策刚被记录，自动唤起你增量审计。",
+		"你是本会话的结对决策审计者。因对话增量达到阈值被自动唤起。你的职责分两步：先捕获，再审计。",
 	);
 	lines.push(`项目目录: ${cwd}`);
 	lines.push(`决策链: ${chainPath(cwd)}`);
 	lines.push(
-		`对话日志: ${convlogPath(cwd)}（只记用户提示与助手最终回复，供你推导任务目标）`,
+		`对话日志: ${convlogPath(cwd)}（只记用户提示与助手最终回复，供你推导目标与提取决策）`,
+	);
+	lines.push(`审计状态: ${auditStatePath(cwd)}（含 convExtractedLine 定位已提取位置）`);
+	lines.push("");
+	lines.push("【第一步：捕获决策（你的新增核心职责）】");
+	lines.push(
+		"1. 用 read 读对话日志，从 convExtractedLine 标记的行之后开始（状态文件里读）。",
 	);
 	lines.push(
-		`审计范围: 新决策 ${range}（用 read 读 docs/decisions/chain.md，只看这些条目及其 supersede 关系）`,
+		"2. 识别主 agent 实际做出的关键决策：方案取舍（选 A 弃 B）、架构/依赖/实现方式改动、采纳的用户要求、推翻之前决策。",
+	);
+	lines.push(
+		"3. 对每个识别出的决策，用 write 工具 **append 追加**到 docs/decisions/chain.md（格式：## D-XXX: 标题 [Accepted]，字段 Context/Decision/Rationale/Alternatives/Confidence/Date）。编号按链中现有最大 D-NNN+1。",
+	);
+	lines.push(
+		"4. 追加后更新 ${auditStatePath(cwd)} 里的 convExtractedLine 为本次读到的最后一行，并清空 pendingRounds/pendingChars。",
+	);
+	lines.push(
+		"5. 若对话日志增量里没有值得入链的决策，也仍推进 convExtractedLine（避免重复读）。",
 	);
 	lines.push("");
+	lines.push("【第二步：审计（对本次捕获 + 链中未审条目）】");
 	lines.push("按审计协议执行：");
 	lines.push(
-		"0. 先推导目标：用 read 读对话日志，从用户提示中推导任务目标（用户要什么、约束是什么）。主 agent 自述不可信，以对话记录为准。",
+		"0. 先推导目标：从对话日志的用户提示推导任务目标。主 agent 自述不可信，以对话记录为准。",
 	);
 	lines.push(
-		"0.5 再对照目标审漂移：新决策是否服务于推导出的目标？还是主 agent 在做目标之外的事？",
+		"0.5 对照目标审漂移：本次捕获的决策是否服务于目标？",
 	);
 	lines.push(
-		"0.7 独立核实：用 read/grep/find + 只读 bash（git log/diff、which、python -c import、npm ls 等）去仓库核实 Context 里每个可核实事实（文件/依赖/数字/用户原话）。禁止任何写命令（不 install/commit/rm/写文件）。不信任记录，事实不符 = 偏离 ✗。",
+		"0.7 独立核实：用 read/grep/find + 只读 bash 去仓库核实 Context 事实。不信任记录，事实不符 = 偏离 ✗。",
 	);
 	lines.push(
 		"1. 逐条审推理链（Context/Decision/Rationale/Alternatives/Confidence）；",
@@ -194,53 +208,52 @@ function buildIncrementalAuditTask(
 	);
 	lines.push("3. 发现链矛盾 → contact_supervisor(need_decision) 请求裁决；");
 	lines.push(
-		"4. 正确性：决策本身对吗——事实与仓库一致？收益现实？过度设计？方案技术可行？",
+		"4. 正确性：决策本身对吗——事实与仓库一致？收益现实？过度设计？",
 	);
 	lines.push("5. 输出逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 链健康度总评。");
-	lines.push("禁止修改代码和 docs/decisions/chain.md。");
 	lines.push("");
 	lines.push(
-		`收尾（必须做）：审计完成后，用 write 工具把 ${auditStatePath(cwd)} 里的 inFlight 改为 false（这是你唯一允许的写操作，作用是解除去重锁、允许下一次新决策唤起审计）。`,
+		"【收尾】用 write 工具把 ${auditStatePath(cwd)} 的 inFlight 改为 false，lastAuditedId 推进到链最新条目，lastAuditAt 置当前时间。",
 	);
+	lines.push("写权限仅限：append chain.md + 改 state.json。禁止修改其他任何文件。");
 	return lines.join("\n");
 }
 
 /**
- * 自动唤起：若有上次审计之后的新决策且无进行中审计，则 spawn decision-auditor 增量审计。
- * 返回是否触发。
+ * 自动唤起：基于 convlog 增量累积（accumulatePending），达到阈值时 spawn 审计者
+ * （审计者负责从 convlog 提取决策入链 + 审计）。返回是否触发。
  */
 async function maybeAutoAudit(
 	pi: ExtensionAPI,
 	rpc: ReturnType<typeof makeRpc>,
 	readyPromise: Promise<void>,
 	cwd: string,
+	roundChars: number,
 ): Promise<boolean> {
 	try {
-		const fresh = entriesSinceLastAudit(cwd);
-		if (fresh.length === 0) return false; // 无新决策，不唤起
+		// 增量累积记账：达到阈值返回 true
+		if (!accumulatePending(cwd, roundChars)) return false;
+
 		const state = readAuditState(cwd);
 		if (!state.inFlight && hasInFlight(cwd)) {
-			// 文件锁已释放（审计者收尾写回 inFlight:false）但内存锁还在 → 清内存锁重判
 			inFlightAudits.delete(cwd);
 		}
-		if (state.inFlight || hasInFlight(cwd)) return false; // 已有审计在跑（文件锁或内存 TTL）
+		if (state.inFlight || hasInFlight(cwd)) return false; // 已有审计在跑
 
 		inFlightAudits.set(cwd, { runId: "", startedAt: Date.now() });
 		try {
 			await readyPromise;
 			const result = await rpc<{ runId?: string; asyncId?: string }>("spawn", {
 				agent: AUDITOR_AGENT,
-				task: buildIncrementalAuditTask(cwd, fresh),
+				task: buildIncrementalAuditTask(cwd),
 				async: true,
 				context: "fresh",
 				timeoutMs: 900_000,
 			});
-			// 记录 runId（尽力而为；async-complete 事件匹配不上也不影响，TTL 兜底）
 			const runId = result?.runId ?? result?.asyncId ?? "";
 			inFlightAudits.set(cwd, { runId, startedAt: Date.now() });
-			// 乐观推进审计状态：spawn 成功即视为这批已纳入审计范围（审计报告异步返回）
-			const latest = fresh[fresh.length - 1].id;
-			writeAuditState(cwd, { lastAuditedId: latest, inFlight: true });
+			// 审计进行中：置 inFlight（审计者收尾会改 false + 推进 lastAuditedId）
+			writeAuditState(cwd, { ...readAuditState(cwd), inFlight: true, lastAuditAt: Date.now() });
 			return true;
 		} catch {
 			inFlightAudits.delete(cwd);
@@ -352,8 +365,8 @@ export default function (pi: ExtensionAPI): void {
 				confidence: params.confidence ?? "medium",
 				supersedes: params.supersedes,
 			});
-			// 自动唤起：新决策落地后立即增量审计（不阻塞本工具返回）
-			void maybeAutoAudit(pi, rpc, readyPromise, ctx.cwd);
+			// 自动唤起：新决策落地后立即增量审计（手动 decision_add = 关键决策信号，强制触发）
+			void maybeAutoAudit(pi, rpc, readyPromise, ctx.cwd, Number.MAX_SAFE_INTEGER);
 			return {
 				content: [
 					{
@@ -427,7 +440,7 @@ export default function (pi: ExtensionAPI): void {
 				const result = await rpc<{ runId?: string; asyncId?: string }>(
 					"spawn",
 					{
-						agent: "pi-decision-auditor.decision-auditor",
+						agent: "pi-pair.decision-auditor",
 						task,
 						async: true,
 						context: "fresh",
@@ -442,7 +455,7 @@ export default function (pi: ExtensionAPI): void {
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
 				ctx.ui.notify(
-					`无法启动审计: ${message}\n\n请改用 subagent 工具直接调用: subagent({ agent: "pi-decision-auditor.decision-auditor", task: ${JSON.stringify(task)}, async: true, context: "fresh" })`,
+					`无法启动审计: ${message}\n\n请改用 subagent 工具直接调用: subagent({ agent: "pi-pair.decision-auditor", task: ${JSON.stringify(task)}, async: true, context: "fresh" })`,
 					"error",
 				);
 			}
@@ -451,14 +464,24 @@ export default function (pi: ExtensionAPI): void {
 
 	// ---- 自动唤起：每轮结束时若有新决策且未审计，自动增量审计（里程碑）----
 	pi.on("agent_settled", async (event, ctx) => {
-		void maybeAutoAudit(pi, rpc, readyPromise, ctx.cwd);
+		// 计算本轮 convlog 增量（上次提取位置之后新增的行数），驱动增量累积
+		try {
+			const state = readAuditState(ctx.cwd);
+			const totalLines = convLogLineCount(ctx.cwd);
+			const newLines = Math.max(0, totalLines - state.convExtractedLine);
+			// 近似字符增量：新行数 × 平均行长（估 100 字符/行，防止 convlog 未写时不误触）
+			const roundChars = newLines > 0 ? newLines * 100 : 0;
+			void maybeAutoAudit(pi, rpc, readyPromise, ctx.cwd, roundChars);
+		} catch {
+			void maybeAutoAudit(pi, rpc, readyPromise, ctx.cwd, 1000);
+		}
 		// 兜底：若文件锁仍为 true 但内存无对应 in-flight（审计者/主会话都没写回），释放锁
 		try {
 			const state = readAuditState(ctx.cwd);
 			if (state.inFlight && !hasInFlight(ctx.cwd)) {
 				// 内存锁已过期/不存在但文件锁残留——审计大概率已完成，释放
 				writeAuditState(ctx.cwd, {
-					lastAuditedId: state.lastAuditedId,
+					...state,
 					inFlight: false,
 				});
 			}

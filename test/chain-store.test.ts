@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	accumulatePending,
 	appendDecision,
 	appendConv,
 	auditStatePath,
@@ -20,6 +21,7 @@ import {
 	readAuditState,
 	readConvTail,
 	readRaw,
+	resolveAuditConfig,
 	writeAuditState,
 } from "../lib/chain-store.js";
 
@@ -152,7 +154,7 @@ test("审计状态读写与 entriesSinceLastAudit", () => {
 	assert.equal(entriesSinceLastAudit(dir).length, 3);
 
 	// 审到 D-002 → 只返回 D-003
-	writeAuditState(dir, { lastAuditedId: "D-002", inFlight: false });
+	writeAuditState(dir, { ...readAuditState(dir), lastAuditedId: "D-002", inFlight: false });
 	const fresh = entriesSinceLastAudit(dir);
 	assert.equal(fresh.length, 1);
 	assert.equal(fresh[0].id, "D-003");
@@ -188,4 +190,53 @@ test("坏状态文件容错", () => {
 	const state = readAuditState(dir);
 	assert.equal(state.lastAuditedId, null);
 	assert.equal(state.inFlight, false);
+	assert.equal(state.convExtractedLine, 0);
+	assert.equal(state.roundsSinceAudit, 0);
+});
+
+test("accumulatePending：batchRounds 触发", () => {
+	const dir = tmpDir();
+	// 第一次调用（lastAuditAt=0）也应触发（首次尽快审）
+	// 但默认 batchRounds=6：前 5 次只记账，第 6 次触发
+	const results: boolean[] = [];
+	for (let i = 0; i < 5; i++) results.push(accumulatePending(dir, 100));
+	assert.deepEqual(results, [false, false, false, false, false]);
+	assert.equal(accumulatePending(dir, 100), true); // 第 6 轮触发
+
+	// 触发后清零：下一轮重新累积
+	assert.equal(accumulatePending(dir, 100), false);
+	const state = readAuditState(dir);
+	assert.equal(state.roundsSinceAudit, 1);
+	assert.equal(state.pendingChars, 100);
+});
+
+test("accumulatePending：batchChars 触发", () => {
+	const dir = tmpDir();
+	// 每轮 2000 字符，默认 batchChars=8000 → 第 4 轮触发
+	const results: boolean[] = [];
+	for (let i = 0; i < 3; i++) results.push(accumulatePending(dir, 2000));
+	assert.deepEqual(results, [false, false, false]);
+	assert.equal(accumulatePending(dir, 2000), true); // 累积 8000 → 触发
+});
+
+test("accumulatePending：inFlight 不累积", () => {
+	const dir = tmpDir();
+	writeAuditState(dir, { ...readAuditState(dir), inFlight: true });
+	assert.equal(accumulatePending(dir, 5000), false);
+	// inFlight 期间不累积
+	const state = readAuditState(dir);
+	assert.equal(state.pendingChars, 0);
+});
+
+test("resolveAuditConfig 环境变量覆盖", () => {
+	const cfg = resolveAuditConfig({
+		PI_PAIR_BATCH_ROUNDS: "3",
+		PI_PAIR_BATCH_CHARS: "5000",
+		PI_PAIR_MIN_INTERVAL: "1",
+		PI_PAIR_MAX_BATCH: "10",
+	} as Record<string, string>);
+	assert.equal(cfg.batchRounds, 3);
+	assert.equal(cfg.batchChars, 5000);
+	assert.equal(cfg.minIntervalRounds, 1);
+	assert.equal(cfg.maxBatchRounds, 10);
 });

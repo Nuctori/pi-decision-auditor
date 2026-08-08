@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.1.0] - 2026-08-08
+
+改名 **pi-pair**（原 pi-decision-auditor）+ 捕获机制重做（核心修复）。
+
+### 核心修复：捕获不再依赖主 agent 自觉
+
+**问题**：v1.0 的 `decision_add` 依赖主 agent 主动调用——它不调，链条在第一步就断（实际使用中零调用）。这违背了"主 agent 不可靠"的前提（不可靠的主 agent 也不会可靠地记录决策）。
+
+**修复**：捕获责任转移给审计者。
+
+- **审计者从 convlog 提取决策入链**：被唤起时第一步读对话日志增量（`convExtractedLine` 定位），识别主 agent 实际做的关键决策（方案取舍/架构改动/采纳的用户要求），按四元组 append-only 写入 `chain.md`——不靠主 agent 调用任何工具
+- **增量累积唤起**（参数由 205 个历史会话数据校准）：每轮结束零成本记账 convlog 增量，达到阈值才 spawn 审计者，审计变批量、异步、跟随主任务节奏
+  - `batchRounds: 6`（累积 5 决策的 p90=9 轮、p50=4 轮 → 6 轮折中）
+  - `batchChars: 8000`（累积 3-5 决策字符 p50≈7.7k-9.6k）
+  - `minIntervalRounds: 2`（防决策密集时频繁唤起，间距 p50=1）
+  - `maxBatchRounds: 15`（决策稀疏兜底，间距 max=15）
+  - 决策信号词即时触发**弃用**（54% 轮含信号词 = 开了等于每轮唤起）
+- **手动 `decision_add` 仍即时触发**（主 agent 主动记录 = 强信号）
+- 全部参数可用环境变量覆盖：`PI_PAIR_BATCH_ROUNDS` / `PI_PAIR_BATCH_CHARS` / `PI_PAIR_MIN_INTERVAL` / `PI_PAIR_MAX_BATCH`
+
+### 实测（本地 + CI 免费模型）
+
+- 主 agent 三步决策（Redis → 本地缓存 supersede → pytest），审计者**自动提取 3 条入链**（四元组完整、supersede 关系正确）并审出全部一致 ✓
+- 11 个单测通过（含增量累积 4 条路径）
+- CI 用 opencode CLI 免费模型（免 key、免登录）跑通 E2E
+
+### 其他
+
+- 包名/仓库名/agent runtime 名改为 `pi-pair` / `pi-pair.decision-auditor`
+
 ## [1.0.0] - 2026-08-08
 
 首个正式发布。
