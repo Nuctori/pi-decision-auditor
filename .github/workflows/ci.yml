@@ -73,14 +73,12 @@ jobs:
             2>&1 | tee /tmp/e2e/out.txt || true
           if grep -q "GoUsageLimitError" /tmp/e2e/out.txt; then
             echo "SKIP: opencode-go weekly free quota exhausted"
-            echo "SKIPPED" > /tmp/e2e/skipped.txt
             exit 0
           fi
           grep -q "Error" /tmp/e2e/out.txt && exit 1 || true
       - name: Verify chain and audit state
-        if: ${{ !cancelled() }}
         run: |
-          if [ -f /tmp/e2e/skipped.txt ]; then
+          if grep -q "GoUsageLimitError" /tmp/e2e/out.txt; then
             echo "E2E skipped: opencode-go free quota exhausted"
             exit 0
           fi
