@@ -12,6 +12,7 @@ import {
 	accumulateRound,
 	appendDecision,
 	appendConv,
+	appendProcessSignal,
 	auditStatePath,
 	chainPath,
 	checkAuditDue,
@@ -21,8 +22,10 @@ import {
 	listEntries,
 	needsSignoff,
 	parseChain,
+	processPath,
 	readAuditState,
 	readConvTail,
+	readProcess,
 	readRaw,
 	recordSignature,
 	resetForSessionStart,
@@ -313,17 +316,108 @@ test("接线守卫：L0 触发链在扩展里接通（防断线回归）", () =>
 		"utf-8",
 	);
 	// message_end 记账
-	assert.ok(src.includes('accumulateRound(resolveProjectRoot(ctx.cwd), text.length)'),
-		"message_end 必须调 accumulateRound 记账");
+	assert.ok(
+		src.includes("accumulateRound(resolveProjectRoot(ctx.cwd), text.length)"),
+		"message_end 必须调 accumulateRound 记账",
+	);
 	// agent_settled 判断+唤起
-	assert.ok(src.includes('pi.on("agent_settled"'), "agent_settled handler 必须存在");
-	assert.ok(src.includes("checkAuditDue(root)"), "agent_settled 必须调 checkAuditDue");
-	assert.ok(src.includes("spawnL0Audit(pi, rpc, readyPromise, root)"), "agent_settled 必须 spawn L0");
+	assert.ok(
+		src.includes('pi.on("agent_settled"'),
+		"agent_settled handler 必须存在",
+	);
+	assert.ok(
+		src.includes("checkAuditDue(root)"),
+		"agent_settled 必须调 checkAuditDue",
+	);
+	assert.ok(
+		src.includes("spawnL0Audit(pi, rpc, readyPromise, root)"),
+		"agent_settled 必须 spawn L0",
+	);
 	// L1 任务不碰记账字段
-	assert.ok(src.includes("不要清 roundsSinceAudit/pendingChars"), "L1 收尾不得清 L0 记账");
+	assert.ok(
+		src.includes("不要清 roundsSinceAudit/pendingChars"),
+		"L1 收尾不得清 L0 记账",
+	);
 	// decision_add 走 L0
-	assert.ok(src.includes('checkAuditDue(resolveProjectRoot(ctx.cwd), true)'),
-		"decision_add 必须 force 触发 L0");
+	assert.ok(
+		src.includes("checkAuditDue(resolveProjectRoot(ctx.cwd), true)"),
+		"decision_add 必须 force 触发 L0",
+	);
+	// process 记录接线（意图信号，受 PI_PAIR_PROCESS_LOG 开关控制）
+	assert.ok(
+		src.includes("appendProcessSignal(resolveProjectRoot(ctx.cwd), text)"),
+		"message_end 必须调 appendProcessSignal 记意图信号",
+	);
+	assert.ok(
+		src.includes('process.env.PI_PAIR_PROCESS_LOG !== "0"'),
+		"process 记录必须受 PI_PAIR_PROCESS_LOG 开关控制（CI 跑分基线）",
+	);
+	// L1 审计任务必须引导读过程日志
+	assert.ok(
+		src.includes("processPath(cwd)"),
+		"审计任务必须引用过程日志路径",
+	);
+	// 审计阻塞时长测量
+	assert.ok(
+		src.includes("lastAuditDurationMs"),
+		"agent_end 必须记录审计阻塞时长（CI 跑分指标）",
+	);
+});
+
+test("appendProcessSignal：信号词命中才记录", () => {
+	const dir = tmpDir();
+	// 命中：含决策信号词
+	assert.equal(appendProcessSignal(dir, "我决定采用 Redis 做读缓存"), true);
+	assert.equal(appendProcessSignal(dir, "方案是引入本地缓存"), true);
+	// 未命中：普通陈述
+	assert.equal(appendProcessSignal(dir, "我读完了文件，继续下一步"), false);
+
+	const proc = readProcess(dir);
+	assert.ok(proc.includes("决定采用 Redis"), "命中信号词必须记录");
+	assert.ok(proc.includes("方案是引入本地缓存"));
+	assert.ok(!proc.includes("读完了文件"), "未命中不得记录");
+	// process.md 文件确实存在
+	assert.ok(fs.existsSync(processPath(dir)));
+});
+
+test("appendProcessSignal：200 字符截断", () => {
+	const dir = tmpDir();
+	const long = "我决定采用方案：" + "很长的内容".repeat(60); // > 200 字符
+	appendProcessSignal(dir, long);
+	const proc = readProcess(dir);
+	const line = proc.split("\n").find((l) => l.startsWith("- 🤔")) ?? "";
+	assert.ok(line.length <= 210, `单条应 ≤200 字符+后缀，实际 ${line.length}`);
+	assert.ok(line.endsWith("…"), "超长应截断并加省略号");
+});
+
+test("appendProcessSignal：滚动截断（超 100 条保留最近 50）", () => {
+	const dir = tmpDir();
+	for (let i = 0; i < 110; i++) {
+		appendProcessSignal(dir, `我决定第 ${i} 个方案`);
+	}
+	const raw = fs.readFileSync(processPath(dir), "utf-8");
+	const body = raw.split("\n").filter((l) => l.startsWith("- 🤔"));
+	assert.ok(body.length <= 100, `滚动截断后应 ≤100 条，实际 ${body.length}`);
+	// 保留的是最近条目（第 101 次触发截断删掉最早的）
+	assert.ok(raw.includes("第 109 个方案"));
+	assert.ok(!raw.includes("第 0 个方案"), "最早的应被截断");
+});
+
+test("lastAuditDurationMs：读写与消毒", () => {
+	const dir = tmpDir();
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		lastAuditDurationMs: 12345,
+	});
+	assert.equal(readAuditState(dir).lastAuditDurationMs, 12345);
+	// 坏值消毒
+	fs.mkdirSync(path.dirname(auditStatePath(dir)), { recursive: true });
+	fs.writeFileSync(
+		auditStatePath(dir),
+		'{"lastAuditDurationMs": "bad"}',
+		"utf-8",
+	);
+	assert.equal(readAuditState(dir).lastAuditDurationMs, 0);
 });
 
 test("recordSignature 字段级写入", () => {

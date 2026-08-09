@@ -121,6 +121,7 @@ L2 — 交付审查（用户说"提交/发布/merge/部署"等）
 | `PI_PAIR_MAX_BATCH` | 15 | 决策稀疏时强制审计兜底（轮） |
 | `PI_DECISION_AUDITOR_INJECT=off` | 开 | 关闭链状态注入（历史遗留，默认可忽略） |
 | `PI_PAIR_CHAIN_PUBLIC=1` | 关 | 决策链写 `docs/decisions/chain.md`（团队可见）；默认写 `.pi/decision-auditor/chain.md`（私有） |
+| `PI_PAIR_PROCESS_LOG=0` | 开 | 关闭意图信号过程日志（CI 跑分基线）；默认记录高信号决策意图（≤200 字符/条，滚动截断） |
 
 ---
 

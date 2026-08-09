@@ -243,6 +243,8 @@ export interface AuditState {
 	blockedStreak: number;
 	/** L0 链级复审发现的问题（跨轮审链 findings），before_agent_start 注入主 agent。 */
 	chainFindings: string[];
+	/** 最近一次审计的阻塞时长（ms，agent_end 从触发到签名），CI 跑分用。 */
+	lastAuditDurationMs: number;
 	/** 常驻审计者的 runId（跨轮 resume 用）。null = 首次 spawn。 */
 	auditorRunId: string | null;
 }
@@ -258,6 +260,7 @@ const DEFAULT_STATE: AuditState = {
 	signatureConvLine: 0,
 	blockedStreak: 0,
 	chainFindings: [],
+	lastAuditDurationMs: 0,
 	auditorRunId: null,
 };
 
@@ -304,10 +307,13 @@ export function readAuditState(cwd: string): AuditState {
 				typeof obj.signatureConvLine === "number" ? obj.signatureConvLine : 0,
 			blockedStreak:
 				typeof obj.blockedStreak === "number" ? obj.blockedStreak : 0,
-			chainFindings:
-				Array.isArray(obj.chainFindings)
-					? obj.chainFindings.filter((x) => typeof x === "string")
-					: [],
+			chainFindings: Array.isArray(obj.chainFindings)
+				? obj.chainFindings.filter((x) => typeof x === "string")
+				: [],
+			lastAuditDurationMs:
+				typeof obj.lastAuditDurationMs === "number"
+					? obj.lastAuditDurationMs
+					: 0,
 			auditorRunId:
 				typeof obj.auditorRunId === "string" ? obj.auditorRunId : null,
 		};
@@ -439,6 +445,72 @@ export function readConvTail(cwd: string, maxChars = 12000): string {
 		);
 	} catch {
 		return "（无对话日志）";
+	}
+}
+
+/** 过程日志（process.md）：只记主 agent 的意图/决策信号（高信号过滤），不记工具调用流水。
+ *  审计者读它对照"意图轨迹"审产物（不反推），降低 agent_end 阻塞时间。
+ *  信号词命中才记、单条 ≤200 字符、超 100 条滚动截断——体积小，成本可忽略。 */
+const PROCESS_HEADER = `# Process Log
+
+<!--
+  意图轨迹：只记 assistant 回复中命中决策信号词的高信号摘要。
+  不记工具调用/中间产物/调试输出（避免膨胀）。审计者对照它审产物。
+-->
+`;
+
+/** 决策信号词：命中才记录（强信号，避免每轮都记）。 */
+const PROCESS_SIGNAL_RE =
+	/决定|采用|放弃|选择|方案|架构|重构|改为|引入|移除|迁移|升级|降级|替代|否决|supersede|不采用|采纳/i;
+
+/** 过程日志路径：<cwd>/.pi/decision-auditor/process.md */
+export function processPath(cwd: string): string {
+	return path.join(cwd, ".pi", "decision-auditor", "process.md");
+}
+
+/**
+ * 追加一条意图信号（高信号过滤）：assistant 回复命中决策信号词才记录。
+ * 单条 ≤200 字符截断；文件超 100 条滚动截断（保留最近 50 条）。
+ * 返回是否记录了。
+ */
+export function appendProcessSignal(cwd: string, text: string): boolean {
+	if (!PROCESS_SIGNAL_RE.test(text)) return false;
+	const clean = text.replace(/\r?\n/g, " ").trim();
+	if (!clean) return false;
+	const clipped =
+		clean.length > 200 ? clean.slice(0, 200) + "…" : clean;
+
+	const file = processPath(cwd);
+	const dir = path.dirname(file);
+	fs.mkdirSync(dir, { recursive: true });
+	if (!fs.existsSync(file)) fs.writeFileSync(file, PROCESS_HEADER, "utf-8");
+	fs.appendFileSync(file, `\n- 🤔 ${clipped}\n`, "utf-8");
+
+	// 滚动截断：正文行（非注释）超 100 条 → 保留最近 50 条 + 头注释
+	try {
+		const raw = fs.readFileSync(file, "utf-8");
+		const lines = raw.split(/\r?\n/);
+		const body = lines.filter((l) => l.startsWith("- 🤔"));
+		if (body.length > 100) {
+			const keep = body.slice(-50);
+			fs.writeFileSync(file, PROCESS_HEADER + "\n" + keep.join("\n") + "\n", "utf-8");
+		}
+	} catch {
+		/* noop */
+	}
+	return true;
+}
+
+/** 过程日志全文（供审计者读意图轨迹；文件小，直接全读）。 */
+export function readProcess(cwd: string, maxChars = 8000): string {
+	try {
+		const raw = fs.readFileSync(processPath(cwd), "utf-8");
+		if (raw.length <= maxChars) return raw;
+		return (
+			raw.slice(0, 200) + "\n\n<!-- 中间省略 -->\n\n" + raw.slice(-maxChars)
+		);
+	} catch {
+		return "（无过程日志）";
 	}
 }
 

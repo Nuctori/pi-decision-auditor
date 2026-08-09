@@ -11,6 +11,7 @@ import {
 	accumulateRound,
 	appendConv,
 	appendDecision,
+	appendProcessSignal,
 	auditStatePath,
 	chainPath,
 	checkAuditDue,
@@ -20,7 +21,9 @@ import {
 	listEntries,
 	needsSignoff,
 	parseChain,
+	processPath,
 	readAuditState,
+	readProcess,
 	readRaw,
 	recordSignature,
 	renderEntry,
@@ -188,9 +191,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 	lines.push(
 		`对话日志: ${convlogPath(cwd)}（只记用户提示与助手最终回复，供你推导目标）`,
 	);
-	lines.push(
-		`审计状态: ${auditStatePath(cwd)}（含签名状态与 blockedStreak）`,
-	);
+	lines.push(`审计状态: ${auditStatePath(cwd)}（含签名状态与 blockedStreak）`);
 	lines.push(
 		"【路径检查】若上述决策链/状态文件不存在：用 ls 检查 cwd 是否仓库根（有 src/ Cargo.toml 等），不是则定位真实项目根再审计。",
 	);
@@ -200,7 +201,10 @@ function buildIncrementalAuditTask(cwd: string): string {
 		"1. 用 read 读对话日志末尾（convlog 最后几条），从用户原话推导本轮任务目标（主 agent 自述不可信）。",
 	);
 	lines.push(
-		"2. 读决策链已有条目（chainPath 下的 chain.md），找与本轮相关的最近决策作为对照基准。",
+		`2. 用 read 读过程日志（${processPath(cwd)}）——主 agent 的意图轨迹（决策信号摘要），对照它理解‘为什么这么做’，审产物时核对产物是否偏离了过程中表达的意图。`,
+	);
+	lines.push(
+		"3. 读决策链已有条目（chainPath 下的 chain.md），找与本轮相关的最近决策作为对照基准。",
 	);
 	lines.push("");
 	lines.push("【第二步：审计本轮产物（核心，对抗式）】");
@@ -376,9 +380,7 @@ function buildChainAuditTask(cwd: string): string {
 	);
 	lines.push(`项目目录: ${cwd}`);
 	lines.push(`决策链: ${chainPath(cwd)}`);
-	lines.push(
-		`对话日志: ${convlogPath(cwd)}（只记用户提示与助手最终回复）`,
-	);
+	lines.push(`对话日志: ${convlogPath(cwd)}（只记用户提示与助手最终回复）`);
 	lines.push(
 		`审计状态: ${auditStatePath(cwd)}（含 convExtractedLine 定位已提取位置）`,
 	);
@@ -402,9 +404,7 @@ function buildChainAuditTask(cwd: string): string {
 	lines.push(
 		"【收尾】用 write 更新 state.json：inFlight=false，lastAuditedId 推进，lastAuditAt 置当前；发现链级问题 → chainFindings=[...具体可操作问题，主 agent 下轮处理]；无问题 → chainFindings=[]。不签名（signature 不动，那是 L1 的）。不要清 roundsSinceAudit/pendingChars（扩展在触发时已清）。",
 	);
-	lines.push(
-		"写权限仅限：append chain.md + 改 state.json。禁止修改其他文件。",
-	);
+	lines.push("写权限仅限：append chain.md + 改 state.json。禁止修改其他文件。");
 	return lines.join("\n");
 }
 
@@ -628,12 +628,7 @@ export default function (pi: ExtensionAPI): void {
 			});
 			// 自动唤起：新决策落地后立即链维护审计（手动 decision_add = 关键决策信号，force 跳过节流）
 			if (checkAuditDue(resolveProjectRoot(ctx.cwd), true)) {
-				void spawnL0Audit(
-					pi,
-					rpc,
-					readyPromise,
-					resolveProjectRoot(ctx.cwd),
-				);
+				void spawnL0Audit(pi, rpc, readyPromise, resolveProjectRoot(ctx.cwd));
 			}
 			return {
 				content: [
@@ -787,6 +782,18 @@ export default function (pi: ExtensionAPI): void {
 		}
 	});
 
+/** 记录审计阻塞时长（agent_end 从触发到签名，CI 跑分用）。 */
+function recordAuditDuration(cwd: string, t0: number): void {
+	try {
+		writeAuditState(cwd, {
+			...readAuditState(cwd),
+			lastAuditDurationMs: Date.now() - t0,
+		});
+	} catch {
+		/* noop */
+	}
+}
+
 	pi.on("agent_end", async (event, ctx) => {
 		try {
 			const state = readAuditState(resolveProjectRoot(ctx.cwd));
@@ -797,6 +804,8 @@ export default function (pi: ExtensionAPI): void {
 				newLines > 0 ||
 				entriesSinceLastAudit(resolveProjectRoot(ctx.cwd)).length > 0;
 			if (!hasPending) return; // 本轮无工作，无需审计
+
+			const t0 = Date.now(); // 审计阻塞计时起点
 
 			// 已有审计在跑（inFlight）→ 等待它完成；否则复用常驻审计者 或 首次 spawn
 			if (!state.inFlight && !hasInFlight(resolveProjectRoot(ctx.cwd))) {
@@ -859,9 +868,11 @@ export default function (pi: ExtensionAPI): void {
 
 			// 【阻塞等待】审计完成（Pi awaits handler，等待生效）——降低阻塞：只审本轮增量 + 120s 上限
 			const sig = await waitForAuditCompletion(resolveProjectRoot(ctx.cwd));
+			recordAuditDuration(resolveProjectRoot(ctx.cwd), t0);
 			if (sig === null) {
 				// 超时：协商中止——steer 通知审计者快速反馈已发现的问题，收尾窗口内采纳其结论
 				const settled = await negotiateStop(rpc, resolveProjectRoot(ctx.cwd));
+				recordAuditDuration(resolveProjectRoot(ctx.cwd), t0); // 协商时长计入阻塞
 				if (settled) {
 					// 协商窗口内审计者已签名 → 采纳结论（passed=门禁通过；blocked=快速确认修复）
 					const s = readAuditState(resolveProjectRoot(ctx.cwd));
@@ -959,6 +970,10 @@ export default function (pi: ExtensionAPI): void {
 					appendConv(resolveProjectRoot(ctx.cwd), "assistant", text);
 					// L0 记账：每轮累计 convlog 增量（达到阈值后 agent_settled 触发链维护审计）
 					accumulateRound(resolveProjectRoot(ctx.cwd), text.length);
+					// 意图信号记录（高信号过滤，≤200 字符；PI_PAIR_PROCESS_LOG=0 关闭——CI 跑分基线用）
+					if (process.env.PI_PAIR_PROCESS_LOG !== "0") {
+						appendProcessSignal(resolveProjectRoot(ctx.cwd), text);
+					}
 				}
 			}
 		} catch {

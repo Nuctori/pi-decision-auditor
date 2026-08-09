@@ -123,6 +123,7 @@ Window rules: the auditor runs only inside the `agent_end` blocking window. It m
 | `PI_PAIR_MAX_BATCH` | 15 | forced-audit fallback when decisions are sparse |
 | `PI_DECISION_AUDITOR_INJECT=off` | on | disable chain-status injection (legacy, ignore) |
 | `PI_PAIR_CHAIN_PUBLIC=1` | off | write chain to `docs/decisions/chain.md` (team-visible); default is `.pi/decision-auditor/chain.md` (private) |
+| `PI_PAIR_PROCESS_LOG=0` | on | disable intent-signal process log (CI bench baseline); default records high-signal decision intents |
 
 ---
 

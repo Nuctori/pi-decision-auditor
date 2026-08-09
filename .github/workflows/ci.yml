@@ -182,3 +182,35 @@ jobs:
           grep -q '"blockedStreak": [0-9]' "$STATE" \
             && echo "PASS: blockedStreak tracking present" \
             || { echo "WARN: blockedStreak field missing"; exit 1; }
+      - name: Bench - audit blocking time (baseline vs process-log)
+        run: |
+          # 跑分：同代码库两次跑（PI_PAIR_PROCESS_LOG=0 基线 vs =1 方案），
+          # 提取 lastAuditDurationMs 对比——验证过程日志是否减少 agent_end 阻塞。
+          # 每次跑前清 .pi（隔离状态），跑后立即读最新 state。单次采样有模型噪声，
+          # 结论看趋势（快/持平/慢），不作精确断言。
+          run_bench() {
+            local label="$1" flag="$2"
+            local dir="$GITHUB_WORKSPACE/bench-$label"
+            mkdir -p "$dir" && cd "$dir"
+            echo '{}' > package.json
+            echo '写一个 helper.py 文件，包含 double(x) 返回 x*2。只做这一件事。' \
+              > prompt.txt
+            PI_PAIR_PROCESS_LOG="$flag" pi -p "$(cat prompt.txt)" \
+              --provider opencode-cli --model opencode/deepseek-v4-flash-free \
+              2>&1 | tail -2 || true
+            local state
+            state=$(find "$GITHUB_WORKSPACE" -name state.json -path "*.pi*" \
+              2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+            local dur sig
+            dur=$(grep -o '"lastAuditDurationMs": [0-9]*' "$state" \
+              | head -1 | grep -o '[0-9]*')
+            sig=$(grep -o '"status": "[a-z-]*"' "$state" | tail -1 \
+              | cut -d'"' -f4)
+            echo "$label: audit_duration=${dur:-NA}ms signature=$sig"
+          }
+          # 跑前清一次（e2e/e2e2 残留状态不干扰 bench）
+          rm -rf "$GITHUB_WORKSPACE/.pi"
+          echo "=== bench (single-sample, model noise expected) ==="
+          run_bench baseline 0
+          rm -rf "$GITHUB_WORKSPACE/.pi"
+          run_bench process 1
