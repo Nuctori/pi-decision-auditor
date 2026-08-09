@@ -338,7 +338,10 @@ function buildAuditTask(cwd: string, opts: AuditOptions): string {
 }
 
 /** L2 交付审查：并行 fanout 多个 fresh reviewer 做产物级深度审查（交付前一次）。 */
-const DELIVERY_ANGLES: Array<{ name: string; prompt: (cwd: string) => string }> = [
+const DELIVERY_ANGLES: Array<{
+	name: string;
+	prompt: (cwd: string) => string;
+}> = [
 	{
 		name: "正确性",
 		prompt: (cwd) =>
