@@ -183,6 +183,9 @@ function buildIncrementalAuditTask(cwd: string): string {
 	lines.push(
 		`审计状态: ${auditStatePath(cwd)}（含 convExtractedLine 定位已提取位置）`,
 	);
+	lines.push(
+		"【路径检查】若上述决策链/状态文件不存在：先用 ls 检查项目目录是否真的是仓库根（有 src/ Cargo.toml 等）。若 cwd 不是项目根（可能只含 .pi 等），用 ls 在常见位置（父目录/当前目录）定位真实项目根，把该根目录下 docs/decisions/chain.md 作为审计目标，并据此推导正确的状态文件路径。禁止把决策写进非项目目录。",
+	);
 	lines.push("");
 	lines.push("【第一步：捕获决策（你的新增核心职责）】");
 	lines.push(
@@ -295,6 +298,9 @@ function buildAuditTask(cwd: string, opts: AuditOptions): string {
 	lines.push(`决策链: ${chainPath(cwd)}`);
 	lines.push(
 		`对话日志: ${convlogPath(cwd)}（只记用户提示与助手最终回复，供你推导任务目标）`,
+	);
+	lines.push(
+		"【路径检查】若上述决策链不存在：用 ls 检查 cwd 是否为仓库根（有 src/ Cargo.toml 等）；不是则定位真实项目根，审该根下 docs/decisions/chain.md。",
 	);
 	if (opts.onlyFrom) {
 		lines.push(`审计范围: 自 ${opts.onlyFrom} 起的新增决策（含该条）`);
@@ -610,20 +616,47 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	// ---- 自动唤起：每轮结束时若有新决策且未审计，自动增量审计（里程碑）----
-	pi.on("agent_settled", async (event, ctx) => {
-		// 计算本轮 convlog 增量（上次提取位置之后新增的行数），驱动增量累积
+	// ---- 预启动审计：turn_start 时 spawn（并行跑，预算 = 回复时长）----
+	pi.on("turn_start", (event, ctx) => {
+		// 本轮是否有实际工作：convlog 有新增 or 决策链有新条目
 		try {
 			const state = readAuditState(ctx.cwd);
 			const totalLines = convLogLineCount(ctx.cwd);
 			const newLines = Math.max(0, totalLines - state.convExtractedLine);
-			// 近似字符增量：新行数 × 平均行长（估 100 字符/行，防止 convlog 未写时不误触）
-			const roundChars = newLines > 0 ? newLines * 100 : 0;
-			void maybeAutoAudit(pi, rpc, readyPromise, ctx.cwd, roundChars);
+			if (newLines <= 0 && state.lastAuditedId === null) {
+				// 无新对话且从未审计：首次会话可能无 convlog，尝试预启动一次
+				void maybeAutoAudit(pi, rpc, readyPromise, ctx.cwd, 1, false);
+				return;
+			}
+			if (newLines > 0) {
+				// 有新增对话：预启动审计（force=false 走增量累积，但这里直接 spawn 预算审计）
+				void maybeAutoAudit(pi, rpc, readyPromise, ctx.cwd, newLines * 100, false);
+			}
 		} catch {
-			void maybeAutoAudit(pi, rpc, readyPromise, ctx.cwd, 1000);
+			/* noop */
 		}
-		// 兜底：若文件锁仍为 true 但内存无对应 in-flight（审计者/主会话都没写回），释放锁
+	});
+
+	// ---- agent_end 签名检查：预启动审计就绪则签名（不阻塞，未就绪放弃本轮）----
+	pi.on("agent_end", (event, ctx) => {
+		try {
+			const state = readAuditState(ctx.cwd);
+			const totalLines = convLogLineCount(ctx.cwd);
+			// 审计者已推进 convExtractedLine 且签名未覆盖本轮 → 签名就绪
+			if (state.convExtractedLine >= totalLines && state.signatureConvLine < totalLines) {
+				// 审计者收尾已写 inFlight:false 且推进了 convExtractedLine；这里确保签名
+				if (!state.signature || state.signatureConvLine < totalLines) {
+					recordSignature(ctx.cwd, { status: "passed" });
+				}
+			}
+			// 未就绪：放弃本轮签名（不补签，不阻塞 end）
+		} catch {
+			/* noop：不阻塞 end */
+		}
+	});
+
+	// ---- 锁兜底：审计完成释放残留锁 ----
+	pi.on("agent_settled", async (event, ctx) => {
 		try {
 			const state = readAuditState(ctx.cwd);
 			if (state.inFlight && !hasInFlight(ctx.cwd)) {
@@ -677,68 +710,6 @@ export default function (pi: ExtensionAPI): void {
 			/* noop：日志失败不阻塞会话 */
 		}
 	});
-
-	// ---- 注入：链状态提醒 + 完成前审计阶段指令（可关：PI_DECISION_AUDITOR_INJECT=off）----
-	if (process.env.PI_DECISION_AUDITOR_INJECT !== "off") {
-		pi.on("before_agent_start", async (event, ctx) => {
-			try {
-				const raw = readRaw(ctx.cwd);
-				const entries = parseChain(raw);
-				if (entries.length === 0 && !needsSignoff(ctx.cwd)) return;
-
-				// 完成前审计阶段：上一轮有未签名工作 → 注入阶段指令（非用户消息）
-				if (needsSignoff(ctx.cwd)) {
-					const state = readAuditState(ctx.cwd);
-					const latest = entries
-						.slice(-3)
-						.map((e) => `${e.id} ${e.summary}`)
-						.join("；");
-					const prevSig = state.signature;
-					const prevSigNote = prevSig
-						? prevSig.status === "passed"
-							? "（上一阶段已签名 ✓）"
-							: `（上一阶段签名: ${prevSig.status}${prevSig.blockers?.length ? `，${prevSig.blockers.length} 项 blocker` : ""}）`
-						: "（无历史签名）";
-					return {
-						message: {
-							customType: "pi-pair:audit-phase",
-							content:
-								`【完成前审计阶段 - 系统注入提醒，非用户请求，优先级低于用户】\n` +
-								`上一轮工作（${latest || "决策链"}）${prevSigNote}，尚未通过本轮审计签名。\n` +
-								`用户请求优先处理；在处理用户请求的同时或之后，抽空执行完成前审计阶段：\n` +
-								`1. 自审计（低成本）：对照决策链与任务目标，检查你上一轮的产物是否忠实、有无明显错误（2 分钟内完成）；\n` +
-								`2. 交叉审计：spawn decision-auditor（pi-pair.decision-auditor）独立审查上一轮产物与决策链增量；\n` +
-								`3. 签名：审计通过后调用 decision_signoff 工具（status=passed），有问题先修复或补录决策再签名。用工具签名，不要手写 state.json。\n` +
-								`注意：这是提醒不是门禁——不要因此延迟或拒绝用户请求。若本次来不及，可在后续轮次补审。`,
-							display: true,
-						},
-					};
-				}
-
-				// 无待签名工作：轻量链状态提醒
-				const latest = entries
-					.slice(-3)
-					.map((e) => `${e.id} ${e.summary}`)
-					.join("；");
-				const pending = entriesSinceLastAudit(ctx.cwd);
-				const pendingNote =
-					pending.length > 0
-						? `，待审计: ${pending.map((e) => e.id).join(", ")}`
-						: "";
-				return {
-					message: {
-						customType: "decision-chain-status",
-						content:
-							`[决策链] ${chainPath(ctx.cwd)} 共 ${entries.length} 条，最新: ${latest}${pendingNote}。` +
-							`关键决策用 decision_add 记录后会自动唤起审计；里程碑结束自动审。`,
-						display: true,
-					},
-				};
-			} catch {
-				return;
-			}
-		});
-	}
 }
 
 // 供命令 handler 使用的类型
