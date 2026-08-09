@@ -205,18 +205,21 @@ function buildIncrementalAuditTask(cwd: string): string {
 		`3. 更新 ${auditStatePath(cwd)}：convExtractedLine 推进到最后一条对话行。无决策也推进。`,
 	);
 	lines.push("");
-	lines.push("【第二步：审计本轮产物（核心）】");
+	lines.push("【第二步：审计本轮产物（核心，对抗式）】");
+	lines.push(
+		"立场：产物默认有缺陷（guilty until proven innocent）。不要‘检查有没有错’——要主动尝试推翻：每个维度找具体缺陷，找到 = 偏离 ✗；五个维度全部无法推翻才判通过。",
+	);
 	lines.push(
 		"1. 先推导目标：从 convlog 用户提示推导任务目标（主 agent 自述不可信）。",
 	);
 	lines.push(
-		"2. 读 git diff（本轮未提交改动），对照本轮捕获的决策审**产物忠实性**：产物是否真的执行了决策？有未执行的决策吗？",
+		"2. 读 git diff（本轮未提交改动），对照本轮捕获的决策审产物：按五维度逐项进攻——① 原子性（独立评审/回滚？混入无关主题？）② 正确性（逻辑/边界/错误路径真的对？事实与仓库一致？）③ 一致性（决策间/实现与决策/既有模式一致？）④ 内聚（一个决策一个主题？职责放对？过度设计？）⑤ 完备（边界/错误/依赖/文档/测试覆盖？关键取舍都入链？产物真的执行了决策？）。",
 	);
 	lines.push(
 		"3. 独立核实：用 read/grep 核实 Context 事实与代码一致（不信任记录，事实不符 = 偏离 ✗）。",
 	);
 	lines.push(
-		"4. 审决策链推理（有效性/完整性/一致性/校准）——只审本轮新增条目及其 supersede 关系。",
+		"4. 链基础检查：推理有效性/完整性/校准/Supersedes 声明——只审本轮新增条目。",
 	);
 	lines.push("");
 	lines.push("【输出】逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 链健康度总评。");
@@ -294,7 +297,7 @@ async function negotiateStop(
 				{
 					id: runId,
 					message:
-						"【协商中止】审计窗口（120s）已超时。请立即把你当前已发现的问题整理成 blockers，用 decision_signoff(status=\"blocked\", blockers=[...]) 签名——主 agent 会马上确认并修复，不必等完整审计。若确认无问题，签名 passed；若无法给出结论，回复确认中止。",
+						'【协商中止】审计窗口（120s）已超时。请立即把你当前已发现的问题整理成 blockers，用 decision_signoff(status="blocked", blockers=[...]) 签名——主 agent 会马上确认并修复，不必等完整审计。若确认无问题，签名 passed；若无法给出结论，回复确认中止。',
 				},
 				10_000,
 			);
