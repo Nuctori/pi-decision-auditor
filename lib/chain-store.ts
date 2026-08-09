@@ -226,8 +226,22 @@ export function readAuditState(cwd: string): AuditState {
 			pendingChars: typeof obj.pendingChars === "number" ? obj.pendingChars : 0,
 			lastAuditAt: typeof obj.lastAuditAt === "number" ? obj.lastAuditAt : 0,
 			signature:
-				obj.signature && typeof obj.signature === "object"
-					? (obj.signature as AuditSignature)
+				obj.signature && typeof obj.signature === "object" &&
+				!Array.isArray(obj.signature) &&
+				(obj.signature as AuditSignature).status !== undefined
+					? {
+							status: (obj.signature as AuditSignature).status,
+							at:
+								typeof (obj.signature as AuditSignature).at === "number"
+									? (obj.signature as AuditSignature).at
+									: 0,
+							...(Array.isArray((obj.signature as AuditSignature).blockers)
+								? { blockers: (obj.signature as AuditSignature).blockers }
+								: {}),
+							...(typeof (obj.signature as AuditSignature).runId === "string"
+								? { runId: (obj.signature as AuditSignature).runId }
+								: {}),
+					  }
 					: null,
 			signatureConvLine:
 				typeof obj.signatureConvLine === "number" ? obj.signatureConvLine : 0,
@@ -405,7 +419,11 @@ export function resolveAuditConfig(
  *  - 累积轮数 ≥ batchRounds 或 字符 ≥ batchChars → 唤起
  *  - 累积轮数 ≥ maxBatchRounds → 强制唤起（决策稀疏兜底）
  */
-export function accumulatePending(cwd: string, roundChars: number): boolean {
+export function accumulatePending(
+	cwd: string,
+	roundChars: number,
+	force = false,
+): boolean {
 	const cfg = resolveAuditConfig();
 	const state = readAuditState(cwd);
 	if (state.inFlight) return false;
@@ -417,13 +435,19 @@ export function accumulatePending(cwd: string, roundChars: number): boolean {
 		pendingChars: state.pendingChars + roundChars,
 	};
 
-	// 距离上次审计不足 minInterval → 只记账不唤起
-	if (state.lastAuditAt !== 0 && roundsSinceAudit < cfg.minIntervalRounds) {
+	// 距离上次审计不足 minInterval → 只记账不唤起（除非 force：显式 decision_add）
+	if (
+		!force &&
+		state.lastAuditAt !== 0 &&
+		roundsSinceAudit < cfg.minIntervalRounds
+	) {
 		writeAuditState(cwd, newState);
 		return false;
 	}
 
+	// force（显式 decision_add）：跳过 minInterval 且直接触发
 	const shouldAudit =
+		force ||
 		roundsSinceAudit >= cfg.batchRounds ||
 		newState.pendingChars >= cfg.batchChars ||
 		roundsSinceAudit >= cfg.maxBatchRounds;

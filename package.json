@@ -1,7 +1,7 @@
 {
   "name": "pi-pair",
-  "version": "1.1.0",
-  "description": "结对决策审计（pair audit）：自动捕获 AI 决策推理链到 docs/decisions/chain.md，审计者常驻随任务增量被唤起，审决策链（推理/正确性/漂移），目标推导自对话日志，按需查询主会话",
+  "version": "1.2.0",
+  "description": "结对决策审计（pair audit）：自动捕获 AI 决策推理链到 docs/decisions/chain.md，审计者随对话增量被唤起，审决策链（推理/正确性/漂移），目标推导自对话日志，按需查询主会话",
   "license": "MIT",
   "author": "Nuctori",
   "repository": {
@@ -14,7 +14,6 @@
   },
   "keywords": ["pi-package", "decision-audit", "pair-programming", "audit", "decision-chain"],
   "type": "module",
-  "main": "extensions/decision-chain.ts",
   "files": [
     "extensions/",
     "lib/",
@@ -45,12 +44,10 @@
     "skills": ["./skills"],
     "prompts": ["./prompts"],
     "subagents": {
-      "agents": ["./agents"],
-      "chains": ["./chains"]
+      "agents": ["./agents"]
     }
   },
   "pi-subagents": {
-    "agents": ["./agents"],
-    "chains": ["./chains"]
+    "agents": ["./agents"]
   }
 }

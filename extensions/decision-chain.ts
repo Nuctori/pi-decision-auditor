@@ -21,6 +21,7 @@ import {
 	parseChain,
 	readAuditState,
 	readRaw,
+	recordSignature,
 	renderEntry,
 	writeAuditState,
 } from "../lib/chain-store.js";
@@ -89,32 +90,38 @@ function makeRpc(pi: ExtensionAPI) {
 	};
 }
 
-/** 等待 pi-subagents RPC ready（限时）。 */
+/** 等待 pi-subagents RPC ready（限时）。ping 真正订阅 reply，收到即返回（不再固定吃满 5s）。 */
 function waitForRpcReady(pi: ExtensionAPI, timeoutMs = 5000): Promise<void> {
 	return new Promise((resolve) => {
-		const timer = setTimeout(() => {
-			if (off)
-				try {
-					off();
-				} catch {
-					/* noop */
-				}
-			resolve();
-		}, timeoutMs);
-		const off: (() => void) | undefined = pi.events.on(RPC_READY, () => {
+		const requestId = `decision-auditor-ping-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+		const unsubs: Array<() => void> = [];
+		const cleanup = (): void => {
 			clearTimeout(timer);
-			if (off)
+			for (const u of unsubs) {
 				try {
-					off();
+					u();
 				} catch {
 					/* noop */
 				}
+			}
+		};
+		const timer = setTimeout(() => {
+			cleanup();
+			resolve(); // 超时兜底
+		}, timeoutMs);
+		const offReply = pi.events.on(`${RPC_REPLY_PREFIX}${requestId}`, () => {
+			cleanup();
+			resolve(); // 收到 ping reply = RPC 就绪
+		});
+		if (offReply) unsubs.push(offReply);
+		const offReady = pi.events.on(RPC_READY, () => {
+			cleanup();
 			resolve();
-		}) as (() => void) | undefined;
-		// 可能已经 ready（后续 /reload）——立即 ping 探测
+		});
+		if (offReady) unsubs.push(offReady);
 		pi.events.emit(RPC_REQUEST, {
 			version: RPC_VERSION,
-			requestId: `decision-auditor-ping-${Date.now()}`,
+			requestId,
 			method: "ping",
 			source: { extension: "pi-pair" },
 		});
@@ -147,7 +154,8 @@ function extractText(content: unknown): string {
 /** 审计状态：正在跑的标志（进程内去重，避免同批新条目重复 spawn）。 */
 const inFlightAudits = new Map<string, { runId: string; startedAt: number }>();
 const AUDITOR_AGENT = "pi-pair.decision-auditor";
-const IN_FLIGHT_TTL_MS = 5 * 60 * 1000; // 5 分钟：审计通常 1-2 分钟完成；超过视为异常允许重试
+// TTL 对齐 spawn 超时（900s），避免审计运行中锁过期导致并发双审计
+const IN_FLIGHT_TTL_MS = 16 * 60 * 1000; // 16 分钟 > spawn timeout 15 分钟
 
 /** cwd 是否有进行中的审计（含 TTL 过期清理）。 */
 function hasInFlight(cwd: string): boolean {
@@ -177,7 +185,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 	lines.push("");
 	lines.push("【第一步：捕获决策（你的新增核心职责）】");
 	lines.push(
-		"1. 用 read 读对话日志，从 convExtractedLine 标记的行之后开始（状态文件里读）。",
+		"1. 用 read 读对话日志，从 convExtractedLine 标记的对话行之后开始（状态文件里读；convExtractedLine 是对话行序号，即 ## 👤/## 🤖 开头的行计数）。",
 	);
 	lines.push(
 		"2. 识别主 agent 实际做出的关键决策：方案取舍（选 A 弃 B）、架构/依赖/实现方式改动、采纳的用户要求、推翻之前决策。",
@@ -186,7 +194,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 		"3. 对每个识别出的决策，用 write 工具 **append 追加**到 docs/decisions/chain.md（格式：## D-XXX: 标题 [Accepted]，字段 Context/Decision/Rationale/Alternatives/Confidence/Date）。编号按链中现有最大 D-NNN+1。",
 	);
 	lines.push(
-		"4. 追加后更新 ${auditStatePath(cwd)} 里的 convExtractedLine 为本次读到的最后一行，并清空 pendingRounds/pendingChars。",
+		`4. 追加后更新 ${auditStatePath(cwd)} 里的 convExtractedLine 为本次读到的最后一条对话行序号，并清空 roundsSinceAudit/pendingChars。`,
 	);
 	lines.push(
 		"5. 若对话日志增量里没有值得入链的决策，也仍推进 convExtractedLine（避免重复读）。",
@@ -212,7 +220,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 	lines.push("5. 输出逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 链健康度总评。");
 	lines.push("");
 	lines.push(
-		"【收尾】用 write 工具把 ${auditStatePath(cwd)} 的 inFlight 改为 false，lastAuditedId 推进到链最新条目，lastAuditAt 置当前时间。",
+		`【收尾】用 write 工具把 ${auditStatePath(cwd)} 的 inFlight 改为 false，lastAuditedId 推进到链最新条目，lastAuditAt 置当前时间，roundsSinceAudit/pendingChars 清零，并把 signature 置为 { status: "passed" }、signatureConvLine 推进到 convlog 当前对话行数。`,
 	);
 	lines.push(
 		"写权限仅限：append chain.md + 改 state.json。禁止修改其他任何文件。",
@@ -230,10 +238,11 @@ async function maybeAutoAudit(
 	readyPromise: Promise<void>,
 	cwd: string,
 	roundChars: number,
+	force = false,
 ): Promise<boolean> {
 	try {
-		// 增量累积记账：达到阈值返回 true
-		if (!accumulatePending(cwd, roundChars)) return false;
+		// 增量累积记账：达到阈值返回 true（force=显式 decision_add 跳过 minInterval）
+		if (!accumulatePending(cwd, roundChars, force)) return false;
 
 		const state = readAuditState(cwd);
 		if (!state.inFlight && hasInFlight(cwd)) {
@@ -244,13 +253,16 @@ async function maybeAutoAudit(
 		inFlightAudits.set(cwd, { runId: "", startedAt: Date.now() });
 		try {
 			await readyPromise;
-			const result = await rpc<{ runId?: string; asyncId?: string }>("spawn", {
-				agent: AUDITOR_AGENT,
-				task: buildIncrementalAuditTask(cwd),
-				async: true,
-				context: "fresh",
-				timeoutMs: 900_000,
-			});
+			const result = await rpc<{ runId?: string; asyncId?: string }>(
+				"spawn",
+				{
+					agent: AUDITOR_AGENT,
+					task: buildIncrementalAuditTask(cwd),
+					async: true,
+					context: "fresh",
+				},
+				900_000, // client 超时：spawn ACK 最长等 15 分钟
+			);
 			const runId = result?.runId ?? result?.asyncId ?? "";
 			inFlightAudits.set(cwd, { runId, startedAt: Date.now() });
 			// 审计进行中：置 inFlight（审计者收尾会改 false + 推进 lastAuditedId）
@@ -262,6 +274,12 @@ async function maybeAutoAudit(
 			return true;
 		} catch {
 			inFlightAudits.delete(cwd);
+			// spawn 失败：回写累积计数，避免已攒的增量丢失（下次继续累积）
+			const s = readAuditState(cwd);
+			writeAuditState(cwd, {
+				...s,
+				roundsSinceAudit: (s.roundsSinceAudit ?? 0) + 1,
+			});
 			return false;
 		}
 	} catch {
@@ -377,6 +395,7 @@ export default function (pi: ExtensionAPI): void {
 				readyPromise,
 				ctx.cwd,
 				Number.MAX_SAFE_INTEGER,
+				true, // force：显式 decision_add 跳过 minInterval 节流
 			);
 			return {
 				content: [
@@ -426,6 +445,43 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
+	// ---- 工具：decision_signoff（签名——解除完成前审计阶段待签名状态）----
+	pi.registerTool({
+		name: "decision_signoff",
+		label: "Decision Signoff",
+		description:
+			"完成前审计阶段的签名工具。审计通过后调用它把 signature 置为 passed（或 blocked+blockers），解除 needsSignoff 待签名状态。优先用此工具而非手写 state.json。",
+		parameters: Type.Object({
+			status: Type.Union([Type.Literal("passed"), Type.Literal("blocked")], {
+				description: "passed=审计通过；blocked=发现问题（附 blockers）",
+			}),
+			blockers: Type.Optional(
+				Type.Array(Type.String(), {
+					description: "blocked 时的发现问题列表",
+				}),
+			),
+		}),
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			recordSignature(ctx.cwd, {
+				status: params.status,
+				...(params.blockers && params.blockers.length > 0
+					? { blockers: params.blockers }
+					: {}),
+			});
+			const sig = readAuditState(ctx.cwd).signature;
+			return {
+				content: [
+					{
+						type: "text",
+						text:
+							`已签名: ${params.status}${params.blockers?.length ? `（${params.blockers.length} 项 blocker）` : ""} → 完成前审计阶段待签名状态已解除。`,
+					},
+				],
+				details: { signature: sig },
+			};
+		},
+	});
+
 	// ---- 命令：/pair-audit 触发结对审计 ----
 	pi.registerCommand("pair-audit", {
 		description:
@@ -455,8 +511,8 @@ export default function (pi: ExtensionAPI): void {
 						task,
 						async: true,
 						context: "fresh",
-						timeoutMs: 900_000,
 					},
+					900_000, // client 超时
 				);
 				const runId = result?.runId ?? result?.asyncId ?? "";
 				ctx.ui.notify(
@@ -567,7 +623,7 @@ export default function (pi: ExtensionAPI): void {
 								`用户请求优先处理；在处理用户请求的同时或之后，抽空执行完成前审计阶段：\n` +
 								`1. 自审计（低成本）：对照决策链与任务目标，检查你上一轮的产物是否忠实、有无明显错误（2 分钟内完成）；\n` +
 								`2. 交叉审计：spawn decision-auditor（pi-pair.decision-auditor）独立审查上一轮产物与决策链增量；\n` +
-								`3. 签名：审计通过后用 decision_add 补录缺失决策（如有），并确认审计完成（更新 ${auditStatePath(ctx.cwd)} 的 signature 为 passed）。\n` +
+								`3. 签名：审计通过后调用 decision_signoff 工具（status=passed），有问题先修复或补录决策再签名。用工具签名，不要手写 state.json。\n` +
 								`注意：这是提醒不是门禁——不要因此延迟或拒绝用户请求。若本次来不及，可在后续轮次补审。`,
 							display: true,
 						},

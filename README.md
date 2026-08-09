@@ -12,7 +12,7 @@ pi install npm:pi-pair
 
 要求：pi-subagents（用于 spawn 审计者）、avtc-pi-user-decisions（可选，用户决策链走它）。
 
-> **本地路径安装注意**：pi-subagents 只扫描 `node_modules` 里的 package agents，本地路径安装（`./pi-pair`）不会自动发现 `agents/decision-auditor.md`。npm/git 分发自动发现；本地开发需手动把 agent 复制到 user scope：
+> **本地路径安装注意**：pi-subagents 通常会自动扫描 settings 里的本地路径包根目录发现 agent；若你的版本未自动发现 `agents/decision-auditor.md`，手动复制到 user scope：
 >
 > ```bash
 > mkdir -p ~/.pi/agent/agents && cp agents/decision-auditor.md ~/.pi/agent/agents/
@@ -40,11 +40,19 @@ decision_add(summary="采用 Redis 做读缓存", context="QPS 峰值 2k；PG �
 # 4. 审计者再【审计】：目标推导 → 漂移对照 → 独立核实 → 推理五问
 # 5. 证据不足 → contact_supervisor 问主会话；链矛盾 → 请求裁决
 
-# 手动全量/定向审计（可选）：
-/pair-audit          # 全链
-/pair-audit D-003    # 自 D-003 起增量
-/pair-audit --diff   # 连带产物忠实性对照
+# 完成前审计阶段（自动，无需手动）:
+# 下一轮开始时若上一轮有未签名工作 → 注入 pi-pair:audit-phase 提醒
+# 处理顺序: 用户请求优先 → 自审计 → 交叉审计 → decision_signoff 签名
 ```
+
+## 完成前审计阶段（v1.2）
+
+每轮工作开始前，若检测到上一轮有未签名工作（`needsSignoff`），系统注入 `pi-pair:audit-phase` 阶段提醒（`customType` 标记，非用户消息）：
+
+- **优先级**：用户请求始终优先——审计是提醒不是门禁，来不及可在后续轮次补审
+- **阶段内容**：① 自审计（agent 对照决策链/目标检查产物）② 交叉审计（spawn decision-auditor 独立审查）③ 签名（`decision_signoff` 工具）
+- **签名语义**：`signature.status` = `passed` / `blocked`（带 blockers）；签名后解除待签名状态
+- **工具**：`decision_signoff`（签名用，避免手写 state.json）、`decision_add`（补录决策）
 
 ## 设计要点
 
@@ -64,7 +72,7 @@ decision_add(summary="采用 Redis 做读缓存", context="QPS 峰值 2k；PG �
 | `PI_PAIR_BATCH_CHARS` | 8000 | 或累积多少 convlog 字符触发审计 |
 | `PI_PAIR_MIN_INTERVAL` | 2 | 两次审计最小间隔（轮） |
 | `PI_PAIR_MAX_BATCH` | 15 | 决策稀疏时强制审计兜底（轮） |
-| `PI_DECISION_AUDITOR_INJECT=off` | 开 | 关闭链状态注入 |
+| `PI_DECISION_AUDITOR_INJECT=off` | 开 | 关闭链状态注入与审计阶段提醒 |
 
 ## License
 

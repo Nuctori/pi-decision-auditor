@@ -88,13 +88,20 @@ acceptanceRole: writer
 
 ## 收尾（每次审计必做）
 
-用 write 工具更新 `<cwd>/.pi/decision-auditor/state.json`：
+用 `decision_signoff` 工具签名（优先，避免手写 state.json 整体覆盖）：
+
+- `decision_signoff(status="passed")`：审计通过
+- `decision_signoff(status="blocked", blockers=[...])`：发现问题
+
+若工具不可用，用 write 工具更新 `<cwd>/.pi/decision-auditor/state.json`（字段级，保留其他字段）：
 
 - `inFlight` 置 `false`（解除去重锁，允许下次唤起）
 - `lastAuditedId` 推进到链最新条目
 - `lastAuditAt` 置当前时间戳
-- `pendingRounds`/`pendingChars` 清零
-- **签名**：把 `signature` 置为 `{ "status": "passed" }`（审计通过）或 `{ "status": "blocked", "blockers": [...] }`（发现问题），并让 `signatureConvLine` 推进到 convlog 当前行数（解除完成前审计阶段的待签名状态）。审计是提醒不是门禁，用户请求始终优先。
+- `roundsSinceAudit`/`pendingChars` 清零
+- `signature` 置 `{ "status": "passed" }` 或 `{ "status": "blocked", "blockers": [...] }`，`signatureConvLine` 推进到 convlog 当前对话行数（解除完成前审计阶段的待签名状态）
+
+审计是提醒不是门禁，用户请求始终优先。
 
 你的写权限仅限：**append chain.md** + **改 state.json**。禁止修改任何其他文件（代码、文档、配置）。
 

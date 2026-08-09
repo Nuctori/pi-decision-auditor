@@ -235,6 +235,48 @@ test("accumulatePending：inFlight 不累积", () => {
 	assert.equal(state.pendingChars, 0);
 });
 
+test("accumulatePending：force 跳过 minInterval", () => {
+	const dir = tmpDir();
+	// 先完成一次审计（设 lastAuditAt），再验证 force 行为
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		lastAuditAt: Date.now(),
+		roundsSinceAudit: 0,
+	});
+	// 非 force：距上次审计 1 轮 < minInterval(2) → 不触发
+	assert.equal(accumulatePending(dir, 100), false);
+	// force：跳过 minInterval，直接触发
+	assert.equal(accumulatePending(dir, 100, true), true);
+});
+
+test("recordSignature 字段级写入", () => {
+	const dir = tmpDir();
+	appendConv(dir, "user", "测试");
+	recordSignature(dir, { status: "passed" });
+	const s1 = readAuditState(dir);
+	assert.equal(s1.signature?.status, "passed");
+	assert.ok(s1.signatureConvLine > 0);
+	assert.equal(needsSignoff(dir), false);
+
+	// blocked 签名
+	recordSignature(dir, { status: "blocked", blockers: ["x"] });
+	const s2 = readAuditState(dir);
+	assert.equal(s2.signature?.status, "blocked");
+	assert.deepEqual(s2.signature?.blockers, ["x"]);
+});
+
+test("readAuditState 坏 signature 消毒", () => {
+	const dir = tmpDir();
+	fs.mkdirSync(path.dirname(auditStatePath(dir)), { recursive: true });
+	fs.writeFileSync(
+		auditStatePath(dir),
+		'{"signature": "passed-string"}',
+		"utf-8",
+	);
+	const state = readAuditState(dir);
+	assert.equal(state.signature, null); // 非对象 → 消毒为 null
+});
+
 test("resolveAuditConfig 环境变量覆盖", () => {
 	const cfg = resolveAuditConfig({
 		PI_PAIR_BATCH_ROUNDS: "3",
