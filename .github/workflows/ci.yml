@@ -85,32 +85,29 @@ jobs:
           fi
       - name: Verify chain and audit state
         run: |
-          cd "$GITHUB_WORKSPACE/e2e"
-          if [ ! -s "$GITHUB_WORKSPACE/e2e/out.txt" ]; then
-            # v1.5 agent_end 阻塞：print 模式卡在等待审计，out.txt 写不全 → WARN 不断言
-            echo "WARN: out.txt empty (v1.5 blocking; assert chain directly)"
+          # 决策链可能写到解析出的项目根（pi 内部 cwd 决定），用 find 定位，不假设路径
+          CHAIN_FILE=$(find "$GITHUB_WORKSPACE" -name chain.md \
+            -path "*docs/decisions*" 2>/dev/null | head -1)
+          STATE_FILE=$(find "$GITHUB_WORKSPACE" -name state.json \
+            -path "*.pi/decision-auditor*" 2>/dev/null | head -1)
+          if [ -z "$CHAIN_FILE" ]; then
+            echo "FAIL: decision chain not found under GITHUB_WORKSPACE"
+            exit 1
           fi
-          echo "=== chain.md ==="
-          cat docs/decisions/chain.md
+          echo "=== chain.md ($CHAIN_FILE) ==="
+          cat "$CHAIN_FILE"
           echo "=== assertions (mechanism-level, deterministic) ==="
-          # 确定性机制：decision_add 工具注册 + 写链（扩展加载成功）
-          grep -q "D-001" docs/decisions/chain.md \
+          grep -q "D-001" "$CHAIN_FILE" \
             && echo "PASS: decision_add wrote chain (extension loaded)" \
-            || { echo "FAIL: chain missing"; exit 1; }
-          grep -q "Context:" docs/decisions/chain.md \
+            || { echo "FAIL: chain missing D-001"; exit 1; }
+          grep -q "Context:" "$CHAIN_FILE" \
             && echo "PASS: entry has structured fields" \
             || { echo "FAIL: malformed entry"; exit 1; }
-          # 审计 spawn 依赖 agent_settled 钩子时机，print 模式可能不触发：尽力验证，不红
-          if [ -f .pi/decision-auditor/state.json ]; then
-            grep -q '"lastAuditedId": "D-00' .pi/decision-auditor/state.json \
+          if [ -n "$STATE_FILE" ]; then
+            grep -q '"lastAuditedId": "D-00' "$STATE_FILE" \
               && echo "PASS: audit advanced"
-            grep -q '"inFlight": false' .pi/decision-auditor/state.json \
+            grep -q '"inFlight": false' "$STATE_FILE" \
               && echo "PASS: lock released"
           else
-            echo "WARN: state.json absent (audit spawn needs agent_settled)"
-          fi
-          if [ -s "$GITHUB_WORKSPACE/e2e/out.txt" ]; then
-            grep -qE "审计报告|一致|偏离|需裁决" "$GITHUB_WORKSPACE/e2e/out.txt" \
-              && echo "PASS: audit report present" \
-              || echo "WARN: report text not matched (print mode exits early)"
+            echo "WARN: state.json not found under GITHUB_WORKSPACE"
           fi
