@@ -1,5 +1,36 @@
 # Changelog
 
+## [1.0.0] - 2026-08-09
+
+**首个正式发布**（npm 包名为 `pi-pair`）。此前 1.1~1.6 为内部开发迭代，本版合并为 1.0.0。
+
+提供**常驻结对审计**：每个会话自动带上一个独立审计者（"举灯人"），持续持有目标、对照决策链交叉审计每一轮产物，agent 结束时必须通过审计签名。
+
+### 核心能力
+
+- **常驻审计者（resume 复用）**：首次 spawn 记录 runId，后续 resume 同一个 run（带 session 历史，命中 prompt 缓存，比 fresh 全量重发便宜）
+- **产物必须交叉审计**：`agent_end` 阻塞等待审计签名——未经独立审计的工作不能"结束"（120s 上限，spawn 失败标记 blocked 不静默）
+- **不靠主 agent 自觉**：决策从对话日志提取（`convExtractedLine` 去重）、事实从仓库核实，审计者独立完成
+- **决策链**：默认 `.pi/decision-auditor/chain.md`（私有，不污染 git）；`PI_PAIR_CHAIN_PUBLIC=1` 写 `docs/decisions/chain.md`（团队可见）
+- **cwd 自适应**：`resolveProjectRoot` 从任意目录定位真实项目根
+- **交付深度审查**：用户说提交/发布/merge 时，并行 fanout 3 个 fresh reviewer（正确性/目标一致性/安全健壮性）
+- **工具**：`decision_add` / `decision_list` / `decision_signoff` / `/pair-audit`
+
+### 测试
+
+- 18 单测 + tsc + CI（unit + E2E opencode 免费模型）全绿
+
+### 开发历史（1.1~1.6 迭代要点）
+
+- 1.1 捕获不靠主 agent、增量累积唤起（参数经 205 历史会话校准）
+- 1.2 完成前审计阶段（后移除 before_agent_start 注入）
+- 1.3 三层触发（L0 捕获 / L1 签名 / L2 交付 fanout）、会话边界隔离
+- 1.4 agent_end 阻塞产物审计（修复时序错位）
+- 1.5 常驻审计者 resume 复用 + cwd 解析修复
+- 1.6 决策链默认私有化（.pi/ 不污染 git）
+
+---
+
 ## [1.6.0] - 2026-08-09
 
 决策链默认私有化（不污染项目 git）+ cwd 相关配套。
