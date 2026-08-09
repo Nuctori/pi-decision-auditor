@@ -270,17 +270,56 @@ const MAX_BLOCKED_STREAK = 3;
  * C1 窗口约束：审计超时后尝试终止审计者 run（防它在窗口外继续跑并发起联系）。
  * pi-subagents RPC 可能不支持 stop——try/catch 后靠审计者协议约束兜底。
  */
-async function tryStopAuditor(
+/** 协商中止收尾窗口：steer 发消息后，给审计者签名收尾的时间（超时总阻塞 ≤ 120s + 30s）。 */
+const NEGOTIATE_WINDOW_MS = 30_000;
+
+/**
+ * 协商中止（不直接 kill）：审计超时后先 steer 通知审计者协商，
+ * 给它机会收尾——能立即给结论（哪怕 blockers 摘要）就签名，否则确认中止。
+ * 协商窗口内完成签名 → 返回 true（采纳结论）；无响应 → 兜底 stop 并返回 false。
+ */
+async function negotiateStop(
 	rpc: ReturnType<typeof makeRpc>,
 	cwd: string,
-): Promise<void> {
+): Promise<boolean> {
 	try {
 		const state = readAuditState(cwd);
 		const runId = state.signature?.runId ?? state.auditorRunId;
-		if (!runId) return;
-		await rpc("stop", { id: runId }, 10_000);
+		if (!runId) return false;
+
+		// 1. steer 发协商消息（不立即 stop）——目标是快速反馈已发现的问题，而非等完整审计
+		try {
+			await rpc(
+				"steer",
+				{
+					id: runId,
+					message:
+						"【协商中止】审计窗口（120s）已超时。请立即把你当前已发现的问题整理成 blockers，用 decision_signoff(status=\"blocked\", blockers=[...]) 签名——主 agent 会马上确认并修复，不必等完整审计。若确认无问题，签名 passed；若无法给出结论，回复确认中止。",
+				},
+				10_000,
+			);
+		} catch {
+			/* steer 失败（run 已结束等）→ 走兜底 */
+		}
+
+		// 2. 协商窗口内轮询：审计者是否完成签名收尾
+		const deadline = Date.now() + NEGOTIATE_WINDOW_MS;
+		const targetLines = convLogLineCount(cwd);
+		while (Date.now() < deadline) {
+			const s = readAuditState(cwd);
+			if (s.signature && s.signatureConvLine >= targetLines) return true; // 收尾完成，采纳结论
+			await sleep(2000);
+		}
+
+		// 3. 兜底：协商无果 → 强制 stop（防止窗口外继续跑并发起联系）
+		try {
+			await rpc("stop", { id: runId }, 10_000);
+		} catch {
+			/* RPC 不支持 stop 时静默（审计者协议禁止窗口外联系兜底） */
+		}
+		return false;
 	} catch {
-		/* RPC 不支持 stop 时静默降级（审计者协议禁止窗口外联系） */
+		return false;
 	}
 }
 
@@ -782,12 +821,25 @@ export default function (pi: ExtensionAPI): void {
 			// 【阻塞等待】审计完成（Pi awaits handler，等待生效）——降低阻塞：只审本轮增量 + 120s 上限
 			const sig = await waitForAuditCompletion(resolveProjectRoot(ctx.cwd));
 			if (sig === null) {
-				// 超时：C1 窗口结束即停止（尝试终止审计者 run，防止窗口外联系主 agent）
-				tryStopAuditor(rpc, resolveProjectRoot(ctx.cwd));
-				// 超时按 blocked 计（递增 streak），进入修复循环或降级放行
+				// 超时：协商中止——steer 通知审计者快速反馈已发现的问题，收尾窗口内采纳其结论
+				const settled = await negotiateStop(rpc, resolveProjectRoot(ctx.cwd));
+				if (settled) {
+					// 协商窗口内审计者已签名 → 采纳结论（passed=门禁通过；blocked=快速确认修复）
+					const s = readAuditState(resolveProjectRoot(ctx.cwd));
+					if (
+						s.signature &&
+						(s.signature.status === "passed" ||
+							s.signature.status === "passed-with-warning")
+					) {
+						return; // B1 门禁通过
+					}
+					await handleBlocked(pi, ctx, resolveProjectRoot(ctx.cwd));
+					return;
+				}
+				// 协商无果 → 超时按 blocked 计（递增 streak），进修复循环或降级放行
 				recordSignature(resolveProjectRoot(ctx.cwd), {
 					status: "timeout",
-					blockers: ["审计超时（120s），产物未过审"],
+					blockers: ["审计超时（120s），协商中止后产物未过审"],
 				});
 				await handleBlocked(pi, ctx, resolveProjectRoot(ctx.cwd));
 				return;
