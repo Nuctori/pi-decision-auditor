@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.0.4] - 2026-08-09
+
+README 中英拆分 + CI E2E 真实路径验证。
+
+### 文档
+
+- `README.md`（英文）+ `README.zh-CN.md`（中文）拆分，顶部互相链接（社区标准做法）
+- package.json description 改为英文（国际惯例）
+
+### CI E2E 真实路径验证
+
+- 新增第二个 E2E 场景：主 agent 做真实工作（创建 calculator.py）→ `agent_end` 阻塞审计签名闭环验证：
+  - convlog 捕获用户提示 + 助手回复（捕获路径）
+  - 审计签名发生（state.signature.status 非空——agent_end → 审计者 → 签名真实跑通）
+  - 锁释放（inFlight=false）+ blockedStreak 追踪
+- 验证结果：签名 blocked（门禁拦截）→ WARN 不失败（机制工作的证明，非断言目标）
+
+## [1.0.3] - 2026-08-09
+
+协商中止（negotiated stop）：审计超时后不直接 kill。
+
+- 超时（120s）→ steer 通知审计者协商：把当前已发现的问题提前签成 blockers（主 agent 立即修复）——提前获知问题的通道；确认无问题则签名 passed
+- 30s 协商收尾窗口；无响应才兜底 stop（防止窗口外继续跑）
+- 审计者协议加"协商中止规约"（窗口约束的一部分）
+
 ## [1.0.2] - 2026-08-09
 
 严格门禁 + 当场修复循环 + 窗口内通信（A2/B1/C1 设计）。
