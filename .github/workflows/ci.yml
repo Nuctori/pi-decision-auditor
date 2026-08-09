@@ -85,9 +85,10 @@ jobs:
           fi
       - name: Verify chain and audit state
         run: |
-          # 决策链可能写到解析出的项目根（pi 内部 cwd 决定），用 find 定位，不假设路径
+          # 决策链默认 .pi/ 下，公开模式 docs/decisions/；用 find 定位，不假设路径
           CHAIN_FILE=$(find "$GITHUB_WORKSPACE" -name chain.md \
-            -path "*docs/decisions*" 2>/dev/null | head -1)
+            \( -path "*docs/decisions*" \
+               -o -path "*.pi/decision-auditor*" \) 2>/dev/null | head -1)
           STATE_FILE=$(find "$GITHUB_WORKSPACE" -name state.json \
             -path "*.pi/decision-auditor*" 2>/dev/null | head -1)
           if [ -z "$CHAIN_FILE" ]; then
