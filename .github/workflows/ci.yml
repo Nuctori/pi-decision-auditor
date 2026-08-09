@@ -63,6 +63,8 @@ jobs:
       - name: Run E2E - decision_add auto-triggers audit
         run: |
           mkdir -p "$GITHUB_WORKSPACE/e2e" && cd "$GITHUB_WORKSPACE/e2e"
+          # 空 package.json 作为仓库根标记：让 resolveProjectRoot 稳定指向 e2e（而非向上找到 pi-pair）
+          echo '{}' > package.json
           cat > prompt.txt <<'EOF'
           调用 decision_add 工具记录一条决策，参数严格如下：
           summary=保持纯 Python 实现
