@@ -34,10 +34,18 @@ Requires: **pi-subagents** (spawns / resumes the auditor).
 each session (session_start)
   └─ persistent auditor (runId persisted, resumed across rounds, hits prompt cache)
 
-each work round (agent_end, blocking signoff — hard gate)
-  └─ has artifacts? → resume/spawn auditor → audit in window → await (120s cap)
-      · capture round decisions into chain (not dependent on main agent)
-      · audit git diff fidelity: did artifacts really execute the decisions?
+L0 — chain maintenance (non-blocking, batched)
+  └─ every round: accumulateRound (convlog delta) — zero cost
+  └─ threshold hit (6 rounds / 8000 chars / max 15): spawn auditor
+      · capture incremental decisions into chain (append-only, auto-numbered)
+      · adversarial chain review (5 elegance dimensions: atomicity / correctness /
+        consistency / cohesion / completeness)
+      · findings → chainFindings → injected to main agent next round (low priority)
+
+L1 — artifact gate (agent_end, blocking, hard gate)
+  └─ has artifacts? → resume/spawn auditor → audit this round's artifacts in window
+     → await (120s cap)
+      · adversarial 5-dimension attack on artifacts (guilty until proven innocent)
       · independently verify Context facts vs repository
       · in-window Q&A with main agent (contact_supervisor, 60s cap)
       · passed → end ✓
@@ -46,11 +54,13 @@ each work round (agent_end, blocking signoff — hard gate)
       · timeout (120s) → negotiated stop: steer auditor to sign current findings
         as blockers early (fix immediately) — hard kill only as fallback
 
-on delivery ("submit/publish/merge/deploy" etc)
+L2 — delivery review (on "submit/publish/merge/deploy")
   └─ parallel fanout 3 fresh reviewers (correctness / goal-alignment / security-robustness)
 ```
 
 **Hard gate**: `agent_end` blocks until the audit signature. A blocked artifact triggers an immediate fix round (follow-up message, max 3×), then releases with a warning — `end is end`. Un-audited work can never be presented as "complete".
+
+**Layered cost control**: L1 audits every round's artifacts (the gate, cannot be skipped); L0 batches chain capture/review (6 rounds / 8000 chars) so chain maintenance doesn't run every round; L2 runs once per delivery.
 
 ---
 

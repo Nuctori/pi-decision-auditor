@@ -241,6 +241,8 @@ export interface AuditState {
 	signatureConvLine: number;
 	/** 连续 blocked 次数（A2 门禁退出：>=3 降级放行）。passed 后清零。 */
 	blockedStreak: number;
+	/** L0 链级复审发现的问题（跨轮审链 findings），before_agent_start 注入主 agent。 */
+	chainFindings: string[];
 	/** 常驻审计者的 runId（跨轮 resume 用）。null = 首次 spawn。 */
 	auditorRunId: string | null;
 }
@@ -255,6 +257,7 @@ const DEFAULT_STATE: AuditState = {
 	signature: null,
 	signatureConvLine: 0,
 	blockedStreak: 0,
+	chainFindings: [],
 	auditorRunId: null,
 };
 
@@ -301,6 +304,10 @@ export function readAuditState(cwd: string): AuditState {
 				typeof obj.signatureConvLine === "number" ? obj.signatureConvLine : 0,
 			blockedStreak:
 				typeof obj.blockedStreak === "number" ? obj.blockedStreak : 0,
+			chainFindings:
+				Array.isArray(obj.chainFindings)
+					? obj.chainFindings.filter((x) => typeof x === "string")
+					: [],
 			auditorRunId:
 				typeof obj.auditorRunId === "string" ? obj.auditorRunId : null,
 		};
@@ -499,56 +506,42 @@ export function resolveAuditConfig(
 }
 
 /**
- * 每轮结束时记账：累计一轮的 convlog 增量。
- * 返回 true 表示达到唤起阈值（应 spawn 审计）。
- * 规则：
- *  - 距上次审计 < minIntervalRounds → 只记账不唤起
- *  - 累积轮数 ≥ batchRounds 或 字符 ≥ batchChars → 唤起
- *  - 累积轮数 ≥ maxBatchRounds → 强制唤起（决策稀疏兜底）
+ * 每轮结束时记账（L0 捕获审计的累积量）：只记账，不判断、不清零。
+ * message_end 调用（每轮一次）。roundChars = 本轮 convlog 增量字符数。
  */
-export function accumulatePending(
-	cwd: string,
-	roundChars: number,
-	force = false,
-): boolean {
+export function accumulateRound(cwd: string, roundChars: number): void {
+	const state = readAuditState(cwd);
+	writeAuditState(cwd, {
+		...state,
+		roundsSinceAudit: (state.roundsSinceAudit ?? 0) + 1,
+		pendingChars: (state.pendingChars ?? 0) + roundChars,
+	});
+}
+
+/**
+ * 判断 L0 是否该唤起（agent_settled 调用，在 L1 门禁之后，避免抢阻塞窗口）。
+ * 规则：
+ *  - inFlight（L1 审计在跑）→ 不唤起
+ *  - force（显式 decision_add）→ 跳过 minInterval 直接触发
+ *  - 距上次审计不足 minIntervalRounds → 不唤起
+ *  - 累积轮数 ≥ batchRounds 或 字符 ≥ batchChars 或 ≥ maxBatchRounds → 唤起
+ * 达到阈值则清零累积并返回 true（扩展 spawn L0 审计者）。
+ */
+export function checkAuditDue(cwd: string, force = false): boolean {
 	const cfg = resolveAuditConfig();
 	const state = readAuditState(cwd);
 	if (state.inFlight) return false;
 
-	const roundsSinceAudit = state.roundsSinceAudit + 1;
-	const newState: AuditState = {
-		...state,
-		roundsSinceAudit,
-		pendingChars: state.pendingChars + roundChars,
-	};
+	const rounds = state.roundsSinceAudit;
+	const sinceLast =
+		state.lastAuditAt === 0 ? true : rounds >= cfg.minIntervalRounds;
+	const thresholdHit =
+		rounds >= cfg.batchRounds ||
+		state.pendingChars >= cfg.batchChars ||
+		rounds >= cfg.maxBatchRounds;
+	if (!(force || (sinceLast && thresholdHit))) return false;
 
-	// 距离上次审计不足 minInterval → 只记账不唤起（除非 force：显式 decision_add）
-	if (
-		!force &&
-		state.lastAuditAt !== 0 &&
-		roundsSinceAudit < cfg.minIntervalRounds
-	) {
-		writeAuditState(cwd, newState);
-		return false;
-	}
-
-	// force（显式 decision_add）：跳过 minInterval 且直接触发
-	const shouldAudit =
-		force ||
-		roundsSinceAudit >= cfg.batchRounds ||
-		newState.pendingChars >= cfg.batchChars ||
-		roundsSinceAudit >= cfg.maxBatchRounds;
-
-	if (shouldAudit) {
-		// 触发后清零累积（审计 spawn 时由扩展写 inFlight）
-		writeAuditState(cwd, {
-			...newState,
-			roundsSinceAudit: 0,
-			pendingChars: 0,
-		});
-	} else {
-		// 未达阈值：写盘累积，供下次判断
-		writeAuditState(cwd, newState);
-	}
-	return shouldAudit;
+	// 触发后清零累积（L0 spawn 时扩展写 inFlight）
+	writeAuditState(cwd, { ...state, roundsSinceAudit: 0, pendingChars: 0 });
+	return true;
 }

@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.0.6] - 2026-08-09
+
+恢复 L0 分层（链维护批量审计）+ 测试门禁（防断线回归）。
+
+### 背景
+
+1.1.0 设计的"增量累积唤起"（每轮记账、攒够 6 轮/8000 字符才审）自 1.4（agent_end 阻塞门禁）起**断线**：`maybeAutoAudit` 只在 `decision_add` 里被调用，message_end/agent_settled 无自动触发点；且 L1 审计者收尾会清 `roundsSinceAudit/pendingChars`——L0 永远攒不够。
+
+### 修复：L0/L1 分层
+
+- **L0 链维护**（非阻塞、批量）：`message_end` 每轮 `accumulateRound` 记账（零成本）→ `agent_settled`（L1 门禁之后）`checkAuditDue` 达阈值 → spawn 链维护审计：批量捕获增量决策入链 + 对抗式链级复审（五维度）→ findings 写 `chainFindings` → `before_agent_start` 低优先级注入主 agent
+- **L1 产物门禁**（每轮、阻塞）：去捕获（决策入链归 L0），只审本轮产物（对抗五维度）+ 签名门禁；收尾**不清** roundsSinceAudit/pendingChars（归 L0 管）
+- **L0 独立内存锁**（`l0AuditsInFlight`）：不占 state.inFlight（L1 的锁），避免 L0 抢 L1 阻塞窗口/签名语义混淆
+- `decision_add`（手动）force 触发 L0 链维护审计
+- `accumulatePending` 拆为 `accumulateRound`（只记账）+ `checkAuditDue`（判断+清零+返回）
+
+### 测试门禁（防再次断线）
+
+- L0 记账+判断：batchRounds / batchChars / minInterval / force / inFlight 全覆盖
+- **分层隔离**：L1 收尾不清 L0 记账（roundsSinceAudit/pendingChars 保留）
+- chainFindings 读写与消毒
+- **接线守卫**：静态断言扩展源码含 message_end→accumulateRound、agent_settled→checkAuditDue+spawnL0Audit、L1 收尾不清记账、decision_add→force L0——断线直接 CI 红
+- 23 单测通过（新增 6）
+
 ## [1.0.5] - 2026-08-09
 
 对抗审计（优雅性五维度）——普通轮次从验证式升级为对抗式。

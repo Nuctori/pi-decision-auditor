@@ -34,10 +34,16 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 每个会话（session_start）
   └─ 常驻审计者（runId 持久化，跨轮 resume 复用，命中 prompt 缓存）
 
-每一轮工作（agent_end，阻塞签名 — 硬门禁）
-  └─ 有产物？→ resume/spawn 审计者 → 窗口内审计 → 等待（120s 上限）
-      · 捕获本轮决策入链（不靠主 agent）
-      · 审 git diff 产物忠实性：产物是否真的执行了决策
+L0 — 链维护（非阻塞、批量）
+  └─ 每轮：accumulateRound 记账（convlog 增量）——零成本
+  └─ 达阈值（6 轮 / 8000 字符 / 最多 15 轮）：唤起审计者
+      · 批量捕获增量决策入链（append-only、自动编号）
+      · 对抗式链级复审（五维度：原子性 / 正确性 / 一致性 / 内聚 / 完备）
+      · findings → chainFindings → 下轮注入主 agent（低优先级）
+
+L1 — 产物门禁（agent_end，阻塞，硬门禁）
+  └─ 有产物？→ resume/spawn 审计者 → 窗口内审本轮产物 → 等待（120s 上限）
+      · 对抗式五维度进攻产物（guilty until proven innocent）
       · 独立核实 Context 事实 vs 仓库
       · 窗口内可问主 agent（contact_supervisor，60s 上限）
       · passed → end ✓
@@ -46,11 +52,13 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
       · 超时（120s）→ 协商中止：steer 通知审计者把已发现问题
         提前签成 blockers（立即修复）——强制 kill 只是兜底
 
-交付时（用户说"提交/发布/merge/部署"等）
+L2 — 交付审查（用户说"提交/发布/merge/部署"等）
   └─ 并行 fanout 3 个 fresh reviewer（正确性 / 目标一致性 / 安全健壮性）深度审查
 ```
 
 **硬门禁**：`agent_end` 阻塞等审计签名。blocked 的产物触发**当场修复轮**（follow-up 消息，最多 3 次），之后带警告放行——**end 就是 end**。未经审计的工作永远不会被当作"已完成"呈现。
+
+**分层成本控制**：L1 每轮审产物（门禁，不可省）；L0 批量做链捕获/复审（6 轮 / 8000 字符），链维护不每轮跑；L2 每次交付跑一次。
 
 ---
 

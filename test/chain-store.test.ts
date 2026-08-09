@@ -9,11 +9,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-	accumulatePending,
+	accumulateRound,
 	appendDecision,
 	appendConv,
 	auditStatePath,
 	chainPath,
+	checkAuditDue,
 	convLogLineCount,
 	convlogPath,
 	entriesSinceLastAudit,
@@ -203,41 +204,42 @@ test("坏状态文件容错", () => {
 	assert.equal(state.roundsSinceAudit, 0);
 });
 
-test("accumulatePending：batchRounds 触发", () => {
+test("L0 记账+判断：batchRounds 触发", () => {
 	const dir = tmpDir();
-	// 第一次调用（lastAuditAt=0）也应触发（首次尽快审）
-	// 但默认 batchRounds=6：前 5 次只记账，第 6 次触发
-	const results: boolean[] = [];
-	for (let i = 0; i < 5; i++) results.push(accumulatePending(dir, 100));
-	assert.deepEqual(results, [false, false, false, false, false]);
-	assert.equal(accumulatePending(dir, 100), true); // 第 6 轮触发
+	// 记账（message_end 每轮调 accumulateRound）→ 判断（agent_settled 调 checkAuditDue）
+	for (let i = 0; i < 5; i++) {
+		accumulateRound(dir, 100);
+		assert.equal(checkAuditDue(dir), false); // rounds 1..5 < batchRounds(6)
+	}
+	accumulateRound(dir, 100); // 第 6 轮
+	assert.equal(checkAuditDue(dir), true); // rounds=6 → 触发
 
 	// 触发后清零：下一轮重新累积
-	assert.equal(accumulatePending(dir, 100), false);
+	accumulateRound(dir, 100);
 	const state = readAuditState(dir);
 	assert.equal(state.roundsSinceAudit, 1);
 	assert.equal(state.pendingChars, 100);
 });
 
-test("accumulatePending：batchChars 触发", () => {
+test("L0 记账+判断：batchChars 触发", () => {
 	const dir = tmpDir();
 	// 每轮 2000 字符，默认 batchChars=8000 → 第 4 轮触发
-	const results: boolean[] = [];
-	for (let i = 0; i < 3; i++) results.push(accumulatePending(dir, 2000));
-	assert.deepEqual(results, [false, false, false]);
-	assert.equal(accumulatePending(dir, 2000), true); // 累积 8000 → 触发
+	for (let i = 0; i < 3; i++) {
+		accumulateRound(dir, 2000);
+		assert.equal(checkAuditDue(dir), false);
+	}
+	accumulateRound(dir, 2000); // 累积 8000
+	assert.equal(checkAuditDue(dir), true);
 });
 
-test("accumulatePending：inFlight 不累积", () => {
+test("L0：inFlight（L1 门禁在跑）时不唤起", () => {
 	const dir = tmpDir();
+	accumulateRound(dir, 5000);
 	writeAuditState(dir, { ...readAuditState(dir), inFlight: true });
-	assert.equal(accumulatePending(dir, 5000), false);
-	// inFlight 期间不累积
-	const state = readAuditState(dir);
-	assert.equal(state.pendingChars, 0);
+	assert.equal(checkAuditDue(dir), false); // L1 在跑 → L0 不抢
 });
 
-test("accumulatePending：force 跳过 minInterval", () => {
+test("L0：force 跳过 minInterval（decision_add 路径）", () => {
 	const dir = tmpDir();
 	// 先完成一次审计（设 lastAuditAt），再验证 force 行为
 	writeAuditState(dir, {
@@ -245,10 +247,83 @@ test("accumulatePending：force 跳过 minInterval", () => {
 		lastAuditAt: Date.now(),
 		roundsSinceAudit: 0,
 	});
-	// 非 force：距上次审计 1 轮 < minInterval(2) → 不触发
-	assert.equal(accumulatePending(dir, 100), false);
+	// 非 force：距上次审计 0 轮 < minInterval(2) → 不触发
+	assert.equal(checkAuditDue(dir), false);
 	// force：跳过 minInterval，直接触发
-	assert.equal(accumulatePending(dir, 100, true), true);
+	assert.equal(checkAuditDue(dir, true), true);
+});
+
+test("L0：minInterval 节流（距上次审计不足）", () => {
+	const dir = tmpDir();
+	// 上次审计刚发生（lastAuditAt 现在），记账 1 轮
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		lastAuditAt: Date.now(),
+	});
+	accumulateRound(dir, 100);
+	assert.equal(checkAuditDue(dir), false); // rounds=1 < minInterval(2)
+	accumulateRound(dir, 100);
+	assert.equal(checkAuditDue(dir), false); // rounds=2 >= minInterval 但 < batchRounds
+});
+
+test("L1 收尾不清 L0 记账（分层隔离）", () => {
+	const dir = tmpDir();
+	// L0 记账两轮
+	accumulateRound(dir, 100);
+	accumulateRound(dir, 100);
+	const before = readAuditState(dir);
+	assert.equal(before.roundsSinceAudit, 2);
+
+	// 模拟 L1 门禁收尾：只写签名/inFlight/lastAuditAt，不碰 roundsSinceAudit/pendingChars
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		inFlight: false,
+		lastAuditAt: Date.now(),
+		signature: { status: "passed", at: Date.now() },
+	});
+
+	const after = readAuditState(dir);
+	assert.equal(after.roundsSinceAudit, 2); // L1 收尾不清记账 → L0 累积保留
+	assert.equal(after.pendingChars, 200);
+	// 下一轮继续记账 → 仍能攒够触发
+	accumulateRound(dir, 100);
+	assert.equal(readAuditState(dir).roundsSinceAudit, 3);
+});
+
+test("chainFindings：读写与消毒", () => {
+	const dir = tmpDir();
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		chainFindings: ["D-001 与 D-002 矛盾"],
+	});
+	assert.deepEqual(readAuditState(dir).chainFindings, ["D-001 与 D-002 矛盾"]);
+	// 坏值消毒
+	fs.mkdirSync(path.dirname(auditStatePath(dir)), { recursive: true });
+	fs.writeFileSync(
+		auditStatePath(dir),
+		'{"chainFindings": ["ok", 42, null]}',
+		"utf-8",
+	);
+	assert.deepEqual(readAuditState(dir).chainFindings, ["ok"]);
+});
+
+test("接线守卫：L0 触发链在扩展里接通（防断线回归）", () => {
+	const src = fs.readFileSync(
+		path.join(process.cwd(), "extensions", "decision-chain.ts"),
+		"utf-8",
+	);
+	// message_end 记账
+	assert.ok(src.includes('accumulateRound(resolveProjectRoot(ctx.cwd), text.length)'),
+		"message_end 必须调 accumulateRound 记账");
+	// agent_settled 判断+唤起
+	assert.ok(src.includes('pi.on("agent_settled"'), "agent_settled handler 必须存在");
+	assert.ok(src.includes("checkAuditDue(root)"), "agent_settled 必须调 checkAuditDue");
+	assert.ok(src.includes("spawnL0Audit(pi, rpc, readyPromise, root)"), "agent_settled 必须 spawn L0");
+	// L1 任务不碰记账字段
+	assert.ok(src.includes("不要清 roundsSinceAudit/pendingChars"), "L1 收尾不得清 L0 记账");
+	// decision_add 走 L0
+	assert.ok(src.includes('checkAuditDue(resolveProjectRoot(ctx.cwd), true)'),
+		"decision_add 必须 force 触发 L0");
 });
 
 test("recordSignature 字段级写入", () => {
