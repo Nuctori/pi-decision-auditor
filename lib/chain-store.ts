@@ -245,6 +245,8 @@ export interface AuditState {
 	chainFindings: string[];
 	/** 最近一次审计的阻塞时长（ms，agent_end 从触发到签名），CI 跑分用。 */
 	lastAuditDurationMs: number;
+	/** 最近一次审计的启动时间戳（扩展 spawn/resume 时写；审计者收尾算 duration）。 */
+	auditStartedAt: number;
 	/** 常驻审计者的 runId（跨轮 resume 用）。null = 首次 spawn。 */
 	auditorRunId: string | null;
 }
@@ -261,6 +263,7 @@ const DEFAULT_STATE: AuditState = {
 	blockedStreak: 0,
 	chainFindings: [],
 	lastAuditDurationMs: 0,
+	auditStartedAt: 0,
 	auditorRunId: null,
 };
 
@@ -314,6 +317,8 @@ export function readAuditState(cwd: string): AuditState {
 				typeof obj.lastAuditDurationMs === "number"
 					? obj.lastAuditDurationMs
 					: 0,
+			auditStartedAt:
+				typeof obj.auditStartedAt === "number" ? obj.auditStartedAt : 0,
 			auditorRunId:
 				typeof obj.auditorRunId === "string" ? obj.auditorRunId : null,
 		};

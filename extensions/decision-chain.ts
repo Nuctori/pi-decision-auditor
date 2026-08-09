@@ -244,6 +244,17 @@ async function waitForAuditCompletion(
 		const state = readAuditState(cwd);
 		// 审计者收尾写了 signature 且推进了 signatureConvLine → 审计完成
 		if (state.signature && state.signatureConvLine >= targetLines) {
+			// 阻塞时长在轮询循环内写（print 模式下 handler 尾段可能不执行，这里最可靠）
+			if (state.auditStartedAt) {
+				try {
+					writeAuditState(cwd, {
+						...readAuditState(cwd),
+						lastAuditDurationMs: Date.now() - state.auditStartedAt,
+					});
+				} catch {
+					/* noop */
+				}
+			}
 			return {
 				status: state.signature.status,
 				blockers: state.signature.blockers,
@@ -854,6 +865,7 @@ function recordAuditDuration(cwd: string, t0: number): void {
 						...readAuditState(resolveProjectRoot(ctx.cwd)),
 						inFlight: true,
 						lastAuditAt: Date.now(),
+						auditStartedAt: Date.now(),
 					});
 				} catch {
 					inFlightAudits.delete(resolveProjectRoot(ctx.cwd));
