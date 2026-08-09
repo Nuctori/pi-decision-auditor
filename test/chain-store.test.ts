@@ -26,6 +26,7 @@ import {
 	recordSignature,
 	resetForSessionStart,
 	resolveAuditConfig,
+	resolveProjectRoot,
 	writeAuditState,
 } from "../lib/chain-store.js";
 
@@ -333,6 +334,26 @@ test("needsSignoff 与 recordSignature 状态机", () => {
 	assert.equal(state.signature?.status, "blocked");
 	assert.equal(state.signature?.blockers?.length, 1);
 	assert.equal(needsSignoff(dir), false);
+});
+
+test("resolveProjectRoot 定位仓库根", () => {
+	const root = tmpDir();
+	// 子目录无标记 → 向上找
+	const sub = path.join(root, "src");
+	fs.mkdirSync(sub, { recursive: true });
+	// 无标记时退化到 cwd
+	assert.equal(resolveProjectRoot(sub), sub);
+
+	// 放 Cargo.toml 标记
+	fs.writeFileSync(path.join(root, "Cargo.toml"), "[package]\n", "utf-8");
+	assert.equal(resolveProjectRoot(sub), root); // 向上找到根
+	assert.equal(resolveProjectRoot(root), root); // 根本身
+
+	// package.json 标记
+	const node = path.join(root, "node");
+	fs.mkdirSync(node, { recursive: true });
+	fs.writeFileSync(path.join(root, "package.json"), "{}", "utf-8");
+	assert.equal(resolveProjectRoot(node), root);
 });
 
 test("convLogLineCount 统计对话行", () => {

@@ -36,6 +36,43 @@ export function chainPath(cwd: string): string {
 	return path.join(cwd, "docs", "decisions", "chain.md");
 }
 
+/** 仓库根标记文件/目录：存在任一即视为项目根。 */
+const PROJECT_ROOT_MARKERS = [
+	"Cargo.toml",
+	"package.json",
+	"go.mod",
+	"pyproject.toml",
+	"setup.py",
+	"tsconfig.json",
+	".git",
+	"pom.xml",
+	"build.gradle",
+];
+
+/**
+ * 定位真实项目根：从 cwd 向上找带仓库根标记的目录，退化到 cwd。
+ * 解决"会话在 A 目录启动但项目在 B 目录"的 cwd 错位（chain.md/state.json 应放项目根）。
+ */
+export function resolveProjectRoot(cwd: string): string {
+	try {
+		let cur = path.resolve(cwd);
+		let best = cur;
+		// 向上最多探测 5 层，取最近带仓库标记的目录
+		for (let i = 0; i < 5; i++) {
+			const hasMarker = PROJECT_ROOT_MARKERS.some((m) =>
+				fs.existsSync(path.join(cur, m)),
+			);
+			if (hasMarker) best = cur;
+			const parent = path.dirname(cur);
+			if (parent === cur) break;
+			cur = parent;
+		}
+		return best;
+	} catch {
+		return cwd;
+	}
+}
+
 export function ensureChain(cwd: string): string {
 	const file = chainPath(cwd);
 	if (!fs.existsSync(file)) {
@@ -192,6 +229,8 @@ export interface AuditState {
 	signature: AuditSignature | null;
 	/** 本轮签名对应的 convlog 行号（防止签名过期复用）。 */
 	signatureConvLine: number;
+	/** 常驻审计者的 runId（跨轮 resume 用）。null = 首次 spawn。 */
+	auditorRunId: string | null;
 }
 
 const DEFAULT_STATE: AuditState = {
@@ -203,6 +242,7 @@ const DEFAULT_STATE: AuditState = {
 	lastAuditAt: 0,
 	signature: null,
 	signatureConvLine: 0,
+	auditorRunId: null,
 };
 
 /** 审计状态文件路径：<cwd>/.pi/decision-auditor/state.json */
@@ -246,6 +286,8 @@ export function readAuditState(cwd: string): AuditState {
 					: null,
 			signatureConvLine:
 				typeof obj.signatureConvLine === "number" ? obj.signatureConvLine : 0,
+			auditorRunId:
+				typeof obj.auditorRunId === "string" ? obj.auditorRunId : null,
 		};
 	} catch {
 		return { ...DEFAULT_STATE };

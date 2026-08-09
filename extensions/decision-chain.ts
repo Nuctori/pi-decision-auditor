@@ -24,6 +24,7 @@ import {
 	recordSignature,
 	renderEntry,
 	resetForSessionStart,
+	resolveProjectRoot,
 	writeAuditState,
 } from "../lib/chain-store.js";
 
@@ -446,7 +447,7 @@ export default function (pi: ExtensionAPI): void {
 	// ---- 会话边界：新会话开始清跨会话待签名状态（保留决策链进度）----
 	pi.on("session_start", (event, ctx) => {
 		try {
-			resetForSessionStart(ctx.cwd);
+			resetForSessionStart(resolveProjectRoot(ctx.cwd));
 		} catch {
 			/* noop */
 		}
@@ -491,7 +492,7 @@ export default function (pi: ExtensionAPI): void {
 			),
 		}),
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			const entry = appendDecision(ctx.cwd, {
+			const entry = appendDecision(resolveProjectRoot(ctx.cwd), {
 				summary: params.summary,
 				context: params.context,
 				decision: params.decision,
@@ -505,7 +506,7 @@ export default function (pi: ExtensionAPI): void {
 				pi,
 				rpc,
 				readyPromise,
-				ctx.cwd,
+				resolveProjectRoot(ctx.cwd),
 				Number.MAX_SAFE_INTEGER,
 				true, // force：显式 decision_add 跳过 minInterval 节流
 			);
@@ -513,7 +514,7 @@ export default function (pi: ExtensionAPI): void {
 				content: [
 					{
 						type: "text",
-						text: `已追加 ${entry.id}: ${entry.summary} → ${chainPath(ctx.cwd)}`,
+						text: `已追加 ${entry.id}: ${entry.summary} → ${chainPath(resolveProjectRoot(ctx.cwd))}`,
 					},
 				],
 				details: { entry: renderEntry(entry) },
@@ -538,11 +539,11 @@ export default function (pi: ExtensionAPI): void {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			if (params.raw) {
 				return {
-					content: [{ type: "text", text: readRaw(ctx.cwd) }],
+					content: [{ type: "text", text: readRaw(resolveProjectRoot(ctx.cwd)) }],
 					details: {},
 				};
 			}
-			const entries = listEntries(ctx.cwd, params.onlyFrom);
+			const entries = listEntries(resolveProjectRoot(ctx.cwd), params.onlyFrom);
 			if (entries.length === 0) {
 				return {
 					content: [{ type: "text", text: "决策链为空（或指定范围无条目）。" }],
@@ -574,13 +575,13 @@ export default function (pi: ExtensionAPI): void {
 			),
 		}),
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			recordSignature(ctx.cwd, {
+			recordSignature(resolveProjectRoot(ctx.cwd), {
 				status: params.status,
 				...(params.blockers && params.blockers.length > 0
 					? { blockers: params.blockers }
 					: {}),
 			});
-			const sig = readAuditState(ctx.cwd).signature;
+			const sig = readAuditState(resolveProjectRoot(ctx.cwd)).signature;
 			return {
 				content: [
 					{
@@ -612,7 +613,7 @@ export default function (pi: ExtensionAPI): void {
 			}
 			if (rest) opts.message = rest;
 
-			const task = buildAuditTask(ctx.cwd, opts);
+			const task = buildAuditTask(resolveProjectRoot(ctx.cwd), opts);
 			try {
 				await readyPromise;
 				const result = await rpc<{ runId?: string; asyncId?: string }>(
@@ -643,48 +644,74 @@ export default function (pi: ExtensionAPI): void {
 	// ---- 产物交叉审计（agent_end 阻塞）：本轮有产物 → spawn 审计者并等待完成，签名是结束前提 ----
 	pi.on("agent_end", async (event, ctx) => {
 		try {
-			const state = readAuditState(ctx.cwd);
-			const totalLines = convLogLineCount(ctx.cwd);
+			const state = readAuditState(resolveProjectRoot(ctx.cwd));
+			const totalLines = convLogLineCount(resolveProjectRoot(ctx.cwd));
 			// 本轮是否有新产物/决策：convlog 有新增 or 有未审计决策
 			const newLines = Math.max(0, totalLines - state.convExtractedLine);
-			const hasPending = newLines > 0 || entriesSinceLastAudit(ctx.cwd).length > 0;
+			const hasPending =
+				newLines > 0 || entriesSinceLastAudit(resolveProjectRoot(ctx.cwd)).length > 0;
 			if (!hasPending) return; // 本轮无工作，无需审计
 
-			// 已有审计在跑（inFlight）→ 等待它完成；否则 spawn 新的
-			if (!state.inFlight && !hasInFlight(ctx.cwd)) {
-				inFlightAudits.set(ctx.cwd, { runId: "", startedAt: Date.now() });
+			// 已有审计在跑（inFlight）→ 等待它完成；否则复用常驻审计者 或 首次 spawn
+			if (!state.inFlight && !hasInFlight(resolveProjectRoot(ctx.cwd))) {
+				inFlightAudits.set(resolveProjectRoot(ctx.cwd), { runId: "", startedAt: Date.now() });
 				try {
 					await readyPromise;
-					const result = await rpc<{ runId?: string; asyncId?: string }>(
-						"spawn",
-						{
-							agent: AUDITOR_AGENT,
-							task: buildIncrementalAuditTask(ctx.cwd),
-							async: true,
-							context: "fresh",
-						},
-						900_000,
-					);
-					const runId = result?.runId ?? result?.asyncId ?? "";
-					inFlightAudits.set(ctx.cwd, { runId, startedAt: Date.now() });
-					writeAuditState(ctx.cwd, {
-						...readAuditState(ctx.cwd),
+					const task = buildIncrementalAuditTask(resolveProjectRoot(ctx.cwd));
+					// 复用常驻审计者：resume 同一个 run（带 session 历史 + 命中缓存），否则首次 spawn
+					if (state.auditorRunId) {
+						await rpc("resume", {
+							id: state.auditorRunId,
+							message: task,
+						}, 900_000);
+					} else {
+						const result = await rpc<{ runId?: string; asyncId?: string }>(
+							"spawn",
+							{
+								agent: AUDITOR_AGENT,
+								task,
+								async: true,
+								context: "fresh",
+							},
+							900_000,
+						);
+						const runId = result?.runId ?? result?.asyncId ?? "";
+						// 记住常驻审计者 runId（跨轮 resume）
+						if (runId) {
+							writeAuditState(resolveProjectRoot(ctx.cwd), {
+								...readAuditState(resolveProjectRoot(ctx.cwd)),
+								auditorRunId: runId,
+							});
+						}
+						inFlightAudits.set(resolveProjectRoot(ctx.cwd), {
+							runId,
+							startedAt: Date.now(),
+						});
+					}
+					writeAuditState(resolveProjectRoot(ctx.cwd), {
+						...readAuditState(resolveProjectRoot(ctx.cwd)),
 						inFlight: true,
 						lastAuditAt: Date.now(),
 					});
 				} catch {
-					inFlightAudits.delete(ctx.cwd);
-					// spawn 失败：产物未过审，标记 blocked（不阻塞 end，但状态可见）
-					recordSignature(ctx.cwd, { status: "blocked", blockers: ["审计 spawn 失败，产物未过审"] });
+					inFlightAudits.delete(resolveProjectRoot(ctx.cwd));
+					// spawn/resume 失败：产物未过审，标记 blocked（不阻塞 end，但状态可见）
+					recordSignature(resolveProjectRoot(ctx.cwd), {
+						status: "blocked",
+						blockers: ["审计触发失败，产物未过审"],
+					});
 					return;
 				}
 			}
 
 			// 【阻塞等待】审计完成（Pi awaits handler，等待生效）——降低阻塞：只审本轮增量 + 120s 上限
-			const sig = await waitForAuditCompletion(ctx.cwd);
+			const sig = await waitForAuditCompletion(resolveProjectRoot(ctx.cwd));
 			if (sig === null) {
 				// 超时：产物未过审，标记（不无限阻塞）
-				recordSignature(ctx.cwd, { status: "blocked", blockers: ["审计超时（120s），产物未过审"] });
+				recordSignature(resolveProjectRoot(ctx.cwd), {
+					status: "blocked",
+					blockers: ["审计超时（120s），产物未过审"],
+				});
 				return;
 			}
 			// sig.status 已由审计者写入 state（passed/blocked），agent_end 完成
@@ -696,10 +723,10 @@ export default function (pi: ExtensionAPI): void {
 	// ---- 锁兜底：审计完成释放残留锁 ----
 	pi.on("agent_settled", async (event, ctx) => {
 		try {
-			const state = readAuditState(ctx.cwd);
-			if (state.inFlight && !hasInFlight(ctx.cwd)) {
+			const state = readAuditState(resolveProjectRoot(ctx.cwd));
+			if (state.inFlight && !hasInFlight(resolveProjectRoot(ctx.cwd))) {
 				// 内存锁已过期/不存在但文件锁残留——审计大概率已完成，释放
-				writeAuditState(ctx.cwd, {
+				writeAuditState(resolveProjectRoot(ctx.cwd), {
 					...state,
 					inFlight: false,
 				});
@@ -735,14 +762,14 @@ export default function (pi: ExtensionAPI): void {
 			if (!msg) return;
 			if (msg.role === "user") {
 				const text = extractText(msg.content);
-				if (text) appendConv(ctx.cwd, "user", text);
+				if (text) appendConv(resolveProjectRoot(ctx.cwd), "user", text);
 				// L2 交付审查：用户明确要求交付（提交/发布/merge/交付/收工）→ 并行 fanout 深度审查
 				if (/提交|发布|merge|交付|收工|上线|部署|推送/.test(text)) {
-					void triggerDeliveryAudit(pi, rpc, readyPromise, ctx.cwd);
+					void triggerDeliveryAudit(pi, rpc, readyPromise, resolveProjectRoot(ctx.cwd));
 				}
 			} else if (msg.role === "assistant") {
 				const text = extractText(msg.content);
-				if (text) appendConv(ctx.cwd, "assistant", text);
+				if (text) appendConv(resolveProjectRoot(ctx.cwd), "assistant", text);
 			}
 		} catch {
 			/* noop：日志失败不阻塞会话 */

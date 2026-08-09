@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.5.0] - 2026-08-09
+
+常量审计者（resume 复用）+ cwd 解析修复。
+
+### 新增：常量审计者（resume 复用）
+
+- **复用而非每次 spawn**：首次 spawn 审计者时记录 runId（state.json `auditorRunId`）；后续轮次 `resume` 同一个 run（带 session 历史，命中 provider 前缀缓存 → 缓存读取比 fresh 全量重发便宜）
+- **缓存经济**：session 随轮膨胀可接受（前缀不变时命中缓存，成本递减）
+- **提灯连续**：审计者 resume 后记得之前所有轮的目标/已审发现（不再每次从 convlog 重新考古）
+
+### 修复：cwd 解析
+
+- **问题**（审计者连续 3 次上报）：会话在 `C:\Users\Nuctori` 启动但项目在 `D:\goose`，插件用 `ctx.cwd` 导致 chain.md/state.json 写到错误位置
+- **修复**：新增 `resolveProjectRoot`——从 cwd 向上最多 5 层找带仓库根标记（Cargo.toml/package.json/go.mod/.git 等）的目录，退化到 cwd；所有 handler 改用解析后的项目根
+- 审计者路径检查提示仍保留（兜底）
+
+### 测试
+
+- 18 单测通过（新增 resolveProjectRoot 仓库根定位）
+
 ## [1.4.0] - 2026-08-09
 
 产物交叉审计（agent_end 阻塞签名）——修复架构错位：审计时机从 turn_start（产物不存在）移到 agent_end（产物已存在）。
