@@ -138,9 +138,15 @@ jobs:
       - name: Verify real-path audit signoff
         run: |
           cd "$GITHUB_WORKSPACE/e2e2"
-          CONVLOG=$(find . -name convlog.md -path "*.pi*" 2>/dev/null | head -1)
-          STATE=$(find . -name state.json -path "*.pi*" 2>/dev/null | head -1)
+          # pi 可能把项目根解析到 GITHUB_WORKSPACE（仓库根有 package.json/.git），
+          # 全工作区找、最新优先
+          CONVLOG=$(find "$GITHUB_WORKSPACE" -name convlog.md -path "*.pi*" \
+            2>/dev/null | xargs ls -t 2>/dev/null | head -1)
+          STATE=$(find "$GITHUB_WORKSPACE" -name state.json -path "*.pi*" \
+            2>/dev/null | xargs ls -t 2>/dev/null | head -1)
           if [ -z "$CONVLOG" ]; then
+            echo "--- convlog anywhere under workspace? ---"
+            find "$GITHUB_WORKSPACE" -name convlog.md 2>/dev/null || true
             echo "FAIL: convlog.md not generated (capture path dead)"
             exit 1
           fi
