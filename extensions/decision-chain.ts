@@ -23,6 +23,7 @@ import {
 	readRaw,
 	recordSignature,
 	renderEntry,
+	resetForSessionStart,
 	writeAuditState,
 } from "../lib/chain-store.js";
 
@@ -336,9 +337,87 @@ function buildAuditTask(cwd: string, opts: AuditOptions): string {
 	return lines.join("\n");
 }
 
+/** L2 交付审查：并行 fanout 多个 fresh reviewer 做产物级深度审查（交付前一次）。 */
+const DELIVERY_ANGLES: Array<{ name: string; prompt: (cwd: string) => string }> = [
+	{
+		name: "正确性",
+		prompt: (cwd) =>
+			`你是交付前独立审查者（角度：正确性/回归）。项目: ${cwd}。\n` +
+			`审 git diff（当前未提交改动）与 docs/decisions/chain.md：\n` +
+			`1. 改动是否有 bug、边界错误、回归风险；\n` +
+			`2. 实现是否忠实执行了决策链中的每条决策（产物 vs 决策对照）；\n` +
+			`3. 决策链有无矛盾/悬空 supersede。\n` +
+			`输出：按严重度排序的问题清单（文件:行号 + 建议）。只读，不改文件。`,
+	},
+	{
+		name: "目标一致性",
+		prompt: (cwd) =>
+			`你是交付前独立审查者（角度：目标一致性/漂移）。项目: ${cwd}。\n` +
+			`读 .pi/decision-auditor/convlog.md（用户提示记录）推导任务目标，对照 git diff 与决策链：\n` +
+			`1. 当前改动是否服务于推导出的用户目标？有无目标外扩张？\n` +
+			`2. 决策链条目是否与用户实际要求一致？\n` +
+			`3. 主 agent 自述不可信，以 convlog 用户原话为准。\n` +
+			`输出：漂移/偏离清单。只读，不改文件。`,
+	},
+	{
+		name: "安全与健壮性",
+		prompt: (cwd) =>
+			`你是交付前独立审查者（角度：安全/健壮性）。项目: ${cwd}。\n` +
+			`审 git diff 与相关文件：\n` +
+			`1. 注入/越界/未处理错误/竞态等安全问题；\n` +
+			`2. 状态损坏路径（如审计状态文件、并发写）；\n` +
+			`3. 不变量破坏（append-only、supersede 语义等）。\n` +
+			`输出：按严重度排序的问题清单。只读，不改文件。`,
+	},
+];
+
+/** 触发 L2 交付审查：并行 spawn 多个 fresh reviewer。 */
+async function triggerDeliveryAudit(
+	pi: ExtensionAPI,
+	rpc: ReturnType<typeof makeRpc>,
+	readyPromise: Promise<void>,
+	cwd: string,
+): Promise<void> {
+	// 防重复：交付审查进行中不再触发
+	if (deliveryAuditInFlight.has(cwd)) return;
+	deliveryAuditInFlight.add(cwd);
+	try {
+		await readyPromise;
+		for (const angle of DELIVERY_ANGLES) {
+			try {
+				await rpc(
+					"spawn",
+					{
+						agent: "reviewer", // 内置 reviewer（fresh，独立）
+						task: angle.prompt(cwd),
+						async: true,
+						context: "fresh",
+					},
+					900_000,
+				);
+			} catch {
+				/* 单个角度失败不阻塞其他 */
+			}
+		}
+	} finally {
+		setTimeout(() => deliveryAuditInFlight.delete(cwd), 30 * 60 * 1000);
+	}
+}
+
+const deliveryAuditInFlight = new Set<string>();
+
 export default function (pi: ExtensionAPI): void {
 	const rpc = makeRpc(pi);
 	const readyPromise = waitForRpcReady(pi);
+
+	// ---- 会话边界：新会话开始清跨会话待签名状态（保留决策链进度）----
+	pi.on("session_start", (event, ctx) => {
+		try {
+			resetForSessionStart(ctx.cwd);
+		} catch {
+			/* noop */
+		}
+	});
 
 	// ---- 工具：decision_add（写链，agent 模式）----
 	pi.registerTool({
@@ -473,8 +552,7 @@ export default function (pi: ExtensionAPI): void {
 				content: [
 					{
 						type: "text",
-						text:
-							`已签名: ${params.status}${params.blockers?.length ? `（${params.blockers.length} 项 blocker）` : ""} → 完成前审计阶段待签名状态已解除。`,
+						text: `已签名: ${params.status}${params.blockers?.length ? `（${params.blockers.length} 项 blocker）` : ""} → 完成前审计阶段待签名状态已解除。`,
 					},
 				],
 				details: { signature: sig },
@@ -584,6 +662,10 @@ export default function (pi: ExtensionAPI): void {
 			if (msg.role === "user") {
 				const text = extractText(msg.content);
 				if (text) appendConv(ctx.cwd, "user", text);
+				// L2 交付审查：用户明确要求交付（提交/发布/merge/交付/收工）→ 并行 fanout 深度审查
+				if (/提交|发布|merge|交付|收工|上线|部署|推送/.test(text)) {
+					void triggerDeliveryAudit(pi, rpc, readyPromise, ctx.cwd);
+				}
 			} else if (msg.role === "assistant") {
 				const text = extractText(msg.content);
 				if (text) appendConv(ctx.cwd, "assistant", text);

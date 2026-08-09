@@ -53,6 +53,11 @@ decision_add(summary="采用 Redis 做读缓存", context="QPS 峰值 2k；PG �
 - **阶段内容**：① 自审计（agent 对照决策链/目标检查产物）② 交叉审计（spawn decision-auditor 独立审查）③ 签名（`decision_signoff` 工具）
 - **签名语义**：`signature.status` = `passed` / `blocked`（带 blockers）；签名后解除待签名状态
 - **工具**：`decision_signoff`（签名用，避免手写 state.json）、`decision_add`（补录决策）
+- **会话边界**：新会话开始自动清跨会话待签名状态（不继承旧会话的"未签名"提醒），决策链进度保留
+
+# 交付前深度审查（v1.3，L2 fanout）
+
+用户明确要求交付（提交/发布/merge/交付/收工/上线/部署/推送）时，并行 spawn 3 个 fresh reviewer 做产物级深度审查（正确性/目标一致性/安全健壮性）——多角度交叉审计的正确位置：交付前一次，不是持续跑。
 
 ## 设计要点
 

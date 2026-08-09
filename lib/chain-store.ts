@@ -226,7 +226,8 @@ export function readAuditState(cwd: string): AuditState {
 			pendingChars: typeof obj.pendingChars === "number" ? obj.pendingChars : 0,
 			lastAuditAt: typeof obj.lastAuditAt === "number" ? obj.lastAuditAt : 0,
 			signature:
-				obj.signature && typeof obj.signature === "object" &&
+				obj.signature &&
+				typeof obj.signature === "object" &&
 				!Array.isArray(obj.signature) &&
 				(obj.signature as AuditSignature).status !== undefined
 					? {
@@ -241,7 +242,7 @@ export function readAuditState(cwd: string): AuditState {
 							...(typeof (obj.signature as AuditSignature).runId === "string"
 								? { runId: (obj.signature as AuditSignature).runId }
 								: {}),
-					  }
+						}
 					: null,
 			signatureConvLine:
 				typeof obj.signatureConvLine === "number" ? obj.signatureConvLine : 0,
@@ -287,6 +288,29 @@ export function recordSignature(
 		signature: { ...sig, at: Date.now() },
 		signatureConvLine: totalLines,
 	});
+}
+
+/**
+ * 会话边界重置（session_start 调用）：新会话开始时清掉跨会话的待签名状态。
+ * 保留：决策链审计进度（lastAuditedId / convExtractedLine）——跨会话延续。
+ * 清零：signatureConvLine 推进到当前 convlog 行数（旧会话未签名工作不强制新会话开头就审）。
+ */
+export function resetForSessionStart(cwd: string): void {
+	try {
+		const state = readAuditState(cwd);
+		const totalLines = convLogLineCount(cwd);
+		writeAuditState(cwd, {
+			...state,
+			// 推进到当前行数 = 视为已覆盖旧会话的对话（不触发 needsSignoff）
+			signatureConvLine: totalLines,
+			// 保留上次签名状态作参考，但不再触发待签名
+			inFlight: false,
+			roundsSinceAudit: 0,
+			pendingChars: 0,
+		});
+	} catch {
+		/* noop */
+	}
 }
 
 /** 自 lastAuditedId 之后的新条目（含 lastAuditedId 自身若从未确认）；从未审计则返回全部。 */

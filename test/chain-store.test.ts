@@ -24,6 +24,7 @@ import {
 	readConvTail,
 	readRaw,
 	recordSignature,
+	resetForSessionStart,
 	resolveAuditConfig,
 	writeAuditState,
 } from "../lib/chain-store.js";
@@ -288,6 +289,25 @@ test("resolveAuditConfig 环境变量覆盖", () => {
 	assert.equal(cfg.batchChars, 5000);
 	assert.equal(cfg.minIntervalRounds, 1);
 	assert.equal(cfg.maxBatchRounds, 10);
+});
+
+test("resetForSessionStart 清跨会话待签名状态", () => {
+	const dir = tmpDir();
+	appendConv(dir, "user", "上一会话的工作");
+	appendConv(dir, "assistant", "做了改动但没签名");
+	// 模拟旧会话：有对话但 signatureConvLine=0 → needsSignoff=true
+	assert.equal(needsSignoff(dir), true);
+
+	// 新会话开始：重置
+	resetForSessionStart(dir);
+	assert.equal(needsSignoff(dir), false); // 不再触发待签名
+
+	// 决策链进度保留
+	const state = readAuditState(dir);
+	assert.equal(state.inFlight, false);
+	assert.equal(state.roundsSinceAudit, 0);
+	// signatureConvLine 推进到当前 convlog 行数
+	assert.ok(state.signatureConvLine >= convLogLineCount(dir) - 0);
 });
 
 test("needsSignoff 与 recordSignature 状态机", () => {
