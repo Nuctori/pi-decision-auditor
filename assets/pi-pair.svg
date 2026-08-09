@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="100%" stop-color="#161b22"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#58a6ff"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b949e"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="630" fill="url(#bg)"/>
+
+  <!-- header -->
+  <text x="60" y="78" font-family="Segoe UI, Arial, sans-serif" font-size="44" font-weight="700" fill="#e6edf3">pi-pair</text>
+  <text x="252" y="66" font-family="Segoe UI, Arial, sans-serif" font-size="20" font-weight="600" fill="#22d3ee">Pair Decision Audit</text>
+  <text x="252" y="92" font-family="Segoe UI, Arial, sans-serif" font-size="15" fill="#8b949e">persistent pair auditor for pi coding agent · 常驻结对审计</text>
+  <line x1="60" y1="112" x2="1140" y2="112" stroke="#21262d" stroke-width="1"/>
+
+  <!-- session bar -->
+  <rect x="60" y="132" width="1080" height="52" rx="10" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <circle cx="88" cy="158" r="8" fill="#22d3ee"/>
+  <text x="108" y="163" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="600" fill="#e6edf3">every round</text>
+  <text x="220" y="163" font-family="Segoe UI, Arial, sans-serif" font-size="15" fill="#8b949e">main agent works  →  artifacts (code / decisions / convlog)</text>
+
+  <!-- arrow session -> cards -->
+  <line x1="600" y1="184" x2="600" y2="208" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- card 1: capture -->
+  <rect x="60" y="216" width="340" height="172" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <rect x="60" y="216" width="340" height="6" rx="3" fill="url(#accent)"/>
+  <circle cx="92" cy="256" r="16" fill="#22d3ee" opacity="0.15"/>
+  <text x="92" y="262" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="700" fill="#22d3ee" text-anchor="middle">1</text>
+  <text x="120" y="262" font-family="Segoe UI, Arial, sans-serif" font-size="20" font-weight="700" fill="#e6edf3">CAPTURE</text>
+  <text x="84" y="300" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8b949e">decisions extracted from</text>
+  <text x="84" y="320" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8b949e">convlog — not the main</text>
+  <text x="84" y="340" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8b949e">agent's initiative</text>
+  <text x="84" y="372" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#58a6ff">append-only chain · D-00X</text>
+
+  <!-- arrow 1->2 -->
+  <line x1="400" y1="302" x2="430" y2="302" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- card 2: audit -->
+  <rect x="430" y="216" width="340" height="172" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <rect x="430" y="216" width="340" height="6" rx="3" fill="url(#accent)"/>
+  <circle cx="462" cy="256" r="16" fill="#22d3ee" opacity="0.15"/>
+  <text x="462" y="262" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="700" fill="#22d3ee" text-anchor="middle">2</text>
+  <text x="490" y="262" font-family="Segoe UI, Arial, sans-serif" font-size="20" font-weight="700" fill="#e6edf3">AUDIT</text>
+  <text x="454" y="300" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8b949e">goal derivation · drift vs</text>
+  <text x="454" y="320" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8b949e">target · independent fact</text>
+  <text x="454" y="340" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8b949e">verification vs repo</text>
+  <text x="454" y="372" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#58a6ff">git-diff fidelity check</text>
+
+  <!-- arrow 2->3 -->
+  <line x1="770" y1="302" x2="800" y2="302" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- card 3: sign -->
+  <rect x="800" y="216" width="340" height="172" rx="12" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+  <rect x="800" y="216" width="340" height="6" rx="3" fill="url(#accent)"/>
+  <circle cx="832" cy="256" r="16" fill="#22d3ee" opacity="0.15"/>
+  <text x="832" y="262" font-family="Segoe UI, Arial, sans-serif" font-size="17" font-weight="700" fill="#22d3ee" text-anchor="middle">3</text>
+  <text x="860" y="262" font-family="Segoe UI, Arial, sans-serif" font-size="20" font-weight="700" fill="#e6edf3">SIGN</text>
+  <text x="824" y="300" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8b949e">agent_end blocks until</text>
+  <text x="824" y="320" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8b949e">artifacts pass audit</text>
+  <text x="824" y="340" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8b949e">(120s cap)</text>
+  <text x="824" y="372" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#4ade80">passed ✓ / blocked ✗</text>
+
+  <!-- arrow cards -> chain -->
+  <line x1="600" y1="388" x2="600" y2="412" stroke="#8b949e" stroke-width="2" marker-end="url(#arrow)"/>
+
+  <!-- chain bar -->
+  <rect x="60" y="420" width="1080" height="96" rx="12" fill="#0d1117" stroke="#21262d" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="88" y="456" font-family="Segoe UI, Arial, sans-serif" font-size="16" font-weight="700" fill="#e6edf3">decision chain</text>
+  <text x="88" y="482" font-family="Consolas, monospace" font-size="14" fill="#22d3ee">.pi/decision-auditor/chain.md</text>
+  <text x="88" y="504" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#8b949e">private by default · no git pollution</text>
+  <text x="700" y="482" font-family="Consolas, monospace" font-size="14" fill="#58a6ff">PI_PAIR_CHAIN_PUBLIC=1 → docs/decisions/</text>
+  <text x="700" y="504" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#8b949e">team-visible, ADR-style</text>
+
+  <!-- footer -->
+  <text x="60" y="576" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#484f58">persistent auditor resumed across rounds · prompt-cache hits · cost controlled</text>
+  <text x="60" y="598" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#484f58">main agent unreliable → capture &amp; audit independent · MIT · Nuctori</text>
+</svg>
