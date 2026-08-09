@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.4.0] - 2026-08-09
+
+产物交叉审计（agent_end 阻塞签名）——修复架构错位：审计时机从 turn_start（产物不存在）移到 agent_end（产物已存在）。
+
+### 核心修复：产物必须被交叉审计
+
+**问题**：v1.3 预启动审计在 turn_start spawn，但此刻本轮产物还不存在——审计者读的是旧 convlog/空 diff，签名是"形式签名"（只查行号），不保证本轮产物被审过。
+
+**修复**：agent_end 阻塞交叉审计。
+
+- **agent_end 时**：本轮有产物（convlog 新增 / 决策链新条目）→ spawn 审计者 → **await 等待完成**（Pi awaits handler，阻塞生效）
+- **审计内容**：捕获本轮决策入链 → 审 git diff 产物忠实性（产物是否真的执行了决策）→ 独立核实 Context 事实
+- **签名语义**：产物通过 → passed + signatureConvLine 推进；发现 blocker → blocked + signatureConvLine 不推进（待修复）
+- **降低阻塞**：只审本轮增量（不审全链）+ 120s 超时上限（超时标记 blocked，不无限阻塞）+ fresh context 一次 spawn
+- **spawn 失败**：产物未过审 → blocked 标记（不静默）
+
+### 移除
+
+- turn_start 预启动（审计时机错位的根源）
+- before_agent_start 注入（不影响新一轮对话）
+
+### 测试
+
+- 17 单测通过
+
 ## [1.3.0] - 2026-08-09
 
 subagent 交叉审计收敛方案：分层触发 + 会话边界隔离。

@@ -90,18 +90,16 @@ acceptanceRole: writer
 
 用 `decision_signoff` 工具签名（优先，避免手写 state.json 整体覆盖）：
 
-- `decision_signoff(status="passed")`：审计通过
-- `decision_signoff(status="blocked", blockers=[...])`：发现问题
+- `decision_signoff(status="passed")`：产物忠实性通过
+- `decision_signoff(status="blocked", blockers=[...])`：发现问题（blockers 必填）
 
 若工具不可用，用 write 工具更新 `<cwd>/.pi/decision-auditor/state.json`（字段级，保留其他字段）：
 
-- `inFlight` 置 `false`（解除去重锁，允许下次唤起）
-- `lastAuditedId` 推进到链最新条目
-- `lastAuditAt` 置当前时间戳
-- `roundsSinceAudit`/`pendingChars` 清零
-- `signature` 置 `{ "status": "passed" }` 或 `{ "status": "blocked", "blockers": [...] }`，`signatureConvLine` 推进到 convlog 当前对话行数（解除完成前审计阶段的待签名状态）
+- `inFlight` 置 `false`（解除去重锁）
+- `lastAuditedId` 推进到链最新条目；`lastAuditAt` 置当前时间戳；`roundsSinceAudit`/`pendingChars` 清零
+- **签名语义**：产物通过 → `signature={status:"passed"}` 且 `signatureConvLine` 推进到 convlog 当前行数；发现 blocker → `signature={status:"blocked", blockers:[...]}` 且 **`signatureConvLine` 不推进**（待修复，agent_end 会看到未过审）
 
-审计是提醒不是门禁，用户请求始终优先。
+这是 agent_end 的阻塞签名：审计者签名是产物过审的证明。
 
 你的写权限仅限：**append chain.md** + **改 state.json**。禁止修改任何其他文件（代码、文档、配置）。
 

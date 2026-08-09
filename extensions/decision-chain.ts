@@ -173,7 +173,7 @@ function hasInFlight(cwd: string): boolean {
 function buildIncrementalAuditTask(cwd: string): string {
 	const lines: string[] = [];
 	lines.push(
-		"你是本会话的结对决策审计者。因对话增量达到阈值被自动唤起。你的职责分两步：先捕获，再审计。",
+		"你是本会话的产物交叉审计者。本轮工作已完成，你负责审计本轮产物。职责：先捕获本轮决策，再审产物忠实性。",
 	);
 	lines.push(`项目目录: ${cwd}`);
 	lines.push(`决策链: ${chainPath(cwd)}`);
@@ -184,52 +184,76 @@ function buildIncrementalAuditTask(cwd: string): string {
 		`审计状态: ${auditStatePath(cwd)}（含 convExtractedLine 定位已提取位置）`,
 	);
 	lines.push(
-		"【路径检查】若上述决策链/状态文件不存在：先用 ls 检查项目目录是否真的是仓库根（有 src/ Cargo.toml 等）。若 cwd 不是项目根（可能只含 .pi 等），用 ls 在常见位置（父目录/当前目录）定位真实项目根，把该根目录下 docs/decisions/chain.md 作为审计目标，并据此推导正确的状态文件路径。禁止把决策写进非项目目录。",
+		"【路径检查】若上述决策链/状态文件不存在：用 ls 检查 cwd 是否仓库根（有 src/ Cargo.toml 等），不是则定位真实项目根再审计。",
 	);
 	lines.push("");
-	lines.push("【第一步：捕获决策（你的新增核心职责）】");
+	lines.push("【第一步：捕获本轮决策】");
 	lines.push(
-		"1. 用 read 读对话日志，从 convExtractedLine 标记的对话行之后开始（状态文件里读；convExtractedLine 是对话行序号，即 ## 👤/## 🤖 开头的行计数）。",
+		"1. 用 read 读对话日志，从 convExtractedLine 标记的对话行之后（convExtractedLine = ## 👤/## 🤖 行计数）。",
 	);
 	lines.push(
-		"2. 识别主 agent 实际做出的关键决策：方案取舍（选 A 弃 B）、架构/依赖/实现方式改动、采纳的用户要求、推翻之前决策。",
+		"2. 识别主 agent 本轮实际做的关键决策（方案取舍/架构改动/采纳的用户要求），用 write **append** 到 docs/decisions/chain.md（## D-XXX: 标题 [Accepted]，Context/Decision/Rationale/Alternatives/Confidence/Date，编号 = 现有最大 D-NNN+1）。",
 	);
 	lines.push(
-		"3. 对每个识别出的决策，用 write 工具 **append 追加**到 docs/decisions/chain.md（格式：## D-XXX: 标题 [Accepted]，字段 Context/Decision/Rationale/Alternatives/Confidence/Date）。编号按链中现有最大 D-NNN+1。",
-	);
-	lines.push(
-		`4. 追加后更新 ${auditStatePath(cwd)} 里的 convExtractedLine 为本次读到的最后一条对话行序号，并清空 roundsSinceAudit/pendingChars。`,
-	);
-	lines.push(
-		"5. 若对话日志增量里没有值得入链的决策，也仍推进 convExtractedLine（避免重复读）。",
+		`3. 更新 ${auditStatePath(cwd)}：convExtractedLine 推进到最后一条对话行。无决策也推进。`,
 	);
 	lines.push("");
-	lines.push("【第二步：审计（对本次捕获 + 链中未审条目）】");
-	lines.push("按审计协议执行：");
+	lines.push("【第二步：审计本轮产物（核心）】");
 	lines.push(
-		"0. 先推导目标：从对话日志的用户提示推导任务目标。主 agent 自述不可信，以对话记录为准。",
-	);
-	lines.push("0.5 对照目标审漂移：本次捕获的决策是否服务于目标？");
-	lines.push(
-		"0.7 独立核实：用 read/grep/find + 只读 bash 去仓库核实 Context 事实。不信任记录，事实不符 = 偏离 ✗。",
+		"1. 先推导目标：从 convlog 用户提示推导任务目标（主 agent 自述不可信）。",
 	);
 	lines.push(
-		"1. 逐条审推理链（Context/Decision/Rationale/Alternatives/Confidence）；",
+		"2. 读 git diff（本轮未提交改动），对照本轮捕获的决策审**产物忠实性**：产物是否真的执行了决策？有未执行的决策吗？",
 	);
 	lines.push(
-		"2. 推理存疑、证据不足 → contact_supervisor(interview_request) 问主会话要真实上下文；",
+		"3. 独立核实：用 read/grep 核实 Context 事实与代码一致（不信任记录，事实不符 = 偏离 ✗）。",
 	);
-	lines.push("3. 发现链矛盾 → contact_supervisor(need_decision) 请求裁决；");
-	lines.push("4. 正确性：决策本身对吗——事实与仓库一致？收益现实？过度设计？");
-	lines.push("5. 输出逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 链健康度总评。");
+	lines.push(
+		"4. 审决策链推理（有效性/完整性/一致性/校准）——只审本轮新增条目及其 supersede 关系。",
+	);
+	lines.push("");
+	lines.push("【输出】逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 链健康度总评。");
 	lines.push("");
 	lines.push(
-		`【收尾】用 write 工具把 ${auditStatePath(cwd)} 的 inFlight 改为 false，lastAuditedId 推进到链最新条目，lastAuditAt 置当前时间，roundsSinceAudit/pendingChars 清零，并把 signature 置为 { status: "passed" }、signatureConvLine 推进到 convlog 当前对话行数。`,
+		`【收尾】用 write 更新 ${auditStatePath(cwd)}：inFlight=false，lastAuditedId 推进，lastAuditAt 置当前，roundsSinceAudit/pendingChars 清零。若产物忠实性通过 → signature={status:"passed"}、signatureConvLine 推进到 convlog 当前行；发现 blocker → signature={status:"blocked", blockers:[...]}、signatureConvLine 不推进（待修复）。`,
 	);
-	lines.push(
-		"写权限仅限：append chain.md + 改 state.json。禁止修改其他任何文件。",
-	);
+	lines.push("写权限仅限：append chain.md + 改 state.json。禁止修改其他文件。");
 	return lines.join("\n");
+}
+
+/**
+ * 等待审计完成：轮询 state.json 直到 signatureConvLine 覆盖到 convlog 当前行（审计者已签名）。
+ * 返回审计结论（signature）或 null（超时）。timeoutMs 默认 120s（降低阻塞上限）。
+ */
+async function waitForAuditCompletion(
+	cwd: string,
+	timeoutMs = 120_000,
+	pollMs = 2000,
+): Promise<{ status: string; blockers?: string[] } | null> {
+	const deadline = Date.now() + timeoutMs;
+	const targetLines = convLogLineCount(cwd);
+	while (Date.now() < deadline) {
+		const state = readAuditState(cwd);
+		// 审计者收尾写了 signature 且推进了 signatureConvLine → 审计完成
+		if (state.signature && state.signatureConvLine >= targetLines) {
+			return {
+				status: state.signature.status,
+				blockers: state.signature.blockers,
+			};
+		}
+		// 审计者可能失败/被终止：inFlight 被释放但 signature 没推进
+		if (!state.inFlight && state.signatureConvLine < targetLines) {
+			// 可能审计失败，再等一小段（避免过早放弃），然后返回 null
+			await sleep(pollMs);
+			continue;
+		}
+		await sleep(pollMs);
+	}
+	return null;
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -616,42 +640,56 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	// ---- 预启动审计：turn_start 时 spawn（并行跑，预算 = 回复时长）----
-	pi.on("turn_start", (event, ctx) => {
-		// 本轮是否有实际工作：convlog 有新增 or 决策链有新条目
+	// ---- 产物交叉审计（agent_end 阻塞）：本轮有产物 → spawn 审计者并等待完成，签名是结束前提 ----
+	pi.on("agent_end", async (event, ctx) => {
 		try {
 			const state = readAuditState(ctx.cwd);
 			const totalLines = convLogLineCount(ctx.cwd);
+			// 本轮是否有新产物/决策：convlog 有新增 or 有未审计决策
 			const newLines = Math.max(0, totalLines - state.convExtractedLine);
-			if (newLines <= 0 && state.lastAuditedId === null) {
-				// 无新对话且从未审计：首次会话可能无 convlog，尝试预启动一次
-				void maybeAutoAudit(pi, rpc, readyPromise, ctx.cwd, 1, false);
-				return;
-			}
-			if (newLines > 0) {
-				// 有新增对话：预启动审计（force=false 走增量累积，但这里直接 spawn 预算审计）
-				void maybeAutoAudit(pi, rpc, readyPromise, ctx.cwd, newLines * 100, false);
-			}
-		} catch {
-			/* noop */
-		}
-	});
+			const hasPending = newLines > 0 || entriesSinceLastAudit(ctx.cwd).length > 0;
+			if (!hasPending) return; // 本轮无工作，无需审计
 
-	// ---- agent_end 签名检查：预启动审计就绪则签名（不阻塞，未就绪放弃本轮）----
-	pi.on("agent_end", (event, ctx) => {
-		try {
-			const state = readAuditState(ctx.cwd);
-			const totalLines = convLogLineCount(ctx.cwd);
-			// 审计者已推进 convExtractedLine 且签名未覆盖本轮 → 签名就绪
-			if (state.convExtractedLine >= totalLines && state.signatureConvLine < totalLines) {
-				// 审计者收尾已写 inFlight:false 且推进了 convExtractedLine；这里确保签名
-				if (!state.signature || state.signatureConvLine < totalLines) {
-					recordSignature(ctx.cwd, { status: "passed" });
+			// 已有审计在跑（inFlight）→ 等待它完成；否则 spawn 新的
+			if (!state.inFlight && !hasInFlight(ctx.cwd)) {
+				inFlightAudits.set(ctx.cwd, { runId: "", startedAt: Date.now() });
+				try {
+					await readyPromise;
+					const result = await rpc<{ runId?: string; asyncId?: string }>(
+						"spawn",
+						{
+							agent: AUDITOR_AGENT,
+							task: buildIncrementalAuditTask(ctx.cwd),
+							async: true,
+							context: "fresh",
+						},
+						900_000,
+					);
+					const runId = result?.runId ?? result?.asyncId ?? "";
+					inFlightAudits.set(ctx.cwd, { runId, startedAt: Date.now() });
+					writeAuditState(ctx.cwd, {
+						...readAuditState(ctx.cwd),
+						inFlight: true,
+						lastAuditAt: Date.now(),
+					});
+				} catch {
+					inFlightAudits.delete(ctx.cwd);
+					// spawn 失败：产物未过审，标记 blocked（不阻塞 end，但状态可见）
+					recordSignature(ctx.cwd, { status: "blocked", blockers: ["审计 spawn 失败，产物未过审"] });
+					return;
 				}
 			}
-			// 未就绪：放弃本轮签名（不补签，不阻塞 end）
+
+			// 【阻塞等待】审计完成（Pi awaits handler，等待生效）——降低阻塞：只审本轮增量 + 120s 上限
+			const sig = await waitForAuditCompletion(ctx.cwd);
+			if (sig === null) {
+				// 超时：产物未过审，标记（不无限阻塞）
+				recordSignature(ctx.cwd, { status: "blocked", blockers: ["审计超时（120s），产物未过审"] });
+				return;
+			}
+			// sig.status 已由审计者写入 state（passed/blocked），agent_end 完成
 		} catch {
-			/* noop：不阻塞 end */
+			/* noop：不崩溃 */
 		}
 	});
 
