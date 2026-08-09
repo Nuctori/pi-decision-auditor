@@ -193,7 +193,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 		"1. 用 read 读对话日志，从 convExtractedLine 标记的对话行之后（convExtractedLine = ## 👤/## 🤖 行计数）。",
 	);
 	lines.push(
-		"2. 识别主 agent 本轮实际做的关键决策（方案取舍/架构改动/采纳的用户要求），用 write **append** 到 docs/decisions/chain.md（## D-XXX: 标题 [Accepted]，Context/Decision/Rationale/Alternatives/Confidence/Date，编号 = 现有最大 D-NNN+1）。",
+		`2. 识别主 agent 本轮实际做的关键决策（方案取舍/架构改动/采纳的用户要求），用 write **append** 到 ${chainPath(cwd)}（## D-XXX: 标题 [Accepted]，Context/Decision/Rationale/Alternatives/Confidence/Date，编号 = 现有最大 D-NNN+1）。`,
 	);
 	lines.push(
 		`3. 更新 ${auditStatePath(cwd)}：convExtractedLine 推进到最后一条对话行。无决策也推进。`,
@@ -539,7 +539,9 @@ export default function (pi: ExtensionAPI): void {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			if (params.raw) {
 				return {
-					content: [{ type: "text", text: readRaw(resolveProjectRoot(ctx.cwd)) }],
+					content: [
+						{ type: "text", text: readRaw(resolveProjectRoot(ctx.cwd)) },
+					],
 					details: {},
 				};
 			}
@@ -649,21 +651,29 @@ export default function (pi: ExtensionAPI): void {
 			// 本轮是否有新产物/决策：convlog 有新增 or 有未审计决策
 			const newLines = Math.max(0, totalLines - state.convExtractedLine);
 			const hasPending =
-				newLines > 0 || entriesSinceLastAudit(resolveProjectRoot(ctx.cwd)).length > 0;
+				newLines > 0 ||
+				entriesSinceLastAudit(resolveProjectRoot(ctx.cwd)).length > 0;
 			if (!hasPending) return; // 本轮无工作，无需审计
 
 			// 已有审计在跑（inFlight）→ 等待它完成；否则复用常驻审计者 或 首次 spawn
 			if (!state.inFlight && !hasInFlight(resolveProjectRoot(ctx.cwd))) {
-				inFlightAudits.set(resolveProjectRoot(ctx.cwd), { runId: "", startedAt: Date.now() });
+				inFlightAudits.set(resolveProjectRoot(ctx.cwd), {
+					runId: "",
+					startedAt: Date.now(),
+				});
 				try {
 					await readyPromise;
 					const task = buildIncrementalAuditTask(resolveProjectRoot(ctx.cwd));
 					// 复用常驻审计者：resume 同一个 run（带 session 历史 + 命中缓存），否则首次 spawn
 					if (state.auditorRunId) {
-						await rpc("resume", {
-							id: state.auditorRunId,
-							message: task,
-						}, 900_000);
+						await rpc(
+							"resume",
+							{
+								id: state.auditorRunId,
+								message: task,
+							},
+							900_000,
+						);
 					} else {
 						const result = await rpc<{ runId?: string; asyncId?: string }>(
 							"spawn",
@@ -765,7 +775,12 @@ export default function (pi: ExtensionAPI): void {
 				if (text) appendConv(resolveProjectRoot(ctx.cwd), "user", text);
 				// L2 交付审查：用户明确要求交付（提交/发布/merge/交付/收工）→ 并行 fanout 深度审查
 				if (/提交|发布|merge|交付|收工|上线|部署|推送/.test(text)) {
-					void triggerDeliveryAudit(pi, rpc, readyPromise, resolveProjectRoot(ctx.cwd));
+					void triggerDeliveryAudit(
+						pi,
+						rpc,
+						readyPromise,
+						resolveProjectRoot(ctx.cwd),
+					);
 				}
 			} else if (msg.role === "assistant") {
 				const text = extractText(msg.content);

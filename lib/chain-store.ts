@@ -33,7 +33,13 @@ const HEADER = `# Decision Chain
 `;
 
 export function chainPath(cwd: string): string {
-	return path.join(cwd, "docs", "decisions", "chain.md");
+	// 默认写 .pi/ 私有目录（不污染项目 git）；PI_PAIR_CHAIN_PUBLIC=1 才写 docs/decisions/（团队可见）
+	const publicChain =
+		process.env.PI_PAIR_CHAIN_PUBLIC === "1" ||
+		process.env.PI_PAIR_CHAIN_PUBLIC === "true";
+	return publicChain
+		? path.join(cwd, "docs", "decisions", "chain.md")
+		: path.join(cwd, ".pi", "decision-auditor", "chain.md");
 }
 
 /** 仓库根标记文件/目录：存在任一即视为项目根。 */

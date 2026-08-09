@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.6.0] - 2026-08-09
+
+决策链默认私有化（不污染项目 git）+ cwd 相关配套。
+
+### 新增：决策链默认写 .pi/ 私有目录
+
+- **问题**：决策链默认写 `docs/decisions/chain.md`，会进项目的 git（用户没要求就多一个文件），违背"插件不越权"
+- **修复**：默认写 `<项目根>/.pi/decision-auditor/chain.md`（私有，gitignore 覆盖）；设 `PI_PAIR_CHAIN_PUBLIC=1` 才写 `docs/decisions/chain.md`（团队可见，像 ADR）
+- 审计任务模板、SKILL、README 同步更新路径说明
+
+### 测试
+
+- 验证 chainPath 默认/公开两种模式（18 单测全过）
+
 ## [1.5.0] - 2026-08-09
 
 常量审计者（resume 复用）+ cwd 解析修复。

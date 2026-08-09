@@ -44,7 +44,7 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 | **产物必须交叉审计** | `agent_end` 阻塞等待审计签名——未经独立审计的工作不能"结束" |
 | **常驻结对** | 审计者 resume 复用，记得整个结对历史与目标，不是每次从零考古 |
 | **不靠主 agent 自觉** | 决策从对话日志提取、事实从仓库核实，独立第三方完成 |
-| **决策链** | `docs/decisions/chain.md` append-only，记录每次取舍的 Context/Decision/Rationale/Alternatives |
+| **决策链** | 默认 `.pi/decision-auditor/chain.md`（私有，不污染 git）；`PI_PAIR_CHAIN_PUBLIC=1` 写 `docs/decisions/chain.md`（团队可见） |
 | **成本可控** | 只审本轮增量 + 120s 上限；session 复用命中 prompt 缓存（比 fresh 全量便宜） |
 | **cwd 自适应** | 从任何目录启动都能定位真实项目根（找 Cargo.toml/package.json/.git 等） |
 
@@ -84,6 +84,7 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 | `PI_PAIR_MIN_INTERVAL` | 2 | 两次审计最小间隔（轮） |
 | `PI_PAIR_MAX_BATCH` | 15 | 决策稀疏时强制审计兜底（轮） |
 | `PI_DECISION_AUDITOR_INJECT=off` | 开 | 关闭链状态注入（历史遗留，默认可忽略） |
+| `PI_PAIR_CHAIN_PUBLIC=1` | 关 | 决策链写 `docs/decisions/chain.md`（团队可见）；默认写 `.pi/decision-auditor/chain.md`（私有） |
 
 ## 决策链格式
 

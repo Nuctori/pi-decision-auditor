@@ -5,7 +5,7 @@ description: 结对决策审计的纪律：何时用 decision_add 记录关键�
 
 # 决策链纪律（Decision Chain Discipline）
 
-你与一个只读代码的结对审计者（`decision-auditor`）共同工作。它负责从对话日志捕获决策入链并审计决策推理链（`docs/decisions/chain.md`），不写代码。你的职责是配合它，让链保持可审计。
+你与一个只读代码的结对审计者（`decision-auditor`）共同工作。它负责从对话日志捕获决策入链并审计决策推理链（默认 `.pi/decision-auditor/chain.md`，设 `PI_PAIR_CHAIN_PUBLIC=1` 时写 `docs/decisions/chain.md`），不写代码。你的职责是配合它，让链保持可审计。
 
 ## 何时必须记录决策（用 `decision_add`）
 

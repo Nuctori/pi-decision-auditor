@@ -1,6 +1,6 @@
 {
   "name": "pi-pair",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "结对决策审计（pair audit）：自动捕获 AI 决策推理链到 docs/decisions/chain.md，审计者随对话增量被唤起，审决策链（推理/正确性/漂移），目标推导自对话日志，按需查询主会话",
   "license": "MIT",
   "author": "Nuctori",
