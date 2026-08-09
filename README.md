@@ -2,13 +2,15 @@
 
 **Pair decision audit for pi coding agent** · 结对决策审计插件
 
-A persistent "pair auditor" (灯人/holder of the lamp) for every pi session. It continuously holds the task goal, cross-audits each round's artifacts against the decision chain, and **blocks `agent_end` until the artifact passes the audit signature**.
+> [English](README.md) · [中文](README.zh-CN.md)
+
+A persistent "pair auditor" (举灯人 / holder of the lamp) for every pi session. It continuously holds the task goal, cross-audits each round's artifacts against the decision chain, and **blocks `agent_end` until the artifact passes the audit signature**.
 
 Core premise: **the main agent is not reliable**. Decisions aren't recorded by its initiative (the auditor extracts them from the conversation log independently), and audit judgement doesn't trust its self-description (it trusts the conversation record and repository facts).
 
 ---
 
-## 安装 · Installation
+## Installation
 
 ```bash
 pi install npm:pi-pair          # npm dist
@@ -16,9 +18,9 @@ pi install ./pi-pair            # local dev
 pi install git:github.com/Nuctori/pi-pair   # git source
 ```
 
-Requires: **pi-subagents** (spawns / resumes the auditor). Optional: avtc-pi-user-decisions.
+Requires: **pi-subagents** (spawns / resumes the auditor).
 
-> **Local-path note**: pi-subagents usually auto-discovers agents in settings' local-path package roots. If `agents/decision-auditor.md` isn't found, copy it manually:
+> **Local-path note**: pi-subagents usually auto-discovers agents in local-path package roots. If `agents/decision-auditor.md` isn't found, copy it manually:
 >
 > ```bash
 > mkdir -p ~/.pi/agent/agents && cp agents/decision-auditor.md ~/.pi/agent/agents/
@@ -26,7 +28,7 @@ Requires: **pi-subagents** (spawns / resumes the auditor). Optional: avtc-pi-use
 
 ---
 
-## 它做什么 · What it does
+## What it does
 
 ```text
 each session (session_start)
@@ -41,29 +43,34 @@ each work round (agent_end, blocking signoff — hard gate)
       · passed → end ✓
       · blocked → fix round (followUp, fix now) → re-audit → up to 3×
       · 3× still blocked → passed-with-warning release (end is end)
+      · timeout (120s) → negotiated stop: steer auditor to sign current findings
+        as blockers early (fix immediately) — hard kill only as fallback
 
 on delivery ("submit/publish/merge/deploy" etc)
   └─ parallel fanout 3 fresh reviewers (correctness / goal-alignment / security-robustness)
 ```
 
+**Hard gate**: `agent_end` blocks until the audit signature. A blocked artifact triggers an immediate fix round (follow-up message, max 3×), then releases with a warning — `end is end`. Un-audited work can never be presented as "complete".
+
 ---
 
-## 为什么值得用 · Why
+## Why
 
-| Capability | 说明 |
+| Capability | Description |
 | --- | --- |
-| **Artifacts must be cross-audited** | `agent_end` blocks until audit signature—un-audited work can't "finish"; blocked artifacts trigger an immediate fix round (max 3×), then release-with-warning |
+| **Artifacts must be cross-audited** | `agent_end` blocks until audit signature; blocked artifacts trigger an immediate fix round (max 3×), then release-with-warning |
 | **Persistent pairing** | auditor resumed across rounds, remembers the whole pairing history & goal |
 | **Not dependent on main agent** | decisions extracted from convlog, facts verified from repo, by an independent agent |
 | **Decision chain** | default `.pi/decision-auditor/chain.md` (private, no git pollution); `PI_PAIR_CHAIN_PUBLIC=1` → `docs/decisions/chain.md` (team-visible) |
+| **In-window communication** | auditor talks to the main agent only inside the agent_end window (contact_supervisor, 60s cap); negotiated stop on timeout — no out-of-window wake-ups |
 | **Cost control** | audits only this round's increment + 120s cap; session reuse hits prompt cache (cheaper than fresh full-send) |
 | **cwd adaptive** | finds the real project root from any start dir (Cargo.toml/package.json/.git etc) |
 
 ---
 
-## 组成 · Components
+## Components
 
-| Component | Path | 作用 |
+| Component | Path | Role |
 | --- | --- | --- |
 | Extension | `extensions/decision-chain.ts` | hooks (session_start / agent_end / message_end) + tools (`decision_add` `decision_list` `decision_signoff`) + `/pair-audit` command |
 | Storage | `lib/chain-store.ts` | decision chain read/write (append-only, auto-numbering, supersede) + audit state (`.pi/decision-auditor/state.json`) + project-root resolution |
@@ -72,20 +79,22 @@ on delivery ("submit/publish/merge/deploy" etc)
 
 ---
 
-## 审计协议 · Audit protocol
+## Audit protocol
 
 Each round the auditor:
 
-1. **Derive goal**: read the conversation log (`convlog.md`), derive the task goal from user prompts—main agent's self-description is untrusted, user's words win
+1. **Derive goal**: read the conversation log (`convlog.md`), derive the task goal from user prompts — main agent's self-description is untrusted, user's words win
 2. **Capture**: extract the main agent's actual key decisions this round, append to the decision chain (not its initiative)
 3. **Audit**: drift vs goal → independently verify Context facts vs repo → audit the reasoning chain (validity/completeness/consistency/calibration) → audit artifact fidelity vs `git diff`
-4. **Sign**: artifacts pass → `signature=passed`; findings → `signature=blocked` (to fix)
+4. **Sign**: artifacts pass → `signature=passed`; findings → `signature=blocked` with actionable blockers (the main agent fixes them immediately)
+
+Window rules: the auditor runs only inside the `agent_end` blocking window. It may `contact_supervisor` for clarification (60s cap — otherwise decide from evidence). On window timeout, the extension negotiates: the auditor signs current findings as blockers early, or confirms abort. Outside the window it never contacts the main agent.
 
 ---
 
-## 工具 · Tools
+## Tools
 
-| Tool | 作用 |
+| Tool | Role |
 | --- | --- |
 | `decision_add` | main agent proactively records a key decision (auto-numbered D-00X, append-only, supersede) — optional; auditor also auto-captures |
 | `decision_list` | read the decision chain |
@@ -94,9 +103,9 @@ Each round the auditor:
 
 ---
 
-## 环境变量 · Environment
+## Environment
 
-| Var | Default | 说明 |
+| Var | Default | Description |
 | --- | --- | --- |
 | `PI_PAIR_BATCH_ROUNDS` | 6 | rounds threshold for incremental-accumulation trigger |
 | `PI_PAIR_BATCH_CHARS` | 8000 | char threshold for incremental-accumulation trigger |
@@ -107,7 +116,7 @@ Each round the auditor:
 
 ---
 
-## 决策链格式 · Decision chain format
+## Decision chain format
 
 ```markdown
 ## D-001: 采用 Redis 做读缓存 [Accepted]
@@ -121,12 +130,13 @@ Each round the auditor:
 
 ---
 
-## 设计要点 · Design notes
+## Design notes
 
-- **主 agent 不可靠 / main agent unreliable**: decisions recorded by the auditor, facts verified by the auditor, judgement independent of main-agent self-description
-- **常驻 + 缓存 / persistent + cached**: auditor resumed across rounds (session history hits prompt cache) — continuous across rounds while controlling cost
-- **append-only + 防篡改 / tamper-proof**: old decisions never edited; revision = supersede
-- **Context 是事实，Rationale 是推理**: auditor checks "does the reasoning derive from the facts", catching fabricated numbers and over-engineering
+- **Main agent unreliable**: decisions recorded by the auditor, facts verified by the auditor, judgement independent of main-agent self-description
+- **Persistent + cached**: auditor resumed across rounds (session history hits prompt cache) — continuous across rounds while controlling cost
+- **Append-only + tamper-proof**: old decisions never edited; revision = supersede
+- **Context is fact, Rationale is reasoning**: the auditor checks "does the reasoning derive from the facts", catching fabricated numbers and over-engineering
+- **End is end**: the audit gate exits deterministically — pass, fix-loop (max 3×), or release-with-warning. No deadlock, no out-of-window wake-ups
 
 ---
 

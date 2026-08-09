@@ -112,3 +112,67 @@ jobs:
           else
             echo "WARN: state.json not found under GITHUB_WORKSPACE"
           fi
+      - name: Run E2E - real work path (agent_end audit signoff)
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/e2e2" && cd "$GITHUB_WORKSPACE/e2e2"
+          # 空 package.json 作为仓库根标记
+          echo '{}' > package.json
+          cat > prompt.txt <<'EOF'
+          在 . 下创建一个 calculator.py 文件，包含 add(a, b) 和 sub(a, b)
+          两个函数，每个函数用一行 return 实现。
+          只做这一件事，不要运行 shell 命令，不要读其他文件。
+          EOF
+          pi -p "$(cat prompt.txt)" --provider opencode-cli \
+            --model opencode/deepseek-v4-flash-free \
+            2>&1 | tee "$GITHUB_WORKSPACE/e2e2/out.txt" || true
+          if grep -q "Error" "$GITHUB_WORKSPACE/e2e2/out.txt"; then
+            echo "E2E2 FAILED: see out.txt"
+            exit 1
+          fi
+          if [ -f calculator.py ]; then
+            echo "PASS: main agent produced artifact (calculator.py)"
+          else
+            echo "WARN: calculator.py missing (model variance; "
+            echo "      mechanism still checked below)"
+          fi
+      - name: Verify real-path audit signoff
+        run: |
+          cd "$GITHUB_WORKSPACE/e2e2"
+          CONVLOG=$(find . -name convlog.md -path "*.pi*" 2>/dev/null | head -1)
+          STATE=$(find . -name state.json -path "*.pi*" 2>/dev/null | head -1)
+          if [ -z "$CONVLOG" ]; then
+            echo "FAIL: convlog.md not generated (capture path dead)"
+            exit 1
+          fi
+          echo "=== convlog ($CONVLOG) ==="
+          head -20 "$CONVLOG"
+          grep -q "## 👤" "$CONVLOG" \
+            && echo "PASS: convlog captured user prompt" \
+            || { echo "FAIL: convlog missing user prompt"; exit 1; }
+          grep -q "## 🤖" "$CONVLOG" \
+            && echo "PASS: convlog captured assistant reply" \
+            || { echo "FAIL: convlog missing assistant reply"; exit 1; }
+          if [ -z "$STATE" ]; then
+            echo "FAIL: state.json missing (agent_end audit never ran)"
+            exit 1
+          fi
+          echo "=== state ($STATE) ==="
+          cat "$STATE"
+          SIG=$(grep -o '"status": "[a-z-]*"' "$STATE" | tail -1)
+          echo "audit signature: $SIG"
+          case "$SIG" in
+            *passed*|*passed-with-warning*)
+              echo "PASS: audit gate passed on real work path" ;;
+            *blocked*|*timeout*)
+              echo "WARN: audit blocked — gate intercepted (real path"
+              echo "      exercised; fix loop would engage)" ;;
+            *)
+              echo "FAIL: no audit signature written"
+              exit 1 ;;
+          esac
+          grep -q '"inFlight": false' "$STATE" \
+            && echo "PASS: lock released" \
+            || { echo "FAIL: inFlight still true"; exit 1; }
+          grep -q '"blockedStreak": [0-9]' "$STATE" \
+            && echo "PASS: blockedStreak tracking present" \
+            || { echo "WARN: blockedStreak field missing"; exit 1; }
