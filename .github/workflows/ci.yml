@@ -195,18 +195,22 @@ jobs:
             echo '{}' > package.json
             echo '写一个 helper.py 文件，包含 double(x) 返回 x*2。只做这一件事。' \
               > prompt.txt
+            # 进程级耗时：主 agent 工作相同（同 prompt），差值 ≈ 审计阻塞差异
+            local start end
+            start=$(date +%s%3N)
             PI_PAIR_PROCESS_LOG="$flag" pi -p "$(cat prompt.txt)" \
               --provider opencode-cli --model opencode/deepseek-v4-flash-free \
-              2>&1 | tail -2 || true
-            local state
+              >/dev/null 2>&1 || true
+            end=$(date +%s%3N)
+            local state dur sig
             state=$(find "$GITHUB_WORKSPACE" -name state.json -path "*.pi*" \
               2>/dev/null | xargs ls -t 2>/dev/null | head -1)
-            local dur sig
             dur=$(grep -o '"lastAuditDurationMs": [0-9]*' "$state" \
               | head -1 | grep -o '[0-9]*')
             sig=$(grep -o '"status": "[a-z-]*"' "$state" | tail -1 \
               | cut -d'"' -f4)
-            echo "$label: audit_duration=${dur:-NA}ms signature=$sig"
+            echo "$label: process_ms=$((end-start)) "\
+              "audit_duration=${dur:-NA}ms signature=$sig"
           }
           # 跑前清一次（e2e/e2e2 残留状态不干扰 bench）
           rm -rf "$GITHUB_WORKSPACE/.pi"

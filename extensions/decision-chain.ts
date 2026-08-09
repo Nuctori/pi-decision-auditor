@@ -824,6 +824,14 @@ function recordAuditDuration(cwd: string, t0: number): void {
 					runId: "",
 					startedAt: Date.now(),
 				});
+				// auditStartedAt 在 spawn/resume 的 rpc await **之前**写：
+				// print 模式下 handler 可能在 rpc await 处被丢弃，写在之后会丢（CI 跑分 duration=0）
+				writeAuditState(resolveProjectRoot(ctx.cwd), {
+					...readAuditState(resolveProjectRoot(ctx.cwd)),
+					inFlight: true,
+					lastAuditAt: Date.now(),
+					auditStartedAt: Date.now(),
+				});
 				try {
 					await readyPromise;
 					const task = buildIncrementalAuditTask(resolveProjectRoot(ctx.cwd));
@@ -861,15 +869,13 @@ function recordAuditDuration(cwd: string, t0: number): void {
 							startedAt: Date.now(),
 						});
 					}
-					writeAuditState(resolveProjectRoot(ctx.cwd), {
-						...readAuditState(resolveProjectRoot(ctx.cwd)),
-						inFlight: true,
-						lastAuditAt: Date.now(),
-						auditStartedAt: Date.now(),
-					});
 				} catch {
 					inFlightAudits.delete(resolveProjectRoot(ctx.cwd));
-					// spawn/resume 失败：产物未过审，标记 blocked（不阻塞 end，但状态可见）
+					// spawn/resume 失败：释放 inFlight 锁 + 产物未过审标记 blocked
+					writeAuditState(resolveProjectRoot(ctx.cwd), {
+						...readAuditState(resolveProjectRoot(ctx.cwd)),
+						inFlight: false,
+					});
 					recordSignature(resolveProjectRoot(ctx.cwd), {
 						status: "blocked",
 						blockers: ["审计触发失败，产物未过审"],
