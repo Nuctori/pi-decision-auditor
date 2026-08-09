@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.2] - 2026-08-09
+
+严格门禁 + 当场修复循环 + 窗口内通信（A2/B1/C1 设计）。
+
+### 核心：审计是 end 的前提，缺口必须当场修
+
+- **B1 阻塞门禁**：`agent_end` 阻塞等审计结论，**passed 才 end**；blocked → `sendUserMessage(followUp)` 触发当场修复轮 → 修复轮 `agent_end` 再次审计 → 直到 passed。用户不再收到"先完成、后纠正"的假声明——主 agent 一直工作到审计通过。
+- **A2 降级退出**：连续 blocked 达 3 次 → 签名降级 `passed-with-warning` 放行（`ctx.ui.notify` 警告）——**end 就是 end**，不无限修复循环。
+- **C1 窗口内通信**：审计者只在 agent_end 阻塞窗口内 `contact_supervisor`（60s 未回复即放弃，按证据给结论）；超时后扩展尝试 `stop` 审计者 run（防窗口外唤起主 agent）；跨会话疑问不残留机制——下一轮 AI 有完整上下文，会自己问。
+- 审计任务/审计者协议：明确"本轮产物已完整，直接给结论"；修复轮先验证上轮 blockers 是否已修复再判定；blocked 的 blockers 必须具体可操作。
+
+### 新增
+
+- `blockedStreak` 连续 blocked 计数（blocked/timeout +1，passed/降级清零）
+- 签名状态 `passed-with-warning`（A2 降级放行）
+
+### 测试
+
+- 19 单测通过（新增 blockedStreak 递增/清零/降级）
+
 ## [1.0.0] - 2026-08-09
 
 **首个正式发布**（npm 包名为 `pi-pair`）。此前 1.1~1.6 为内部开发迭代，本版合并为 1.0.0。

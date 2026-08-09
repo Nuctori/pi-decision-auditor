@@ -208,8 +208,12 @@ export function renderEntry(e: DecisionEntry): string {
 // 存 <cwd>/.pi/decision-auditor/state.json，跨会话持久。
 
 export interface AuditSignature {
-	/** 签名状态：passed=审计通过；blocked=发现问题；timeout=超时未完成。 */
-	status: "passed" | "blocked" | "timeout";
+	/**
+	 * 签名状态：
+	 * passed = 审计通过；blocked = 发现问题；timeout = 超时未完成；
+	 * passed-with-warning = 连续 blocked 达上限后降级放行（A2 门禁退出）。
+	 */
+	status: "passed" | "blocked" | "timeout" | "passed-with-warning";
 	/** 签名时间（epoch ms）。 */
 	at: number;
 	/** blocker 摘要（blocked 时）。 */
@@ -235,6 +239,8 @@ export interface AuditState {
 	signature: AuditSignature | null;
 	/** 本轮签名对应的 convlog 行号（防止签名过期复用）。 */
 	signatureConvLine: number;
+	/** 连续 blocked 次数（A2 门禁退出：>=3 降级放行）。passed 后清零。 */
+	blockedStreak: number;
 	/** 常驻审计者的 runId（跨轮 resume 用）。null = 首次 spawn。 */
 	auditorRunId: string | null;
 }
@@ -248,6 +254,7 @@ const DEFAULT_STATE: AuditState = {
 	lastAuditAt: 0,
 	signature: null,
 	signatureConvLine: 0,
+	blockedStreak: 0,
 	auditorRunId: null,
 };
 
@@ -292,6 +299,8 @@ export function readAuditState(cwd: string): AuditState {
 					: null,
 			signatureConvLine:
 				typeof obj.signatureConvLine === "number" ? obj.signatureConvLine : 0,
+			blockedStreak:
+				typeof obj.blockedStreak === "number" ? obj.blockedStreak : 0,
 			auditorRunId:
 				typeof obj.auditorRunId === "string" ? obj.auditorRunId : null,
 		};
@@ -331,10 +340,16 @@ export function recordSignature(
 ): void {
 	const state = readAuditState(cwd);
 	const totalLines = convLogLineCount(cwd);
+	// A2 门禁：连续 blocked 递增；passed / 降级放行后清零。
+	const blockedStreak =
+		sig.status === "blocked" || sig.status === "timeout"
+			? state.blockedStreak + 1
+			: 0;
 	writeAuditState(cwd, {
 		...state,
 		signature: { ...sig, at: Date.now() },
 		signatureConvLine: totalLines,
+		blockedStreak,
 	});
 }
 

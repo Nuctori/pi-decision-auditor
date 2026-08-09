@@ -267,6 +267,40 @@ test("recordSignature 字段级写入", () => {
 	assert.deepEqual(s2.signature?.blockers, ["x"]);
 });
 
+test("blockedStreak：blocked/timeout 递增，passed/降级清零", () => {
+	const dir = tmpDir();
+	appendConv(dir, "user", "测试");
+
+	// 初始 0
+	assert.equal(readAuditState(dir).blockedStreak, 0);
+
+	// blocked 递增 1
+	recordSignature(dir, { status: "blocked", blockers: ["a"] });
+	assert.equal(readAuditState(dir).blockedStreak, 1);
+
+	// timeout 递增 2
+	recordSignature(dir, { status: "timeout" });
+	assert.equal(readAuditState(dir).blockedStreak, 2);
+
+	// blocked 递增 3
+	recordSignature(dir, { status: "blocked", blockers: ["b"] });
+	assert.equal(readAuditState(dir).blockedStreak, 3);
+
+	// passed 清零
+	recordSignature(dir, { status: "passed" });
+	assert.equal(readAuditState(dir).blockedStreak, 0);
+
+	// 降级放行（passed-with-warning）也清零
+	recordSignature(dir, { status: "blocked", blockers: ["c"] });
+	assert.equal(readAuditState(dir).blockedStreak, 1);
+	recordSignature(dir, {
+		status: "passed-with-warning",
+		blockers: ["c"],
+	});
+	assert.equal(readAuditState(dir).blockedStreak, 0);
+	assert.equal(readAuditState(dir).signature?.status, "passed-with-warning");
+});
+
 test("readAuditState 坏 signature 消毒", () => {
 	const dir = tmpDir();
 	fs.mkdirSync(path.dirname(auditStatePath(dir)), { recursive: true });

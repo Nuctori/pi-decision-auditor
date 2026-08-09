@@ -176,6 +176,12 @@ function buildIncrementalAuditTask(cwd: string): string {
 	lines.push(
 		"你是本会话的产物交叉审计者。本轮工作已完成，你负责审计本轮产物。职责：先捕获本轮决策，再审产物忠实性。",
 	);
+	lines.push(
+		"【窗口约束】你在 agent_end 的阻塞窗口内运行，本轮产物已完整（不会有后续产物）。直接给结论，不要假设还有后续；发现 blocker 就给可操作的 blockers（主 agent 靠它当场修复）。",
+	);
+	lines.push(
+		"【修复验证】若 state.json 的 signature.status 存在且为 blocked（上一轮审计失败触发的修复轮），先验证其 blockers 是否已修复：已修复 → 判 passed；未修复或只部分修复 → 判 blocked 并更新 blockers。",
+	);
 	lines.push(`项目目录: ${cwd}`);
 	lines.push(`决策链: ${chainPath(cwd)}`);
 	lines.push(
@@ -216,7 +222,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 	lines.push("【输出】逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 链健康度总评。");
 	lines.push("");
 	lines.push(
-		`【收尾】用 write 更新 ${auditStatePath(cwd)}：inFlight=false，lastAuditedId 推进，lastAuditAt 置当前，roundsSinceAudit/pendingChars 清零。若产物忠实性通过 → signature={status:"passed"}、signatureConvLine 推进到 convlog 当前行；发现 blocker → signature={status:"blocked", blockers:[...]}、signatureConvLine 不推进（待修复）。`,
+		`【收尾】用 write 更新 ${auditStatePath(cwd)}：inFlight=false，lastAuditedId 推进，lastAuditAt 置当前，roundsSinceAudit/pendingChars 清零。若产物忠实性通过 → signature={status:"passed"}、signatureConvLine 推进到 convlog 当前行；发现 blocker → signature={status:"blocked", blockers:[...具体可操作缺口，主 agent 靠它当场修复]}、signatureConvLine 不推进。`,
 	);
 	lines.push("写权限仅限：append chain.md + 改 state.json。禁止修改其他文件。");
 	return lines.join("\n");
@@ -255,6 +261,65 @@ async function waitForAuditCompletion(
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** A2 门禁：连续 blocked 达到该次数后降级放行（end 就是 end，不再触发修复轮）。 */
+const MAX_BLOCKED_STREAK = 3;
+
+/**
+ * C1 窗口约束：审计超时后尝试终止审计者 run（防它在窗口外继续跑并发起联系）。
+ * pi-subagents RPC 可能不支持 stop——try/catch 后靠审计者协议约束兜底。
+ */
+async function tryStopAuditor(
+	rpc: ReturnType<typeof makeRpc>,
+	cwd: string,
+): Promise<void> {
+	try {
+		const state = readAuditState(cwd);
+		const runId = state.signature?.runId ?? state.auditorRunId;
+		if (!runId) return;
+		await rpc("stop", { id: runId }, 10_000);
+	} catch {
+		/* RPC 不支持 stop 时静默降级（审计者协议禁止窗口外联系） */
+	}
+}
+
+/**
+ * B1 门禁失败处理：blocked 后当场修复（followUp）或 A2 降级放行。
+ * 修复轮：sendUserMessage(followUp) 排队，Pi 在 agent_settled 前处理 → 主 agent 当场修 → 下轮 agent_end 再审计。
+ */
+async function handleBlocked(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	cwd: string,
+): Promise<void> {
+	try {
+		const state = readAuditState(cwd);
+		const blockers = state.signature?.blockers?.join("; ") ?? "未知";
+		if (state.blockedStreak < MAX_BLOCKED_STREAK) {
+			// B1：当场修复（第 streak 次），修复完成后自动再审计
+			pi.sendUserMessage(
+				`⚠ 结对审计未通过（第 ${state.blockedStreak}/${MAX_BLOCKED_STREAK} 次）。请当场修复以下缺口，修复完成后将自动再次审计；若无法修复，请在回复中明确告知用户审计未完成及缺口。\n\n缺口：${blockers}`,
+				{ deliverAs: "followUp" },
+			);
+		} else {
+			// A2：连续 blocked 达上限 → 降级放行（passed-with-warning），end 就是 end
+			recordSignature(cwd, {
+				status: "passed-with-warning",
+				blockers: state.signature?.blockers,
+			});
+			try {
+				ctx.ui.notify(
+					`结对审计连续 ${MAX_BLOCKED_STREAK} 次未通过，已降级放行（警告）。缺口：${blockers}`,
+					"warning",
+				);
+			} catch {
+				/* print/无 UI 模式降级 */
+			}
+		}
+	} catch {
+		/* noop */
+	}
 }
 
 /**
@@ -717,14 +782,22 @@ export default function (pi: ExtensionAPI): void {
 			// 【阻塞等待】审计完成（Pi awaits handler，等待生效）——降低阻塞：只审本轮增量 + 120s 上限
 			const sig = await waitForAuditCompletion(resolveProjectRoot(ctx.cwd));
 			if (sig === null) {
-				// 超时：产物未过审，标记（不无限阻塞）
+				// 超时：C1 窗口结束即停止（尝试终止审计者 run，防止窗口外联系主 agent）
+				tryStopAuditor(rpc, resolveProjectRoot(ctx.cwd));
+				// 超时按 blocked 计（递增 streak），进入修复循环或降级放行
 				recordSignature(resolveProjectRoot(ctx.cwd), {
-					status: "blocked",
+					status: "timeout",
 					blockers: ["审计超时（120s），产物未过审"],
 				});
+				await handleBlocked(pi, ctx, resolveProjectRoot(ctx.cwd));
 				return;
 			}
-			// sig.status 已由审计者写入 state（passed/blocked），agent_end 完成
+			// 审计者已签名（passed/blocked/timeout），blockedStreak 已由 recordSignature 递增/清零
+			if (sig.status === "passed" || sig.status === "passed-with-warning") {
+				return; // B1 门禁通过，end 就是 end
+			}
+			// blocked：B1 当场修复（streak<上限）或 A2 降级放行（streak>=上限）
+			await handleBlocked(pi, ctx, resolveProjectRoot(ctx.cwd));
 		} catch {
 			/* noop：不崩溃 */
 		}

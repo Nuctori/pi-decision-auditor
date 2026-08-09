@@ -32,12 +32,15 @@ Requires: **pi-subagents** (spawns / resumes the auditor). Optional: avtc-pi-use
 each session (session_start)
   └─ persistent auditor (runId persisted, resumed across rounds, hits prompt cache)
 
-each work round (agent_end, blocking signoff)
-  └─ has artifacts? → resume/spawn auditor → audit real artifacts → await (120s cap)
+each work round (agent_end, blocking signoff — hard gate)
+  └─ has artifacts? → resume/spawn auditor → audit in window → await (120s cap)
       · capture round decisions into chain (not dependent on main agent)
       · audit git diff fidelity: did artifacts really execute the decisions?
       · independently verify Context facts vs repository
-      · sign: passed=artifact approved; blocked=findings to fix
+      · in-window Q&A with main agent (contact_supervisor, 60s cap)
+      · passed → end ✓
+      · blocked → fix round (followUp, fix now) → re-audit → up to 3×
+      · 3× still blocked → passed-with-warning release (end is end)
 
 on delivery ("submit/publish/merge/deploy" etc)
   └─ parallel fanout 3 fresh reviewers (correctness / goal-alignment / security-robustness)
@@ -49,7 +52,7 @@ on delivery ("submit/publish/merge/deploy" etc)
 
 | Capability | 说明 |
 | --- | --- |
-| **Artifacts must be cross-audited** | `agent_end` blocks until audit signature—un-audited work can't "finish" |
+| **Artifacts must be cross-audited** | `agent_end` blocks until audit signature—un-audited work can't "finish"; blocked artifacts trigger an immediate fix round (max 3×), then release-with-warning |
 | **Persistent pairing** | auditor resumed across rounds, remembers the whole pairing history & goal |
 | **Not dependent on main agent** | decisions extracted from convlog, facts verified from repo, by an independent agent |
 | **Decision chain** | default `.pi/decision-auditor/chain.md` (private, no git pollution); `PI_PAIR_CHAIN_PUBLIC=1` → `docs/decisions/chain.md` (team-visible) |
