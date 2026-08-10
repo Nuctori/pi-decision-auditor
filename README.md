@@ -2,33 +2,59 @@
 
 **Pair decision audit for pi coding agent** · 结对决策审计插件
 
+[![npm](https://img.shields.io/npm/v/pi-pair)](https://www.npmjs.com/package/pi-pair)
+[![CI](https://img.shields.io/github/actions/workflow/status/Nuctori/pi-pair/ci.yml?branch=master)](https://github.com/Nuctori/pi-pair/actions)
+[![License](https://img.shields.io/npm/l/pi-pair)](LICENSE)
+
 > [English](README.md) · [中文](README.zh-CN.md)
 
-A persistent "pair auditor" (举灯人 / holder of the lamp) for every pi session. It continuously holds the task goal, cross-audits each round's artifacts against the decision chain, and **blocks `agent_end` until the artifact passes the audit signature**.
+A persistent "pair auditor" (举灯人 / holder of the lamp) for every pi session. It holds the task goal across rounds, cross-audits each round's artifacts against a decision chain, and **blocks `agent_end` until the artifact passes the audit signature**.
 
-Core premise: **the main agent is not reliable**. Decisions aren't recorded by its initiative (the auditor extracts them from the conversation log independently), and audit judgement doesn't trust its self-description (it trusts the conversation record and repository facts).
+![pi-pair](https://raw.githubusercontent.com/Nuctori/pi-pair/master/assets/pi-pair.png)
 
----
+## Why
 
-## Installation
+A single agent's thinking and output have **limited precision** — and two failure modes in particular:
+
+- **Intention-execution instability**: the agent drifts from what you actually asked, or silently reinterprets the goal.
+- **Reasoning instability**: it fabricates numbers, over-engineers, or confidently ships wrong logic.
+
+A second agent ("pair") **cleans up after it**. But an independently-invoked audit has its own cost — time and tokens. pi-pair is built around one question:
+
+> **Under tight time/cost control, can a pair auditor measurably raise output precision?**
+
+Core premise: **the main agent is not reliable**. Decisions aren't recorded by its initiative (the auditor extracts them from the conversation log), and audit judgement doesn't trust its self-description (it trusts the conversation record and repository facts).
+
+## Quick start
 
 ```bash
-pi install npm:pi-pair          # npm dist
-pi install ./pi-pair            # local dev
-pi install git:github.com/Nuctori/pi-pair   # git source
+pi install npm:pi-pair
 ```
 
-Requires: **pi-subagents** (spawns / resumes the auditor).
+That's it. Start working normally — pi-pair hooks in automatically:
 
-> **Local-path note**: pi-subagents usually auto-discovers agents in local-path package roots. If `agents/decision-auditor.md` isn't found, copy it manually:
->
-> ```bash
-> mkdir -p ~/.pi/agent/agents && cp agents/decision-auditor.md ~/.pi/agent/agents/
-> ```
+1. Each round, your work is **audited at `agent_end`** (blocking, ≤120s): goal derivation → adversarial 5-dimension attack → signature. Un-audited work can't be presented as "complete".
+2. Your **decisions are captured** into `.pi/decision-auditor/chain.md` (append-only, auto-numbered) — extracted from the conversation log, not from your initiative.
+3. On **delivery** ("submit / publish / merge / deploy"), 3 fresh reviewers fan out for a deep cross-check.
 
----
+Requires **pi-subagents** (spawns/resumes the auditor). See [Installation](#installation).
 
-## What it does
+## Table of contents
+
+- [How it works](#how-it-works)
+- [Capabilities](#capabilities)
+- [Installation](#installation)
+- [Components](#components)
+- [Audit protocol](#audit-protocol)
+- [Tools](#tools)
+- [Environment](#environment)
+- [Decision chain format](#decision-chain-format)
+- [Design notes](#design-notes)
+- [Known limitations](#known-limitations)
+- [Roadmap](#roadmap)
+- [License](#license)
+
+## How it works
 
 ```text
 each session (session_start)
@@ -58,13 +84,11 @@ L2 — delivery review (on "submit/publish/merge/deploy")
   └─ parallel fanout 3 fresh reviewers (correctness / goal-alignment / security-robustness)
 ```
 
-**Hard gate**: `agent_end` blocks until the audit signature. A blocked artifact triggers an immediate fix round (follow-up message, max 3×), then releases with a warning — `end is end`. Un-audited work can never be presented as "complete".
+**Hard gate**: `agent_end` blocks until the audit signature. A blocked artifact triggers an immediate fix round (follow-up message, max 3×), then releases with a warning — *end is end*. Un-audited work can never be presented as "complete".
 
-**Layered cost control**: L1 audits every round's artifacts (the gate, cannot be skipped); L0 batches chain capture/review (6 rounds / 8000 chars) so chain maintenance doesn't run every round; L2 runs once per delivery.
+**Layered cost control**: L1 audits every round's artifacts (the gate, cannot be skipped); L0 batches chain capture/review (6 rounds / 8000 chars) so chain maintenance doesn't run every round; L2 runs once per delivery. A high-signal **process log** (decision-intent summaries, ≤200 chars each, roll-trimmed) lets the auditor check artifacts against your reasoning trajectory instead of reverse-engineering it — CI bench confirms **zero measurable time cost** for this communication channel.
 
----
-
-## Why
+## Capabilities
 
 | Capability | Description |
 | --- | --- |
@@ -73,34 +97,45 @@ L2 — delivery review (on "submit/publish/merge/deploy")
 | **Not dependent on main agent** | decisions extracted from convlog, facts verified from repo, by an independent agent |
 | **Decision chain** | default `.pi/decision-auditor/chain.md` (private, no git pollution); `PI_PAIR_CHAIN_PUBLIC=1` → `docs/decisions/chain.md` (team-visible) |
 | **In-window communication** | auditor talks to the main agent only inside the agent_end window (contact_supervisor, 60s cap); negotiated stop on timeout — no out-of-window wake-ups |
-| **Cost control** | audits only this round's increment + 120s cap; session reuse hits prompt cache (cheaper than fresh full-send) |
+| **Adversarial, calibrated** | 7-dimension attack (5 elegance + mechanism integrity + runtime-mode behavior), calibrated on real defects the same-model auditor missed |
+| **Cost control** | batched L0 + once-per-delivery L2 + prompt-cache session reuse; CI bench regression guard on wall time |
 | **cwd adaptive** | finds the real project root from any start dir (Cargo.toml/package.json/.git etc) |
 
----
+## Installation
+
+```bash
+pi install npm:pi-pair          # npm dist
+pi install ./pi-pair            # local dev
+pi install git:github.com/Nuctori/pi-pair   # git source
+```
+
+Requires: **pi-subagents** (spawns / resumes the auditor).
+
+> **Local-path note**: pi-subagents usually auto-discovers agents in local-path package roots. If `agents/decision-auditor.md` isn't found, copy it manually:
+>
+> ```bash
+> mkdir -p ~/.pi/agent/agents && cp agents/decision-auditor.md ~/.pi/agent/agents/
+> ```
 
 ## Components
 
 | Component | Path | Role |
 | --- | --- | --- |
-| Extension | `extensions/decision-chain.ts` | hooks (session_start / agent_end / message_end) + tools (`decision_add` `decision_list` `decision_signoff`) + `/pair-audit` command |
-| Storage | `lib/chain-store.ts` | decision chain read/write (append-only, auto-numbering, supersede) + audit state (`.pi/decision-auditor/state.json`) + project-root resolution |
-| Auditor | `agents/decision-auditor.md` | pairing audit protocol: goal derivation, capture, cross-audit, signoff |
+| Extension | `extensions/decision-chain.ts` | hooks (session_start / agent_end / message_end / agent_settled) + tools (`decision_add` `decision_list` `decision_signoff`) + `/pair-audit` command |
+| Storage | `lib/chain-store.ts` | decision chain read/write (append-only, auto-numbering, supersede) + audit state (`.pi/decision-auditor/state.json`) + convlog + process log + project-root resolution |
+| Auditor | `agents/decision-auditor.md` | pairing audit protocol: goal derivation, capture, adversarial cross-audit, signoff |
 | Discipline | `skills/decision-chain/SKILL.md` | writer-side rules: when to record decisions, audit phases, signoff semantics |
-
----
 
 ## Audit protocol
 
 Each round the auditor:
 
 1. **Derive goal**: read the conversation log (`convlog.md`), derive the task goal from user prompts — main agent's self-description is untrusted, user's words win
-2. **Capture**: extract the main agent's actual key decisions this round, append to the decision chain (not its initiative)
-3. **Audit**: drift vs goal → independently verify Context facts vs repo → audit the reasoning chain (validity/completeness/consistency/calibration) → audit artifact fidelity vs `git diff`
+2. **Read the process log** (`process.md`): the main agent's intent trajectory (decision-signal summaries) — verify artifacts against it instead of reverse-engineering intent
+3. **Audit**: adversarial attack in 7 dimensions — atomicity / correctness / consistency / cohesion / completeness + **mechanism integrity** (trigger chains have live call sites) + **runtime behavior vs claim** (blocking/async claims hold across print/TUI/RPC, or mode differences are flagged)
 4. **Sign**: artifacts pass → `signature=passed`; findings → `signature=blocked` with actionable blockers (the main agent fixes them immediately)
 
 Window rules: the auditor runs only inside the `agent_end` blocking window. It may `contact_supervisor` for clarification (60s cap — otherwise decide from evidence). On window timeout, the extension negotiates: the auditor signs current findings as blockers early, or confirms abort. Outside the window it never contacts the main agent.
-
----
 
 ## Tools
 
@@ -111,21 +146,17 @@ Window rules: the auditor runs only inside the `agent_end` blocking window. It m
 | `decision_signoff` | sign after audit passes (use the tool, avoid hand-writing state.json) |
 | `/pair-audit` | manual full/targeted/`--diff` audit |
 
----
-
 ## Environment
 
 | Var | Default | Description |
 | --- | --- | --- |
-| `PI_PAIR_BATCH_ROUNDS` | 6 | rounds threshold for incremental-accumulation trigger |
-| `PI_PAIR_BATCH_CHARS` | 8000 | char threshold for incremental-accumulation trigger |
+| `PI_PAIR_BATCH_ROUNDS` | 6 | rounds threshold for L0 chain-maintenance trigger |
+| `PI_PAIR_BATCH_CHARS` | 8000 | char threshold for L0 trigger |
 | `PI_PAIR_MIN_INTERVAL` | 2 | min rounds between audits |
 | `PI_PAIR_MAX_BATCH` | 15 | forced-audit fallback when decisions are sparse |
-| `PI_DECISION_AUDITOR_INJECT=off` | on | disable chain-status injection (legacy, ignore) |
 | `PI_PAIR_CHAIN_PUBLIC=1` | off | write chain to `docs/decisions/chain.md` (team-visible); default is `.pi/decision-auditor/chain.md` (private) |
-| `PI_PAIR_PROCESS_LOG=0` | on | disable intent-signal process log (CI bench baseline); default records high-signal decision intents |
-
----
+| `PI_PAIR_PROCESS_LOG=0` | on | disable intent-signal process log (CI bench baseline) |
+| `PI_DECISION_AUDITOR_INJECT=off` | on | disable chain-status injection (legacy, ignore) |
 
 ## Decision chain format
 
@@ -139,8 +170,6 @@ Window rules: the auditor runs only inside the `agent_end` blocking window. It m
 - Supersedes: D-00X                         ← revising an old decision = new entry declares it
 ```
 
----
-
 ## Design notes
 
 - **Main agent unreliable**: decisions recorded by the auditor, facts verified by the auditor, judgement independent of main-agent self-description
@@ -148,8 +177,19 @@ Window rules: the auditor runs only inside the `agent_end` blocking window. It m
 - **Append-only + tamper-proof**: old decisions never edited; revision = supersede
 - **Context is fact, Rationale is reasoning**: the auditor checks "does the reasoning derive from the facts", catching fabricated numbers and over-engineering
 - **End is end**: the audit gate exits deterministically — pass, fix-loop (max 3×), or release-with-warning. No deadlock, no out-of-window wake-ups
+- **Information before frequency**: strengthen communication density (process log), not audit frequency — zero measurable cost, same trigger points
 
----
+## Known limitations
+
+- **`pi -p` (print mode)**: `agent_end` audit does not block — pi drops the extension handler at the spawn await; the auditor completes in the background and still signs, but the gate's blocking semantics are fully effective only in interactive mode (TUI / RPC).
+- **Same-model auditor**: the auditor uses the main agent's model by default — the adversarial stance mitigates groupthink, but shared blind spots (both miss the same thing) are still possible. Cross-model auditing is on the roadmap.
+- **CI E2E** uses a free no-key model (opencode CLI); audit verdicts are model-dependent by nature — the CI asserts mechanisms (capture / signature / lock), not verdict quality.
+
+## Roadmap
+
+- [ ] **Cross-model auditor** (`PI_PAIR_AUDITOR_MODEL`) — break same-model groupthink at the root
+- [ ] **Benefit measurement** — audit records defect categories caught; recall/false-positive stats make "precision gain" quantitative
+- [ ] **L1 tiering** — lightweight fast audit for routine rounds, deep audit for high-risk rounds
 
 ## License
 
