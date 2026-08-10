@@ -274,11 +274,7 @@ async function waitForAuditCompletion(
 		// 完成判定：本轮审计写入的新签名（signature.at >= 本轮 auditStartedAt）即完成——
 		// blocked 签名不推进 signatureConvLine（协议规定），但仍是本轮结论，必须识别，
 		// 否则交付轮会把真实 blockers 误判为"超时"并覆盖（High-1）
-		if (
-			state.signature &&
-			state.signature.at >= startedAt &&
-			!state.inFlight
-		) {
+		if (state.signature && state.signature.at >= startedAt && !state.inFlight) {
 			// 阻塞时长在轮询循环内写（print 模式下 handler 尾段可能不执行，这里最可靠）
 			if (state.auditStartedAt) {
 				try {

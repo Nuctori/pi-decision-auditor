@@ -410,7 +410,8 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	assert.ok(
 		src.includes("deliveryRequested.delete(root)") &&
 			src.includes("const isDelivery = deliveryRequested.has(root)") &&
-			src.indexOf("const isDelivery") < src.indexOf("hasUncommittedChanges(root)"),
+			src.indexOf("const isDelivery") <
+				src.indexOf("hasUncommittedChanges(root)"),
 		"deliveryRequested 必须在 agent_end 最前消费（任何早退路径都不泄漏）",
 	);
 	// M4：残留锁兜底（文件锁在但内存锁无 → 释放，防审计永久停摆）
