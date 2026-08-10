@@ -234,11 +234,12 @@ function buildIncrementalAuditTask(cwd: string): string {
 
 /**
  * 等待审计完成：轮询 state.json 直到 signatureConvLine 覆盖到 convlog 当前行（审计者已签名）。
- * 返回审计结论（signature）或 null（超时）。timeoutMs 默认 120s（降低阻塞上限）。
+ * 返回审计结论（signature）或 null（超时）。
+ * timeoutMs = 180s 阻塞上限：到点进入协商关闭（审计者重审计在慢模型下需要更多时间）。
  */
 async function waitForAuditCompletion(
 	cwd: string,
-	timeoutMs = 120_000,
+	timeoutMs = 180_000,
 	pollMs = 2000,
 ): Promise<{ status: string; blockers?: string[] } | null> {
 	const deadline = Date.now() + timeoutMs;
@@ -285,8 +286,12 @@ const MAX_BLOCKED_STREAK = 3;
  * C1 窗口约束：审计超时后尝试终止审计者 run（防它在窗口外继续跑并发起联系）。
  * pi-subagents RPC 可能不支持 stop——try/catch 后靠审计者协议约束兜底。
  */
-/** 协商中止收尾窗口：steer 发消息后，给审计者签名收尾的时间（超时总阻塞 ≤ 120s + 30s）。 */
-const NEGOTIATE_WINDOW_MS = 30_000;
+/**
+ * 协商关闭收尾窗口：180s 阻塞上限后进入协商，窗口最长 720s。
+ * 意图：尽可能走协商关闭（审计者慢慢收尾签名出 blockers/结论），不轻易 kill——
+ * 确保审计真能审出东西。总阻塞预算 180+720=900s < IN_FLIGHT_TTL(960s)。
+ */
+const NEGOTIATE_WINDOW_MS = 720_000;
 
 /**
  * 协商中止（不直接 kill）：审计超时后先 steer 通知审计者协商，
