@@ -482,8 +482,7 @@ export function appendProcessSignal(cwd: string, text: string): boolean {
 	if (!PROCESS_SIGNAL_RE.test(text)) return false;
 	const clean = text.replace(/\r?\n/g, " ").trim();
 	if (!clean) return false;
-	const clipped =
-		clean.length > 200 ? clean.slice(0, 200) + "…" : clean;
+	const clipped = clean.length > 200 ? clean.slice(0, 200) + "…" : clean;
 
 	const file = processPath(cwd);
 	const dir = path.dirname(file);
@@ -498,7 +497,11 @@ export function appendProcessSignal(cwd: string, text: string): boolean {
 		const body = lines.filter((l) => l.startsWith("- 🤔"));
 		if (body.length > 100) {
 			const keep = body.slice(-50);
-			fs.writeFileSync(file, PROCESS_HEADER + "\n" + keep.join("\n") + "\n", "utf-8");
+			fs.writeFileSync(
+				file,
+				PROCESS_HEADER + "\n" + keep.join("\n") + "\n",
+				"utf-8",
+			);
 		}
 	} catch {
 		/* noop */

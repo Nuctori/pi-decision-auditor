@@ -193,7 +193,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 	);
 	lines.push(`审计状态: ${auditStatePath(cwd)}（含签名状态与 blockedStreak）`);
 	lines.push(
-		"【路径检查】若上述决策链/状态文件不存在：用 ls 检查 cwd 是否仓库根（有 src/ Cargo.toml 等），不是则定位真实项目根再审计。",
+		"【路径检查】若上述决策链/状态文件不存在：用 ls 检查 cwd 是否仓库根（有 src/ Cargo.toml 等），不是则定位真实项目根（向上找 Cargo.toml/package.json/go.mod/.git）再审计；链的实际位置以 find 到的真实文件为准（指定路径可能因 cwd 解析不准而缺失）。",
 	);
 	lines.push("");
 	lines.push("【第一步：推导目标】");
@@ -216,6 +216,9 @@ function buildIncrementalAuditTask(cwd: string): string {
 	);
 	lines.push(
 		"2. 独立核实：用 read/grep 核实涉及的事实与代码一致（不信任记录，事实不符 = 偏离 ✗）。",
+	);
+	lines.push(
+		"3. 【两个实证盲区维度，必查】⑥ 机制完整性：若产物含触发机制（事件→函数→状态写入），用 grep 验证每一环有实际调用点且可达——不是死代码/从未被触发（例：声称每轮记账唤起审计，但事件处理里没有调用 = 偏离 ✗）。⑦ 运行时行为 vs 声明：产物声称‘阻塞/异步/完成后 X’时，确认该行为在 print / TUI / RPC 各模式下都成立；模式相关则标注差异（例：print 模式可能不等待扩展 handler 的 async 完成）。",
 	);
 	lines.push("");
 	lines.push("【输出】逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 产物总评。");
@@ -793,17 +796,17 @@ export default function (pi: ExtensionAPI): void {
 		}
 	});
 
-/** 记录审计阻塞时长（agent_end 从触发到签名，CI 跑分用）。 */
-function recordAuditDuration(cwd: string, t0: number): void {
-	try {
-		writeAuditState(cwd, {
-			...readAuditState(cwd),
-			lastAuditDurationMs: Date.now() - t0,
-		});
-	} catch {
-		/* noop */
+	/** 记录审计阻塞时长（agent_end 从触发到签名，CI 跑分用）。 */
+	function recordAuditDuration(cwd: string, t0: number): void {
+		try {
+			writeAuditState(cwd, {
+				...readAuditState(cwd),
+				lastAuditDurationMs: Date.now() - t0,
+			});
+		} catch {
+			/* noop */
+		}
 	}
-}
 
 	pi.on("agent_end", async (event, ctx) => {
 		try {

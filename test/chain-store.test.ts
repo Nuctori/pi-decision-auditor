@@ -353,14 +353,25 @@ test("接线守卫：L0 触发链在扩展里接通（防断线回归）", () =>
 		"process 记录必须受 PI_PAIR_PROCESS_LOG 开关控制（CI 跑分基线）",
 	);
 	// L1 审计任务必须引导读过程日志
-	assert.ok(
-		src.includes("processPath(cwd)"),
-		"审计任务必须引用过程日志路径",
-	);
+	assert.ok(src.includes("processPath(cwd)"), "审计任务必须引用过程日志路径");
 	// 审计阻塞时长测量
 	assert.ok(
 		src.includes("lastAuditDurationMs"),
 		"agent_end 必须记录审计阻塞时长（CI 跑分指标）",
+	);
+	// 实证盲区维度（prompt 优化）：机制完整性 + 运行时行为
+	assert.ok(
+		src.includes("机制完整性"),
+		"审计任务必须含机制完整性检查（防断线回归）",
+	);
+	assert.ok(
+		src.includes("运行时行为"),
+		"审计任务必须含运行时行为检查（防 print/交互模式盲区）",
+	);
+	// 路径提示：链位置以实际文件为准
+	assert.ok(
+		src.includes("链的实际位置以 find 到的真实文件为准"),
+		"审计任务路径提示必须引导 find 真实链（防 cwd 解析误导）",
 	);
 });
 
