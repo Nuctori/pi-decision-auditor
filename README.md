@@ -8,7 +8,7 @@
 
 > [English](README.md) · [中文](README.zh-CN.md)
 
-A persistent "pair auditor" (举灯人 / holder of the lamp) for every pi session. It holds the task goal across rounds, cross-audits each round's artifacts against a decision chain, and **blocks `agent_end` until the artifact passes the audit signature**.
+A fresh-spawn "pair auditor" (举灯人 / holder of the lamp) for every pi session. It captures decisions into a decision chain, cross-audits each round's artifacts against it, and **delivers any blocker immediately for fixing — the user sees the fixed result, not the audit process**. Delivery rounds gate on the audit signature; normal rounds run async without blocking.
 
 ![pi-pair](https://raw.githubusercontent.com/Nuctori/pi-pair/master/assets/pi-pair.png)
 
@@ -33,11 +33,11 @@ pi install npm:pi-pair
 
 That's it. Start working normally — pi-pair hooks in automatically:
 
-1. Each round, your work is **audited at `agent_end`** (blocking, ≤120s): goal derivation → adversarial 5-dimension attack → signature. Un-audited work can't be presented as "complete".
+1. Each round with real artifacts is **audited** (goal derivation → adversarial 5-dimension attack → signature): async in normal rounds (no blocking), sync gate on delivery rounds. Blockers are delivered immediately for fixing, re-audited until clean.
 2. Your **decisions are captured** into `.pi/decision-auditor/chain.md` (append-only, auto-numbered) — extracted from the conversation log, not from your initiative.
 3. On **delivery** ("submit / publish / merge / deploy"), 3 fresh reviewers fan out for a deep cross-check.
 
-Requires **pi-subagents** (spawns/resumes the auditor). See [Installation](#installation).
+Requires **pi-subagents** (spawns the auditor). See [Installation](#installation).
 
 ## Table of contents
 
@@ -57,49 +57,41 @@ Requires **pi-subagents** (spawns/resumes the auditor). See [Installation](#inst
 ## How it works
 
 ```text
-each session (session_start)
-  └─ persistent auditor (runId persisted, resumed across rounds, hits prompt cache)
-
-L0 — chain maintenance (non-blocking, batched, same auditor run)
-  └─ every round: accumulateRound (convlog delta) — zero cost
-  └─ threshold hit (6 rounds / 8000 chars / max 15): resume the SAME
-     resident auditor run (one holder of the lamp, shared context)
-      · capture incremental decisions into chain (append-only, auto-numbered)
-      · adversarial chain review (5 elegance dimensions: atomicity / correctness /
-        consistency / cohesion / completeness)
-      · findings → chainFindings → injected to main agent next round (low priority)
-
-L1 — artifact gate (agent_end, blocking, hard gate)
-  └─ has artifacts? → resume/spawn auditor → audit this round's artifacts in window
-     → await (120s cap)
+each agent_end (when real artifacts exist)
+  └─ real artifacts? (git changes / new decisions — .pi state excluded) → audit
+     · pure chat / ops rounds (no code, no decisions) → zero noise, no audit
+  └─ normal rounds: async — agent_end does NOT block
+     · fresh spawn auditor (context:"fork" — inherits this session's context)
+     · one task = capture decisions into chain + audit artifacts + sign
+     · interim results written to state.json as auditFindings — killed mid-audit still delivers value
+  └─ delivery rounds (submit/publish/merge/deploy): agent_end awaits signature (300s cap)
       · adversarial 5-dimension attack on artifacts (guilty until proven innocent)
       · independently verify Context facts vs repository
-      · in-window Q&A with main agent (contact_supervisor, 60s cap)
+      · continuous delivery: any blocker found → immediately notify main agent (fix → re-audit until clean)
       · passed → end ✓
-      · blocked → fix round (followUp, fix now) → re-audit → up to 3×
       · 3× still blocked → passed-with-warning release (end is end)
-      · timeout (120s) → negotiated stop: steer auditor to sign current findings
-        as blockers early (fix immediately) — hard kill only as fallback
+      · timeout → release with warning + findings injected next round (no negotiate blackhole)
 
 L2 — delivery review (on "submit/publish/merge/deploy")
+  └─ only when real deliverables exist (gate: no git diff & no decisions → skip, no empty review)
   └─ parallel fanout 3 fresh reviewers (correctness / goal-alignment / security-robustness)
 ```
 
-**Hard gate**: `agent_end` blocks until the audit signature. A blocked artifact triggers an immediate fix round (follow-up message, max 3×), then releases with a warning — *end is end*. Un-audited work can never be presented as "complete".
+**Fresh-spawn pairing**: every audit spawns a fresh auditor run (`context:"fork"` — it inherits this session's conversation context, so it understands what "this session" is doing without a persistent run). The run ends when the audit ends — no resident process, no lifecycle bookkeeping, no residue. Normal rounds are async (no blocking, findings injected without user-visible noise); only delivery rounds await the signature. Any blocker found at any stage is delivered to the main agent immediately for fixing, re-audited until clean — the user sees the fixed result, not the audit process. Findings are value points: blockers / interim auditFindings are injected user-visible (`display:true`); only internal hints stay hidden.
 
-**Layered cost control**: L1 audits every round's artifacts (the gate, cannot be skipped); L0 batches chain capture/review (6 rounds / 8000 chars) so chain maintenance doesn't run every round; L2 runs once per delivery. A high-signal **process log** (decision-intent summaries, ≤200 chars each, roll-trimmed) lets the auditor check artifacts against your reasoning trajectory instead of reverse-engineering it — CI bench confirms **zero measurable time cost** for this communication channel.
+**Layered cost control**: L1 (the single audit) runs per round with real artifacts; L2 runs once per delivery, gated on real deliverables. A high-signal **process log** (decision-intent summaries, ≤200 chars each, roll-trimmed) lets the auditor check artifacts against your reasoning trajectory instead of reverse-engineering it — CI bench confirms **zero measurable time cost** for this communication channel.
 
 ## Capabilities
 
 | Capability | Description |
 | --- | --- |
-| **Artifacts must be cross-audited** | `agent_end` blocks until audit signature; blocked artifacts trigger an immediate fix round (max 3×), then release-with-warning |
-| **Persistent pairing** | one resident auditor run per session — L0 (chain maintenance) and L1 (artifact gate) resume the same instance, sharing context; no second agent |
+| **Artifacts must be cross-audited** | `agent_end` audits real artifacts; blocked artifacts trigger immediate delivery to the main agent (fix → re-audit), release-with-warning after 3× |
+| **Single-layer pairing** | one audit per round — capture decisions into chain + audit artifacts + sign, in a single fresh-spawn run (context:"fork" inherits session context) |
 | **Not dependent on main agent** | decisions extracted from convlog, facts verified from repo, by an independent agent |
 | **Decision chain** | default `.pi/decision-auditor/chain.md` (private, no git pollution); `PI_PAIR_CHAIN_PUBLIC=1` → `docs/decisions/chain.md` (team-visible) |
-| **In-window communication** | auditor talks to the main agent only inside the agent_end window (contact_supervisor, 60s cap); negotiated stop on timeout — no out-of-window wake-ups |
+| **Fresh-spawn lifecycle** | audit run ends when the audit ends — no resident process, no residue after session shutdown; pure-chat rounds spawn nothing |
 | **Adversarial, calibrated** | 7-dimension attack (5 elegance + mechanism integrity + runtime-mode behavior), calibrated on real defects the same-model auditor missed |
-| **Cost control** | batched L0 + once-per-delivery L2 + prompt-cache session reuse; CI bench regression guard on wall time |
+| **Cost control** | real-artifact gating (no empty audits) + once-per-delivery L2 + process-log intent channel; CI bench regression guard on wall time |
 | **cwd adaptive** | finds the real project root from any start dir (Cargo.toml/package.json/.git etc) |
 
 ## Installation
@@ -122,7 +114,7 @@ Requires: **pi-subagents** (spawns / resumes the auditor).
 
 | Component | Path | Role |
 | --- | --- | --- |
-| Extension | `extensions/decision-chain.ts` | hooks (session_start / agent_end / message_end / agent_settled) + tools (`decision_add` `decision_list` `decision_signoff`) + `/pair-audit` command |
+| Extension | `extensions/decision-chain.ts` | hooks (session_start / agent_end / message_end) + tools (`decision_add` `decision_list` `decision_signoff`) + `/pair-audit` command |
 | Storage | `lib/chain-store.ts` | decision chain read/write (append-only, auto-numbering, supersede) + audit state (`.pi/decision-auditor/state.json`) + convlog + process log + project-root resolution |
 | Auditor | `agents/decision-auditor.md` | pairing audit protocol: goal derivation, capture, adversarial cross-audit, signoff |
 | Discipline | `skills/decision-chain/SKILL.md` | writer-side rules: when to record decisions, audit phases, signoff semantics |
@@ -136,7 +128,7 @@ Each round the auditor:
 3. **Audit**: adversarial attack in 7 dimensions — atomicity / correctness / consistency / cohesion / completeness + **mechanism integrity** (trigger chains have live call sites) + **runtime behavior vs claim** (blocking/async claims hold across print/TUI/RPC, or mode differences are flagged)
 4. **Sign**: artifacts pass → `signature=passed`; findings → `signature=blocked` with actionable blockers (the main agent fixes them immediately)
 
-Window rules: the auditor runs only inside the `agent_end` blocking window. It may `contact_supervisor` for clarification (60s cap — otherwise decide from evidence). On window timeout, the extension negotiates: the auditor signs current findings as blockers early, or confirms abort. Outside the window it never contacts the main agent.
+Lifecycle rules: every audit is a fresh-spawn run (`context:"fork"` inheriting this session's context). Normal rounds run async after `agent_end` (the agent does not block); delivery rounds (submit/publish/merge/deploy) await the signature (300s cap — on timeout, release with warning and inject findings next round; no negotiate blackhole). The auditor may `contact_supervisor` for clarification during its run (60s cap — otherwise decide from evidence). Interim findings are written continuously to `auditFindings`; the run stops immediately after signing (完成即停).
 
 ## Tools
 
@@ -151,14 +143,9 @@ Window rules: the auditor runs only inside the `agent_end` blocking window. It m
 
 | Var | Default | Description |
 | --- | --- | --- |
-| `PI_PAIR_BATCH_ROUNDS` | 6 | rounds threshold for L0 chain-maintenance trigger |
-| `PI_PAIR_BATCH_CHARS` | 8000 | char threshold for L0 trigger |
-| `PI_PAIR_MIN_INTERVAL` | 2 | min rounds between audits |
-| `PI_PAIR_MAX_BATCH` | 15 | forced-audit fallback when decisions are sparse |
 | `PI_PAIR_CHAIN_PUBLIC=1` | off | write chain to `docs/decisions/chain.md` (team-visible); default is `.pi/decision-auditor/chain.md` (private) |
 | `PI_PAIR_PROCESS_LOG=0` | on | disable intent-signal process log (CI bench baseline) |
 | `PI_PAIR_PROJECT_ROOT` | — | explicit single authoritative project root (cross-drive / complex setups); default auto-detects upward from cwd |
-| `PI_DECISION_AUDITOR_INJECT=off` | on | disable chain-status injection (legacy, ignore) |
 
 ## Decision chain format
 
@@ -175,7 +162,7 @@ Window rules: the auditor runs only inside the `agent_end` blocking window. It m
 ## Design notes
 
 - **Main agent unreliable**: decisions recorded by the auditor, facts verified by the auditor, judgement independent of main-agent self-description
-- **Persistent + cached**: auditor resumed across rounds (session history hits prompt cache) — continuous across rounds while controlling cost
+- **Fresh-spawn + context-forked**: every audit spawns a fresh auditor run (`context:"fork"`) — inherits this session's context, no resident process, no lifecycle bookkeeping
 - **Append-only + tamper-proof**: old decisions never edited; revision = supersede
 - **Context is fact, Rationale is reasoning**: the auditor checks "does the reasoning derive from the facts", catching fabricated numbers and over-engineering
 - **End is end**: the audit gate exits deterministically — pass, fix-loop (max 3×), or release-with-warning. No deadlock, no out-of-window wake-ups

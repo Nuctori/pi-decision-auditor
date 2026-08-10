@@ -8,7 +8,7 @@
 
 > [English](README.md) · [中文](README.zh-CN.md)
 
-为每个 pi 会话提供常驻的"结对审计者"（举灯人）：跨轮持有任务目标，对照决策链交叉审计每一轮产物，**`agent_end` 必须通过审计签名才能结束**。
+为每个 pi 会话提供"结对审计者"（举灯人）：把关键决策记入决策链，对照它交叉审计每一轮产物，**任何 blocker 立即交付主 agent 修复——用户看到的是修好的结果，不是审计的流程**。交付轮以审计签名为门禁；常规轮异步不阻塞。
 
 ![pi-pair](https://raw.githubusercontent.com/Nuctori/pi-pair/master/assets/pi-pair.png)
 
@@ -33,11 +33,11 @@ pi install npm:pi-pair
 
 完成。正常开工即可——pi-pair 自动接管：
 
-1. 每轮工作结束时在 **`agent_end` 被审计**（阻塞，≤120s）：目标推导 → 对抗式五维度进攻 → 签名。未经审计的工作不能当作"已完成"。
+1. 有真实产物的每轮被**审计**（目标推导 → 对抗式五维度进攻 → 签名）：常规轮异步不阻塞，交付轮同步门禁。发现缺口立即交付修复、再审直到干净。
 2. 你的**决策自动入链** `.pi/decision-auditor/chain.md`（append-only、自动编号）——从对话日志提取，不靠你自觉记录。
 3. **交付时**（"提交/发布/merge/部署"）3 个 fresh reviewer 并行深度交叉审查。
 
-依赖 **pi-subagents**（spawn/resume 审计者）。见[安装](#安装)。
+依赖 **pi-subagents**（spawn 审计者）。见[安装](#安装)。
 
 ## 目录
 
@@ -57,47 +57,41 @@ pi install npm:pi-pair
 ## 工作原理
 
 ```text
-每个会话（session_start）
-  └─ 常驻审计者（runId 持久化，跨轮 resume 复用，命中 prompt 缓存）
-
-L0 — 链维护（非阻塞、批量、同一审计者 run）
-  └─ 每轮：accumulateRound 记账（convlog 增量）——零成本
-  └─ 达阈值（6 轮 / 8000 字符 / 最多 15 轮）：resume 同一个常驻
-     审计者 run（一个持灯人，共享上下文）
-      · 批量捕获增量决策入链（append-only、自动编号）
-      · 对抗式链级复审（五维度：原子性 / 正确性 / 一致性 / 内聚 / 完备）
-      · findings → chainFindings → 下轮注入主 agent（低优先级）
-
-L1 — 产物门禁（agent_end，阻塞，硬门禁）
-  └─ 有产物？→ resume/spawn 审计者 → 窗口内审本轮产物 → 等待（120s 上限）
+每次 agent_end（有真实产物时）
+  └─ 真实产物？（git 改动 / 新决策，排除 .pi 状态）→ 审计
+     · 纯咨询/运维轮（无代码、无决策）→ 零噪音，不审计
+  └─ 常规轮：异步——agent_end 不阻塞
+     · fresh spawn 审计者（context:"fork" 继承本会话上下文）
+     · 一次任务 = 捕获决策入链 + 审产物 + 签名
+     · 中间结果边审边写 state.json（auditFindings）——中途被杀也交付价值
+  └─ 交付轮（提交/发布/merge/部署）：agent_end 等签名（300s 上限）
       · 对抗式五维度进攻产物（guilty until proven innocent）
       · 独立核实 Context 事实 vs 仓库
-      · 窗口内可问主 agent（contact_supervisor，60s 上限）
+      · 持续交付：发现任何 blocker → 立即通知主 agent（修复 → 再审，直到干净）
       · passed → end ✓
-      · blocked → 当场修复轮（followUp）→ 再审计 → 最多 3 次
       · 3 次仍不过 → passed-with-warning 降级放行（end 就是 end）
-      · 超时（120s）→ 协商中止：steer 通知审计者把已发现问题
-        提前签成 blockers（立即修复）——强制 kill 只是兜底
+      · 超时 → 降级放行 + findings 下轮注入（无 600s 协商黑洞）
 
 L2 — 交付审查（用户说"提交/发布/merge/部署"等）
+  └─ 仅当有真实交付物时（门禁：无 git diff 且无决策 → 跳过，不空审）
   └─ 并行 fanout 3 个 fresh reviewer（正确性 / 目标一致性 / 安全健壮性）深度审查
 ```
 
-**硬门禁**：`agent_end` 阻塞等审计签名。blocked 的产物触发**当场修复轮**（follow-up 消息，最多 3 次），之后带警告放行——**end 就是 end**。未经审计的工作永远不会被当作"已完成"呈现。
+**fresh spawn 结对**：每次审计新起一个审计者 run（`context:"fork"`——继承本会话的对话上下文，理解"本会话"在做什么，无需常驻 run）。审计结束 run 即结束——无常驻进程、无生命周期登记、无残留。常规轮异步（不阻塞，findings 注入不打扰用户）；仅交付轮等签名。任何阶段发现任何 blocker 立即交付主 agent 处理、再审直到干净——用户看到的是修好的结果，不是审计的流程。**价值点可观察**：blockers / 中间态 auditFindings 以 `display:true` 注入（用户感知价值）；仅内部提示保持隐藏。
 
-**分层成本控制**：L1 每轮审产物（门禁，不可省）；L0 批量做链捕获/复审（6 轮 / 8000 字符），链维护不每轮跑；L2 每次交付跑一次。高信号**过程日志**（决策意图摘要，≤200 字符/条，滚动截断）让审计者对照你的推理轨迹审产物而非反推——CI 跑分确认**该通信通道零可测时间成本**。
+**分层成本控制**：单层审计（L1）在有真实产物的轮次运行；L2 每次交付跑一次、且以真实交付物为门禁。高信号**过程日志**（决策意图摘要，≤200 字符/条，滚动截断）让审计者对照你的推理轨迹审产物而非反推——CI 跑分确认**该通信通道零可测时间成本**。
 
 ## 核心能力
 
 | 能力 | 说明 |
 | --- | --- |
-| **产物必须交叉审计** | `agent_end` 阻塞等签名；blocked 触发当场修复轮（最多 3 次），之后带警告放行 |
-| **常驻结对** | 每会话**一个**常驻审计者 run——L0（链维护）与 L1（产物门禁）resume 同一实例、共享上下文，不新增第二个 agent |
+| **产物必须交叉审计** | `agent_end` 审计真实产物；blocked 立即交付主 agent（修复 → 再审），3 次后带警告放行 |
+| **单层结对** | 每轮一次审计——捕获决策入链 + 审产物 + 签名，由单个 fresh spawn run 完成（context:"fork" 继承会话上下文） |
 | **不靠主 agent 自觉** | 决策从对话日志提取、事实从仓库核实，独立第三方完成 |
 | **决策链** | 默认 `.pi/decision-auditor/chain.md`（私有，不污染 git）；`PI_PAIR_CHAIN_PUBLIC=1` 写 `docs/decisions/chain.md`（团队可见） |
-| **窗口内通信** | 审计者只在 agent_end 窗口内联系主 agent（contact_supervisor 60s 上限）；超时协商中止——无窗口外忽然唤起 |
+| **fresh spawn 生命周期** | 审计结束 run 即结束——无常驻进程、无残留；纯咨询轮不 spawn 任何 run |
 | **对抗且经校准** | 七维度进攻（五优雅维度 + 机制完整性 + 运行时行为），用同模型审计漏掉过的真实缺陷校准 |
-| **成本可控** | L0 批量 + L2 一次性 + prompt 缓存会话复用；CI 跑分护栏监控墙钟时间 |
+| **成本可控** | 真实产物门禁（无空审）+ L2 一次交付一次 + 过程日志意图通道；CI 跑分护栏监控墙钟时间 |
 | **cwd 自适应** | 从任何目录启动都能定位真实项目根（找 Cargo.toml/package.json/.git 等） |
 
 ## 安装
@@ -108,7 +102,7 @@ pi install ./pi-pair            # 本地开发
 pi install git:github.com/Nuctori/pi-pair   # git 源
 ```
 
-依赖：**pi-subagents**（负责 spawn / resume 审计者）。
+依赖：**pi-subagents**（负责 spawn 审计者）。
 
 > **本地路径安装注意**：pi-subagents 通常自动发现本地路径包内的 agent；若未自动发现 `agents/decision-auditor.md`，手动复制到 user scope：
 >
@@ -120,7 +114,7 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 
 | 组件 | 路径 | 作用 |
 | --- | --- | --- |
-| 扩展 | `extensions/decision-chain.ts` | 钩子（session_start / agent_end / message_end / agent_settled）+ 工具（`decision_add` `decision_list` `decision_signoff`）+ `/pair-audit` 命令 |
+| 扩展 | `extensions/decision-chain.ts` | 钩子（session_start / agent_end / message_end）+ 工具（`decision_add` `decision_list` `decision_signoff`）+ `/pair-audit` 命令 |
 | 存储 | `lib/chain-store.ts` | 决策链读写（append-only、自动编号、supersede）+ 审计状态（`.pi/decision-auditor/state.json`）+ convlog + 过程日志 + 项目根定位 |
 | 审计者 | `agents/decision-auditor.md` | 结对审计协议：目标推导、捕获、对抗式交叉审计、签名 |
 | 纪律 | `skills/decision-chain/SKILL.md` | writer 侧规约：何时记录决策、审计阶段、签名语义 |
@@ -134,7 +128,7 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 3. **审计**：对抗式七维度进攻——原子性 / 正确性 / 一致性 / 内聚 / 完备 + **机制完整性**（触发链每环有实际调用点）+ **运行时行为 vs 声明**（阻塞/异步声明在 print/TUI/RPC 各模式成立，或标注模式差异）
 4. **签名**：产物通过 → `signature=passed`；发现问题 → `signature=blocked`（blockers 具体可操作，主 agent 当场修复）
 
-窗口规约：审计者只在 agent_end 阻塞窗口内运行。窗口内可 `contact_supervisor` 澄清（60s 上限，否则按证据判定）。窗口超时 → 扩展协商：审计者把当前发现提前签成 blockers，或确认中止。窗口外**永不**联系主 agent。
+生命周期规约：每次审计都是 fresh spawn run（`context:"fork"` 继承本会话上下文）。常规轮在 agent_end 后异步运行（主 agent 不阻塞）；交付轮（提交/发布/merge/部署）等签名（300s 上限——超时降级放行 + findings 下轮注入，无协商黑洞）。审计者运行期间可 `contact_supervisor` 澄清（60s 上限，否则按证据判定）。中间发现持续写入 `auditFindings`；签名后立即停止（完成即停）。
 
 ## 工具
 
@@ -149,14 +143,9 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `PI_PAIR_BATCH_ROUNDS` | 6 | L0 链维护触发的轮数阈值 |
-| `PI_PAIR_BATCH_CHARS` | 8000 | L0 触发的字符阈值 |
-| `PI_PAIR_MIN_INTERVAL` | 2 | 两次审计最小间隔（轮） |
-| `PI_PAIR_MAX_BATCH` | 15 | 决策稀疏时强制审计兜底（轮） |
 | `PI_PAIR_CHAIN_PUBLIC=1` | 关 | 决策链写 `docs/decisions/chain.md`（团队可见）；默认写 `.pi/decision-auditor/chain.md`（私有） |
 | `PI_PAIR_PROCESS_LOG=0` | 开 | 关闭意图信号过程日志（CI 跑分基线） |
 | `PI_PAIR_PROJECT_ROOT` | — | 显式指定单一权威项目根（跨盘符/复杂场景）；默认从 cwd 向上自动探测 |
-| `PI_DECISION_AUDITOR_INJECT=off` | 开 | 关闭链状态注入（历史遗留，默认可忽略） |
 
 ## 决策链格式
 
@@ -173,7 +162,7 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 ## 设计要点
 
 - **主 agent 不可靠**：决策记录由审计者提取，事实由审计者核实，审计判断不依赖主 agent 自述
-- **常驻 + 缓存**：审计者 resume 复用（session 历史命中 prompt 缓存），保证跨轮连续又控制成本
+- **fresh spawn + context fork**：每次审计新起 run（`context:"fork"`）——继承本会话上下文，无常驻进程、无生命周期登记
 - **append-only + 防篡改**：旧决策不修改，修订 = supersede
 - **Context 是事实，Rationale 是推理**：审计者校验"推理是否由事实推出"，抓虚构数字、过度设计
 - **end 就是 end**：审计门禁确定性退出——通过 / 修复循环（最多 3 次）/ 带警告放行。不死锁、无窗口外唤起

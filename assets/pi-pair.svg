@@ -66,7 +66,7 @@
   <text x="860" y="262" font-family="Segoe UI, Arial, sans-serif" font-size="20" font-weight="700" fill="#e6edf3">SIGN</text>
   <text x="824" y="300" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8b949e">agent_end blocks until</text>
   <text x="824" y="320" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8b949e">artifacts pass audit</text>
-  <text x="824" y="340" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8b949e">(120s cap)</text>
+  <text x="824" y="340" font-family="Segoe UI, Arial, sans-serif" font-size="14" fill="#8b949e">(300s cap)</text>
   <text x="824" y="372" font-family="Segoe UI, Arial, sans-serif" font-size="13" fill="#4ade80">passed ✓ / blocked ✗</text>
 
   <!-- arrow cards -> chain -->

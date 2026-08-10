@@ -1,15 +1,60 @@
 # Changelog
 
+## [1.0.15] - 2026-08-11
+
+交叉审计修复（发布前）——3 个真缺陷 + 文档残留全清：
+
+- **H1 inFlight 锁泄漏**：`recordSignature` 置 `inFlight=false`（签名=审计结束）——防 decision_signoff 路径泄漏锁导致该 cwd 审计永久停摆
+- **H2 blocked 误判超时**：`waitForAuditCompletion` 完成判定改为"本轮新签名（signature.at ≥ auditStartedAt 且 !inFlight）"——blocked 签名（不推进 signatureConvLine）也被识别为本轮结论，交付轮不再把真实 blockers 误判为超时并覆盖
+- **M2 交付标记泄漏**：`deliveryRequested.delete` 提前到 agent_end 最前（任何早退路径都不泄漏到下轮）
+- **M3 L2 门禁硬编码**：reviewer/审计任务文本的 `docs/decisions/chain.md` 改为动态 `chainPath(cwd)`（默认 `.pi/decision-auditor/chain.md`）
+- **M4 残留锁兜底**：agent_end 对"文件锁 inFlight=true 但内存锁无"（审计者被强杀）补释放——防审计永久停摆
+- **文档全清**：README 中英（How-it-works/Capabilities/环境变量表/设计要点）、agents/decision-auditor.md（生命周期/查询协议/收尾幽灵字段）、docs/audit-state-machine.md（状态表/T4/T6/测试锁定）、CHANGELOG 内部矛盾段——全部对齐 fresh spawn + 单层审计最终架构
+- 26/26 测试通过、tsc 0 错误
+
 ## [1.0.14] - 2026-08-10
 
 convlog 会话隔离（多实例混写防护）——修复同 cwd 多 pi 实例共享 convlog 导致审计者把其他会话的对话当本会话决策捕获（实证：D-060~D-062/D-064 的触发来自另一开发会话的用户消息）。
 
 ### 会话隔离（D-065 落地 + reviewer 复审修复）
+
 - `appendConv` 行尾 `<!--run:<id>-->` 标记（实例级 RUN_ID = pid+random）；process.md 意图信号同步打标
 - 4 处审计/L2 prompt 注入过滤规则：提取决策/推导目标只依据本会话标记行；无标记行（升级前历史）仅作上下文、不提取；其他 run 标记行忽略
 - 多实例混写检测 `convlogForeignRuns`：agent_end/agent_settled 检测到其他实例真实对话 → 跳过自动审计 + warning（run 级过滤 vs 全局状态机错配时显式降级，不静默错审）
 - 接线守卫静态断言（写入点传 RUN_ID、4 处规则注入、多实例检测接通）+ 新增单测（runId 隔离、外来 run 检测）
 - 31/31 测试通过，tsc 0 错误
+
+### 审计预算调整（180s→300s / 720s→600s）+ 伪造标记修复
+
+- 阻塞等待上限 180s→300s，协商关闭窗口 720s→600s（演进中间态；最终架构删除协商窗口——超时直接降级放行，见下方架构重构）
+- 文案同步：steer 协商消息、超时 blockers、注释、审计者规约（约 120s→约 300s）、README/SVG 一致化（原 120s 声明 v1.0.12 起即过期）
+- 文案同步：steer 协商消息、超时 blockers、注释、审计者规约（约 120s→约 300s）、README/SVG 一致化（原 120s 声明 v1.0.12 起即过期）
+- `convlogForeignRuns` 正则锚定行尾（`/<!--run:...-->\s*$/`）：真实标记由 appendConv 追加在行尾，防用户正文内嵌伪造标记误判外来实例（可永久关闭审计门禁）；新增回归单测
+
+### 架构重构：单层审计 + fresh spawn（根治机制叠加）
+
+- **砍 L0 独立层**：删除 `spawnL0Audit`/`buildChainAuditTask`/`accumulateRound`/`checkAuditDue`/`AuditConfig`——单层审计一次任务完成"提取决策 + 审产物 + 签名"，agent_end 按真实产物判定直接触发，无累积记账/节流
+- **砍常驻 run**：删除 `ensureAuditorInLane`/`residentAuditorRunIds`/resume 复用/`auditorRunId` 字段——每次 fresh spawn（`context:"fork"` 继承主会话上下文），审计完即死，session_shutdown 只清内存锁
+- **状态精简**：`AuditState` 从 13 字段减到 9（删 `roundsSinceAudit`/`pendingChars`/`chainFindings`/`auditorRunId`）——单层审计无独立链维护通道
+- **L2 前置门禁**：`triggerDeliveryAudit` 前检查真实产物（git 改动 or 决策条目）——无交付物不 spawn reviewer，杜绝 follow_me 式空转（reviewer 无产物反复搜索）
+- **注入收敛**：`before_agent_start` 只保留价值点（blockers/auditFindings）`display:true` 注入，删除 chainFindings 内部通道（display:false 分支）
+- 代码量：扩展 1114→907 行、lib 712→607 行、测试 32→26（删 L0 记账/节流测试，新增单层架构守卫 + auditFindings 消毒）
+- 26/26 测试通过、tsc 0 错误；`docs/architecture.md` 记录目标架构与设计原则
+
+### 体验改造：结对"真实有效、好体验、无感"（根治审计感知过强）
+
+- **真实产物判定**：agent_end 触发判据从"convlog 有增量"改为"git 未提交改动 or 未审计决策条目"——纯咨询/运维会话（无代码产物、无决策）零审计零噪音，消灭"没有产物也走审计"
+- **常规轮异步不阻塞**：agent_end 常规轮 spawn 审计者后立即返回（不再 await 300s）；审计者完成写 signature，下一轮开工时经 `before_agent_start` 注入 findings
+- **交付轮保留同步门禁**：用户消息含交付信号（提交/发布/merge/交付/收工/上线/部署/推送）→ agent_end 同步等签名（300s 上限）；超时降级放行 + 缺口注入下轮，不再 600s 协商黑洞
+- **findings 注入替代刷屏**：blocked/超时结论经注入主 agent，用户不再看到"审计未通过（第 N/3 次）"流程刷屏；签名变化才注入（内存去重）
+- 删除 `negotiateStop`（600s 协商窗口）与 `handleBlocked` 的 `sendUserMessage` 刷屏路径；A2 连续 3 次 blocked 降级放行保留
+- **持续交付（R5）**：审计者边审边写 `auditFindings` 中间态到 state.json（启动即写占位、每步核实即追加）——中途被杀/超时也交付已确认的价值；审计完成（async-complete）时若 blocked → 立即 `sendUserMessage` 交付主 agent 处理（不等下轮注入）；修复 → 再审 → 直到干净
+- **完成即停（R7）**：审计者签名后立即停止（prompt 明确边界），遗留疑问写 blockers/auditFindings 留给下一轮结合用户需求继续
+- **状态目录排除（R11）**：`hasUncommittedChanges` 用 pathspec 排除 `.pi/`、`.pi-subagents/`（审计自身写入不算产物，防自触发）
+- **价值点可观察**：审计抓出的缺口（blockers/auditFindings）`display:true` 注入——用户感知价值（最终架构：链维护内部通道已随 L0 层删除）
+- **状态机文档化**：新增 `docs/audit-state-machine.md` 为权威状态转移定义（T1 触发 / T2 收尾 / T3 持续交付 / T4 注入 / T5 生命周期 / T6 recordSignature + 6 条不变量）；移除死状态 `timeout`（类型、streak 逻辑、测试同步清理——超时直接降级 passed-with-warning）
+- 注入去重拆分：signature 结论与中间态各自独立去重 map（防互相覆盖重复注入）
+- 新增单测：`hasUncommittedChanges`（非 git/干净/改动/未跟踪/状态目录排除五态）、接线守卫更新（fresh spawn 无 L0/常驻、async-complete 持续交付、完成即停、真实产物判定、交付标记先消费、异步不阻塞、价值点 display:true、L2 真实产物门禁、协商黑洞移除、刷屏移除）
 
 ## [1.0.13] - 2026-08-10
 

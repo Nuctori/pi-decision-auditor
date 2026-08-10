@@ -4,6 +4,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 
 export interface DecisionFields {
 	summary: string;
@@ -215,10 +216,11 @@ export function renderEntry(e: DecisionEntry): string {
 export interface AuditSignature {
 	/**
 	 * 签名状态：
-	 * passed = 审计通过；blocked = 发现问题；timeout = 超时未完成；
-	 * passed-with-warning = 连续 blocked 达上限后降级放行（A2 门禁退出）。
+	 * passed = 审计通过；blocked = 发现问题（streak+1）；
+	 * passed-with-warning = 交付轮超时降级 或 连续 blocked 达上限（A2 门禁退出）。
+	 * 无 timeout 态（v1.0.15 起超时直接降级 passed-with-warning，见 docs/audit-state-machine.md）。
 	 */
-	status: "passed" | "blocked" | "timeout" | "passed-with-warning";
+	status: "passed" | "blocked" | "passed-with-warning";
 	/** 签名时间（epoch ms）。 */
 	at: number;
 	/** blocker 摘要（blocked 时）。 */
@@ -234,10 +236,6 @@ export interface AuditState {
 	inFlight: boolean;
 	/** convlog 已提取到的行号（审计者提取决策后推进）。0 = 从头。 */
 	convExtractedLine: number;
-	/** 距上次审计的轮数（minInterval 判断用）。 */
-	roundsSinceAudit: number;
-	/** 待审增量记账：已累积的 convlog 字符数。 */
-	pendingChars: number;
 	/** 上次审计时间（epoch ms）。 */
 	lastAuditAt: number;
 	/** 本轮签名（agent_end 强制签名用）。null = 未签名。 */
@@ -246,30 +244,25 @@ export interface AuditState {
 	signatureConvLine: number;
 	/** 连续 blocked 次数（A2 门禁退出：>=3 降级放行）。passed 后清零。 */
 	blockedStreak: number;
-	/** L0 链级复审发现的问题（跨轮审链 findings），before_agent_start 注入主 agent。 */
-	chainFindings: string[];
+	/** 审计中间态 findings（审计者启动即写、边审边追加；被杀/超时也有中间结果可交付）。 */
+	auditFindings: string[];
 	/** 最近一次审计的阻塞时长（ms，agent_end 从触发到签名），CI 跑分用。 */
 	lastAuditDurationMs: number;
-	/** 最近一次审计的启动时间戳（扩展 spawn/resume 时写；审计者收尾算 duration）。 */
+	/** 最近一次审计的启动时间戳（扩展 spawn 时写；审计者收尾算 duration）。 */
 	auditStartedAt: number;
-	/** 常驻审计者的 runId（跨轮 resume 用）。null = 首次 spawn。 */
-	auditorRunId: string | null;
 }
 
 const DEFAULT_STATE: AuditState = {
 	lastAuditedId: null,
 	inFlight: false,
 	convExtractedLine: 0,
-	roundsSinceAudit: 0,
-	pendingChars: 0,
 	lastAuditAt: 0,
 	signature: null,
 	signatureConvLine: 0,
 	blockedStreak: 0,
-	chainFindings: [],
+	auditFindings: [],
 	lastAuditDurationMs: 0,
 	auditStartedAt: 0,
-	auditorRunId: null,
 };
 
 /** 审计状态文件路径：<cwd>/.pi/decision-auditor/state.json */
@@ -288,9 +281,6 @@ export function readAuditState(cwd: string): AuditState {
 			inFlight: obj.inFlight === true,
 			convExtractedLine:
 				typeof obj.convExtractedLine === "number" ? obj.convExtractedLine : 0,
-			roundsSinceAudit:
-				typeof obj.roundsSinceAudit === "number" ? obj.roundsSinceAudit : 0,
-			pendingChars: typeof obj.pendingChars === "number" ? obj.pendingChars : 0,
 			lastAuditAt: typeof obj.lastAuditAt === "number" ? obj.lastAuditAt : 0,
 			signature:
 				obj.signature &&
@@ -315,8 +305,8 @@ export function readAuditState(cwd: string): AuditState {
 				typeof obj.signatureConvLine === "number" ? obj.signatureConvLine : 0,
 			blockedStreak:
 				typeof obj.blockedStreak === "number" ? obj.blockedStreak : 0,
-			chainFindings: Array.isArray(obj.chainFindings)
-				? obj.chainFindings.filter((x) => typeof x === "string")
+			auditFindings: Array.isArray(obj.auditFindings)
+				? obj.auditFindings.filter((x) => typeof x === "string")
 				: [],
 			lastAuditDurationMs:
 				typeof obj.lastAuditDurationMs === "number"
@@ -324,8 +314,6 @@ export function readAuditState(cwd: string): AuditState {
 					: 0,
 			auditStartedAt:
 				typeof obj.auditStartedAt === "number" ? obj.auditStartedAt : 0,
-			auditorRunId:
-				typeof obj.auditorRunId === "string" ? obj.auditorRunId : null,
 		};
 	} catch {
 		return { ...DEFAULT_STATE };
@@ -356,20 +344,19 @@ export function needsSignoff(cwd: string): boolean {
 	}
 }
 
-/** 记录本轮审计签名（agent 完成审计阶段后调用）。 */
+/** 记录本轮审计签名（agent 完成审计阶段后调用）。签名即审计结束：释放 inFlight 锁。 */
 export function recordSignature(
 	cwd: string,
 	sig: Omit<AuditSignature, "at">,
 ): void {
 	const state = readAuditState(cwd);
 	const totalLines = convLogLineCount(cwd);
-	// A2 门禁：连续 blocked 递增；passed / 降级放行后清零。
-	const blockedStreak =
-		sig.status === "blocked" || sig.status === "timeout"
-			? state.blockedStreak + 1
-			: 0;
+	// A2 门禁：连续 blocked 递增；passed / 降级放行后清零。（timeout 态已移除，见 docs/audit-state-machine.md）
+	const blockedStreak = sig.status === "blocked" ? state.blockedStreak + 1 : 0;
 	writeAuditState(cwd, {
 		...state,
+		// 签名 = 审计结束：释放文件锁（防 decision_signoff 路径泄漏 inFlight → 后续审计永久停摆）
+		inFlight: false,
 		signature: { ...sig, at: Date.now() },
 		signatureConvLine: totalLines,
 		blockedStreak,
@@ -391,8 +378,6 @@ export function resetForSessionStart(cwd: string): void {
 			signatureConvLine: totalLines,
 			// 保留上次签名状态作参考，但不再触发待签名
 			inFlight: false,
-			roundsSinceAudit: 0,
-			pendingChars: 0,
 		});
 	} catch {
 		/* noop */
@@ -406,6 +391,37 @@ export function entriesSinceLastAudit(cwd: string): DecisionEntry[] {
 	if (state.lastAuditedId === null) return entries;
 	const idx = entries.findIndex((e) => e.id === state.lastAuditedId);
 	return idx < 0 ? entries : entries.slice(idx + 1);
+}
+
+/**
+ * 是否有未提交的真实产物（git 未提交改动/新增文件，排除扩展自身状态目录）。
+ * agent_end 触发判据：无代码产物且无新决策 → 本轮不审计（纯咨询/运维会话零审计零噪音）。
+ * 排除 .pi/ 与 .pi-subagents/（审计状态/convlog/链自身写入不算产物，防自触发）。
+ * 非 git 仓库或 git 不可用 → false（无代码产物可审；决策条目由 entriesSinceLastAudit 兜底）。
+ */
+export function hasUncommittedChanges(cwd: string): boolean {
+	try {
+		const out = execFileSync(
+			"git",
+			[
+				"status",
+				"--porcelain",
+				"--untracked-files=all",
+				"--",
+				":(exclude).pi",
+				":(exclude).pi-subagents",
+			],
+			{
+				cwd,
+				encoding: "utf-8",
+				stdio: ["ignore", "pipe", "ignore"],
+				timeout: 5000,
+			},
+		);
+		return out.trim().length > 0;
+	} catch {
+		return false;
+	}
 }
 
 // ---- 对话流日志（目标推导用）----
@@ -573,7 +589,9 @@ export function convlogForeignRuns(cwd: string, ownRunId: string): number {
 		for (const line of raw.split(/\r?\n/)) {
 			const t = line.trim();
 			if (!t.startsWith("## 👤")) continue; // 只看用户行
-			const m = t.match(/<!--run:([a-zA-Z0-9-]+)-->/);
+			// 真实标记由 appendConv 追加在行尾——锚定行尾取真标记，防用户正文内嵌
+			// `<!--run:xxx-->` 文本被误判为外来实例（伪造即可关闭审计门禁）
+			const m = t.match(/<!--run:([a-zA-Z0-9-]+)-->\s*$/);
 			if (!m) continue; // 无标记（旧历史/未升级实例）——无法归属，不误报
 			if (m[1] === ownRunId) continue; // 本实例
 			if (t.includes("Task:")) continue; // 审计者任务注入（user-role 记录），非真实会话
@@ -586,87 +604,5 @@ export function convlogForeignRuns(cwd: string, ownRunId: string): number {
 }
 
 // ---- 待审增量记账（增量累积唤起）----
-// 每轮结束时扩展调用 accumulatePending 记账；达到阈值返回 true 触发审计。
-
-export interface AuditConfig {
-	/** 累积多少轮对话触发审计。 */
-	batchRounds: number;
-	/** 累积多少 convlog 字符触发审计。 */
-	batchChars: number;
-	/** 两次审计最小间隔（轮），防连续决策密集时频繁唤起。 */
-	minIntervalRounds: number;
-	/** 决策稀疏时的强制审计兜底（轮）。 */
-	maxBatchRounds: number;
-}
-
-export const DEFAULT_AUDIT_CONFIG: AuditConfig = {
-	batchRounds: 6,
-	batchChars: 8000,
-	minIntervalRounds: 2,
-	maxBatchRounds: 15,
-};
-
-/** 从环境变量覆盖配置（PI_PAIR_BATCH_ROUNDS 等）。 */
-export function resolveAuditConfig(
-	env: Record<string, string | undefined> = process.env,
-): AuditConfig {
-	const num = (k: string, d: number): number => {
-		const v = env[k];
-		if (!v) return d;
-		const n = Number(v);
-		return Number.isFinite(n) && n > 0 ? Math.round(n) : d;
-	};
-	return {
-		batchRounds: num("PI_PAIR_BATCH_ROUNDS", DEFAULT_AUDIT_CONFIG.batchRounds),
-		batchChars: num("PI_PAIR_BATCH_CHARS", DEFAULT_AUDIT_CONFIG.batchChars),
-		minIntervalRounds: num(
-			"PI_PAIR_MIN_INTERVAL",
-			DEFAULT_AUDIT_CONFIG.minIntervalRounds,
-		),
-		maxBatchRounds: num(
-			"PI_PAIR_MAX_BATCH",
-			DEFAULT_AUDIT_CONFIG.maxBatchRounds,
-		),
-	};
-}
-
-/**
- * 每轮结束时记账（L0 捕获审计的累积量）：只记账，不判断、不清零。
- * message_end 调用（每轮一次）。roundChars = 本轮 convlog 增量字符数。
- */
-export function accumulateRound(cwd: string, roundChars: number): void {
-	const state = readAuditState(cwd);
-	writeAuditState(cwd, {
-		...state,
-		roundsSinceAudit: (state.roundsSinceAudit ?? 0) + 1,
-		pendingChars: (state.pendingChars ?? 0) + roundChars,
-	});
-}
-
-/**
- * 判断 L0 是否该唤起（agent_settled 调用，在 L1 门禁之后，避免抢阻塞窗口）。
- * 规则：
- *  - inFlight（L1 审计在跑）→ 不唤起
- *  - force（显式 decision_add）→ 跳过 minInterval 直接触发
- *  - 距上次审计不足 minIntervalRounds → 不唤起
- *  - 累积轮数 ≥ batchRounds 或 字符 ≥ batchChars 或 ≥ maxBatchRounds → 唤起
- * 达到阈值则清零累积并返回 true（扩展 spawn L0 审计者）。
- */
-export function checkAuditDue(cwd: string, force = false): boolean {
-	const cfg = resolveAuditConfig();
-	const state = readAuditState(cwd);
-	if (state.inFlight) return false;
-
-	const rounds = state.roundsSinceAudit;
-	const sinceLast =
-		state.lastAuditAt === 0 ? true : rounds >= cfg.minIntervalRounds;
-	const thresholdHit =
-		rounds >= cfg.batchRounds ||
-		state.pendingChars >= cfg.batchChars ||
-		rounds >= cfg.maxBatchRounds;
-	if (!(force || (sinceLast && thresholdHit))) return false;
-
-	// 触发后清零累积（L0 spawn 时扩展写 inFlight）
-	writeAuditState(cwd, { ...state, roundsSinceAudit: 0, pendingChars: 0 });
-	return true;
-}
+// 已删除：L0 独立层（accumulateRound/checkAuditDue/AuditConfig）——单层审计在 agent_end
+// 直接按真实产物判定（hasUncommittedChanges or entriesSinceLastAudit）触发，无需累积记账。

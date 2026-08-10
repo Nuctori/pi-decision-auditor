@@ -8,18 +8,18 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 import {
-	accumulateRound,
 	appendDecision,
 	appendConv,
 	appendProcessSignal,
 	auditStatePath,
 	chainPath,
-	checkAuditDue,
 	convLogLineCount,
 	convlogForeignRuns,
 	convlogPath,
 	entriesSinceLastAudit,
+	hasUncommittedChanges,
 	listEntries,
 	needsSignoff,
 	parseChain,
@@ -30,7 +30,6 @@ import {
 	readRaw,
 	recordSignature,
 	resetForSessionStart,
-	resolveAuditConfig,
 	resolveProjectRoot,
 	writeAuditState,
 } from "../lib/chain-store.js";
@@ -232,121 +231,47 @@ test("坏状态文件容错", () => {
 	assert.equal(state.lastAuditedId, null);
 	assert.equal(state.inFlight, false);
 	assert.equal(state.convExtractedLine, 0);
-	assert.equal(state.roundsSinceAudit, 0);
 });
 
-test("L0 记账+判断：batchRounds 触发", () => {
-	const dir = tmpDir();
-	// 记账（message_end 每轮调 accumulateRound）→ 判断（agent_settled 调 checkAuditDue）
-	for (let i = 0; i < 5; i++) {
-		accumulateRound(dir, 100);
-		assert.equal(checkAuditDue(dir), false); // rounds 1..5 < batchRounds(6)
-	}
-	accumulateRound(dir, 100); // 第 6 轮
-	assert.equal(checkAuditDue(dir), true); // rounds=6 → 触发
+// L0 独立层已删除（单层审计）：accumulateRound/checkAuditDue 记账与节流测试随之移除——
+// agent_end 按真实产物判定（hasUncommittedChanges or entriesSinceLastAudit）直接触发审计。
 
-	// 触发后清零：下一轮重新累积
-	accumulateRound(dir, 100);
+test("L0 记账字段已从状态移除（单层架构）", () => {
+	const dir = tmpDir();
 	const state = readAuditState(dir);
-	assert.equal(state.roundsSinceAudit, 1);
-	assert.equal(state.pendingChars, 100);
+	assert.ok(!("roundsSinceAudit" in state), "roundsSinceAudit 字段必须移除");
+	assert.ok(!("pendingChars" in state), "pendingChars 字段必须移除");
+	assert.ok(!("chainFindings" in state), "chainFindings 字段必须移除");
+	assert.ok(
+		!("auditorRunId" in state),
+		"auditorRunId 字段必须移除（fresh spawn）",
+	);
 });
 
-test("L0 记账+判断：batchChars 触发", () => {
-	const dir = tmpDir();
-	// 每轮 2000 字符，默认 batchChars=8000 → 第 4 轮触发
-	for (let i = 0; i < 3; i++) {
-		accumulateRound(dir, 2000);
-		assert.equal(checkAuditDue(dir), false);
-	}
-	accumulateRound(dir, 2000); // 累积 8000
-	assert.equal(checkAuditDue(dir), true);
-});
-
-test("L0：inFlight（L1 门禁在跑）时不唤起", () => {
-	const dir = tmpDir();
-	accumulateRound(dir, 5000);
-	writeAuditState(dir, { ...readAuditState(dir), inFlight: true });
-	assert.equal(checkAuditDue(dir), false); // L1 在跑 → L0 不抢
-});
-
-test("L0：force 跳过 minInterval（decision_add 路径）", () => {
-	const dir = tmpDir();
-	// 先完成一次审计（设 lastAuditAt），再验证 force 行为
-	writeAuditState(dir, {
-		...readAuditState(dir),
-		lastAuditAt: Date.now(),
-		roundsSinceAudit: 0,
-	});
-	// 非 force：距上次审计 0 轮 < minInterval(2) → 不触发
-	assert.equal(checkAuditDue(dir), false);
-	// force：跳过 minInterval，直接触发
-	assert.equal(checkAuditDue(dir, true), true);
-});
-
-test("L0：minInterval 节流（距上次审计不足）", () => {
-	const dir = tmpDir();
-	// 上次审计刚发生（lastAuditAt 现在），记账 1 轮
-	writeAuditState(dir, {
-		...readAuditState(dir),
-		lastAuditAt: Date.now(),
-	});
-	accumulateRound(dir, 100);
-	assert.equal(checkAuditDue(dir), false); // rounds=1 < minInterval(2)
-	accumulateRound(dir, 100);
-	assert.equal(checkAuditDue(dir), false); // rounds=2 >= minInterval 但 < batchRounds
-});
-
-test("L1 收尾不清 L0 记账（分层隔离）", () => {
-	const dir = tmpDir();
-	// L0 记账两轮
-	accumulateRound(dir, 100);
-	accumulateRound(dir, 100);
-	const before = readAuditState(dir);
-	assert.equal(before.roundsSinceAudit, 2);
-
-	// 模拟 L1 门禁收尾：只写签名/inFlight/lastAuditAt，不碰 roundsSinceAudit/pendingChars
-	writeAuditState(dir, {
-		...readAuditState(dir),
-		inFlight: false,
-		lastAuditAt: Date.now(),
-		signature: { status: "passed", at: Date.now() },
-	});
-
-	const after = readAuditState(dir);
-	assert.equal(after.roundsSinceAudit, 2); // L1 收尾不清记账 → L0 累积保留
-	assert.equal(after.pendingChars, 200);
-	// 下一轮继续记账 → 仍能攒够触发
-	accumulateRound(dir, 100);
-	assert.equal(readAuditState(dir).roundsSinceAudit, 3);
-});
-
-test("chainFindings：读写与消毒", () => {
+test("auditFindings：读写与消毒（中间态交付）", () => {
 	const dir = tmpDir();
 	writeAuditState(dir, {
 		...readAuditState(dir),
-		chainFindings: ["D-001 与 D-002 矛盾"],
+		auditFindings: ["推导目标 ✓", "已确认缺口：X"],
 	});
-	assert.deepEqual(readAuditState(dir).chainFindings, ["D-001 与 D-002 矛盾"]);
+	assert.deepEqual(readAuditState(dir).auditFindings, [
+		"推导目标 ✓",
+		"已确认缺口：X",
+	]);
 	// 坏值消毒
 	fs.mkdirSync(path.dirname(auditStatePath(dir)), { recursive: true });
 	fs.writeFileSync(
 		auditStatePath(dir),
-		'{"chainFindings": ["ok", 42, null]}',
+		'{"auditFindings": ["ok", 42, null]}',
 		"utf-8",
 	);
-	assert.deepEqual(readAuditState(dir).chainFindings, ["ok"]);
+	assert.deepEqual(readAuditState(dir).auditFindings, ["ok"]);
 });
 
-test("接线守卫：L0 触发链在扩展里接通（防断线回归）", () => {
+test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价值点注入）", () => {
 	const src = fs.readFileSync(
 		path.join(process.cwd(), "extensions", "decision-chain.ts"),
 		"utf-8",
-	);
-	// message_end 记账（单一权威根：projectRoot 缓存）
-	assert.ok(
-		src.includes("accumulateRound(projectRoot(ctx.cwd), text.length)"),
-		"message_end 必须调 accumulateRound 记账（用 projectRoot）",
 	);
 	// 单一权威 state：会话级根缓存 + 无裸 resolveProjectRoot(ctx.cwd)
 	assert.ok(
@@ -365,33 +290,24 @@ test("接线守卫：L0 触发链在扩展里接通（防断线回归）", () =>
 		src.includes("PI_PAIR_PROJECT_ROOT"),
 		"resolveProjectRoot 必须支持 PI_PAIR_PROJECT_ROOT 显式权威根（跨盘符兜底）",
 	);
-	// agent_settled 判断+唤起
+	// 单层审计：砍 L0 独立层（无 agent_settled 触发链、无 checkAuditDue、无 spawnL0Audit）
 	assert.ok(
-		src.includes('pi.on("agent_settled"'),
-		"agent_settled handler 必须存在",
+		!src.includes("spawnL0Audit") && !src.includes("checkAuditDue"),
+		"必须砍 L0 独立层（单层审计：提取决策+审产物+签名一次完成）",
 	);
 	assert.ok(
-		src.includes("checkAuditDue(root)"),
-		"agent_settled 必须调 checkAuditDue",
+		!src.includes("accumulateRound"),
+		"必须砍 L0 记账（accumulateRound 已并入单层审计）",
 	);
 	assert.ok(
-		src.includes("spawnL0Audit(pi, rpc, readyPromise, root)"),
-		"agent_settled 必须 spawn L0",
+		!src.includes("chainFindings"),
+		"必须砍 chainFindings 独立通道（单层审计直接签名）",
 	);
-	// L0 复用 L1 常驻 run（一个持灯人，不新增实例）
+	// fresh spawn：无常驻 run 复用（无 resume 生命周期、无 residentAuditorRunIds）
 	assert.ok(
-		src.includes("state.auditorRunId") && src.includes('"resume"'),
-		"spawnL0Audit 必须 resume 常驻审计者 run（L0/L1 同一实例）",
-	);
-	// L1 任务不碰记账字段
-	assert.ok(
-		src.includes("不要清 roundsSinceAudit/pendingChars"),
-		"L1 收尾不得清 L0 记账",
-	);
-	// decision_add 走 L0
-	assert.ok(
-		src.includes("checkAuditDue(projectRoot(ctx.cwd), true)"),
-		"decision_add 必须 force 触发 L0",
+		!src.includes("residentAuditorRunIds") &&
+			!src.includes("ensureAuditorInLane"),
+		"必须砍常驻 run 生命周期（fresh spawn，审计完即死）",
 	);
 	// process 记录接线（意图信号，受 PI_PAIR_PROCESS_LOG 开关控制）
 	assert.ok(
@@ -402,13 +318,8 @@ test("接线守卫：L0 触发链在扩展里接通（防断线回归）", () =>
 		src.includes('process.env.PI_PAIR_PROCESS_LOG !== "0"'),
 		"process 记录必须受 PI_PAIR_PROCESS_LOG 开关控制（CI 跑分基线）",
 	);
-	// L1 审计任务必须引导读过程日志
+	// 审计任务必须引导读过程日志
 	assert.ok(src.includes("processPath(cwd)"), "审计任务必须引用过程日志路径");
-	// 审计阻塞时长测量
-	assert.ok(
-		src.includes("lastAuditDurationMs"),
-		"agent_end 必须记录审计阻塞时长（CI 跑分指标）",
-	);
 	// 实证盲区维度（prompt 优化）：机制完整性 + 运行时行为
 	assert.ok(
 		src.includes("机制完整性"),
@@ -423,7 +334,7 @@ test("接线守卫：L0 触发链在扩展里接通（防断线回归）", () =>
 		src.includes("链的实际位置以 find 到的真实文件为准"),
 		"审计任务路径提示必须引导 find 真实链（防 cwd 解析误导）",
 	);
-	// 会话隔离接线：写入点传 RUN_ID、4 处 prompt 注入过滤规则、多实例检测接通
+	// 会话隔离接线：写入点传 RUN_ID、prompt 注入过滤规则、多实例检测接通
 	assert.ok(
 		src.includes('appendConv(projectRoot(ctx.cwd), "user", text, RUN_ID)'),
 		"message_end 用户行必须带 RUN_ID 标记（会话隔离）",
@@ -442,12 +353,75 @@ test("接线守卫：L0 触发链在扩展里接通（防断线回归）", () =>
 		`4 处审计/L2 prompt 必须注入会话隔离规则（防重构删掉），实际 ${ruleCount} 处`,
 	);
 	assert.ok(
-		src.includes("convlogForeignRuns(projectRoot(ctx.cwd), RUN_ID) > 0"),
+		src.includes("convlogForeignRuns(root, RUN_ID) > 0"),
 		"agent_end 必须做多实例混写检测（跳过错审）",
 	);
+	// 真实产物判定 + 常规轮异步 + 交付轮同步门禁
 	assert.ok(
-		src.includes("convlogForeignRuns(root, RUN_ID) > 0"),
-		"agent_settled 必须做多实例混写检测（跳过跨实例捕获）",
+		src.includes("hasUncommittedChanges(root)") &&
+			src.includes("entriesSinceLastAudit(root).length > 0"),
+		"agent_end 必须用真实产物判定（git 改动 or 未审计决策）——纯咨询/运维会话零审计",
+	);
+	assert.ok(
+		src.includes("deliveryRequested"),
+		"交付信号必须在 message_end 登记（提交/发布/merge → agent_end 同步门禁）",
+	);
+	assert.ok(
+		src.includes("if (!isDelivery) return;"),
+		"常规轮必须异步（agent_end 不阻塞等签名）——findings 下轮注入",
+	);
+	// L2 交付审查必须有真实产物门禁（无 git diff 且无决策 → 不 spawn，杜绝空转）
+	assert.ok(
+		src.includes("hasUncommittedChanges") &&
+			src.includes("triggerDeliveryAudit"),
+		"L2 交付审查必须带真实产物门禁（无交付物不 spawn，杜绝 follow_me 空转）",
+	);
+	// 价值点可观察 / 流程隐藏
+	assert.ok(
+		src.includes("display: true"),
+		"审计价值点（blockers/auditFindings）必须 display:true 注入——用户可观察（状态机 T4）",
+	);
+	assert.ok(
+		!src.includes("negotiateStop"),
+		"600s 协商黑洞必须移除（超时直接降级放行 + findings 下轮注入）",
+	);
+	assert.ok(
+		!src.includes("审计未通过（第"),
+		"blocked 计数刷屏必须移除（不再 sendUserMessage 给用户）",
+	);
+	// session_shutdown 清理（fresh spawn 场景：清内存锁即可，无常驻 run 残留）
+	assert.ok(
+		src.includes('pi.on("session_shutdown"'),
+		"session_shutdown handler 必须存在（清理内存锁）",
+	);
+	// 持续交付：审计完成（async-complete）时若有 blockers → 立即交付主 agent 处理
+	assert.ok(
+		src.includes("subagent:async-complete") &&
+			src.includes("blockers") &&
+			src.includes("sendUserMessage"),
+		"审计完成事件必须把 blockers 立即交付主 agent（持续交付，不等下轮）",
+	);
+	// H2：waitForAuditCompletion 完成判定 = 本轮新签名（blocked 也算完成，防覆盖真实 blockers）
+	assert.ok(
+		src.includes("state.signature.at >= startedAt"),
+		"完成判定必须用 signature.at >= auditStartedAt（blocked 签名不推进 convLine 但仍是本轮结论）",
+	);
+	// M2：交付标记先消费（无泄漏到下轮）
+	assert.ok(
+		src.includes("deliveryRequested.delete(root)") &&
+			src.includes("const isDelivery = deliveryRequested.has(root)") &&
+			src.indexOf("const isDelivery") < src.indexOf("hasUncommittedChanges(root)"),
+		"deliveryRequested 必须在 agent_end 最前消费（任何早退路径都不泄漏）",
+	);
+	// M4：残留锁兜底（文件锁在但内存锁无 → 释放，防审计永久停摆）
+	assert.ok(
+		src.includes("state.inFlight && !hasInFlight(root)"),
+		"agent_end 必须有残留锁兜底（审计者被强杀未写收尾时释放文件锁）",
+	);
+	// 完成即停：审计者 prompt 必须含明确停止边界
+	assert.ok(
+		src.includes("完成即停") && src.includes("签名后的一切继续都是浪费"),
+		"审计者 prompt 必须含完成即停边界（签名后不再扩大范围）",
 	);
 });
 
@@ -520,6 +494,19 @@ test("convlogForeignRuns：多实例混写检测", () => {
 	const dirTask = tmpDir();
 	appendConv(dirTask, "user", "Task: 你是链维护审计者…", "run-c");
 	assert.equal(convlogForeignRuns(dirTask, "run-x"), 0);
+	// 用户正文内嵌伪造标记（非行尾）不算外来——防伪造 run 标记关闭审计门禁
+	const dirSpoof = tmpDir();
+	appendConv(
+		dirSpoof,
+		"user",
+		"请修复这个 bug <!--run:run-999-zzz-->",
+		"run-a",
+	);
+	assert.equal(convlogForeignRuns(dirSpoof, "run-a"), 0);
+	// 真实行尾标记（其他实例）仍必须检出
+	const dirReal = tmpDir();
+	appendConv(dirReal, "user", "其他实例的 ctx_knowledge 讨论", "run-b");
+	assert.equal(convlogForeignRuns(dirReal, "run-a"), 1);
 	// 纯单实例：无外来行
 	const dir2 = tmpDir();
 	appendConv(dir2, "user", "只有本实例", "run-a");
@@ -559,7 +546,7 @@ test("recordSignature 字段级写入", () => {
 	assert.deepEqual(s2.signature?.blockers, ["x"]);
 });
 
-test("blockedStreak：blocked/timeout 递增，passed/降级清零", () => {
+test("blockedStreak：blocked 递增，passed/降级清零（timeout 态已移除）", () => {
 	const dir = tmpDir();
 	appendConv(dir, "user", "测试");
 
@@ -570,13 +557,9 @@ test("blockedStreak：blocked/timeout 递增，passed/降级清零", () => {
 	recordSignature(dir, { status: "blocked", blockers: ["a"] });
 	assert.equal(readAuditState(dir).blockedStreak, 1);
 
-	// timeout 递增 2
-	recordSignature(dir, { status: "timeout" });
-	assert.equal(readAuditState(dir).blockedStreak, 2);
-
-	// blocked 递增 3
+	// blocked 递增 2（连续）
 	recordSignature(dir, { status: "blocked", blockers: ["b"] });
-	assert.equal(readAuditState(dir).blockedStreak, 3);
+	assert.equal(readAuditState(dir).blockedStreak, 2);
 
 	// passed 清零
 	recordSignature(dir, { status: "passed" });
@@ -593,6 +576,21 @@ test("blockedStreak：blocked/timeout 递增，passed/降级清零", () => {
 	assert.equal(readAuditState(dir).signature?.status, "passed-with-warning");
 });
 
+test("recordSignature 释放 inFlight 锁（H1：防锁泄漏致审计永久停摆）", () => {
+	const dir = tmpDir();
+	appendConv(dir, "user", "测试");
+	// 模拟审计运行中（inFlight=true）→ 审计者用 decision_signoff 签名
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		inFlight: true,
+	});
+	recordSignature(dir, { status: "blocked", blockers: ["x"] });
+	// 签名 = 审计结束：锁必须释放（否则后续 agent_end 永不 spawn 审计者）
+	assert.equal(readAuditState(dir).inFlight, false);
+	// blocked 签名同时递增 streak
+	assert.equal(readAuditState(dir).blockedStreak, 1);
+});
+
 test("readAuditState 坏 signature 消毒", () => {
 	const dir = tmpDir();
 	fs.mkdirSync(path.dirname(auditStatePath(dir)), { recursive: true });
@@ -605,18 +603,7 @@ test("readAuditState 坏 signature 消毒", () => {
 	assert.equal(state.signature, null); // 非对象 → 消毒为 null
 });
 
-test("resolveAuditConfig 环境变量覆盖", () => {
-	const cfg = resolveAuditConfig({
-		PI_PAIR_BATCH_ROUNDS: "3",
-		PI_PAIR_BATCH_CHARS: "5000",
-		PI_PAIR_MIN_INTERVAL: "1",
-		PI_PAIR_MAX_BATCH: "10",
-	} as Record<string, string>);
-	assert.equal(cfg.batchRounds, 3);
-	assert.equal(cfg.batchChars, 5000);
-	assert.equal(cfg.minIntervalRounds, 1);
-	assert.equal(cfg.maxBatchRounds, 10);
-});
+// resolveAuditConfig 已随 L0 独立层删除（单层审计无需累积阈值配置）
 
 test("resetForSessionStart 清跨会话待签名状态", () => {
 	const dir = tmpDir();
@@ -632,7 +619,6 @@ test("resetForSessionStart 清跨会话待签名状态", () => {
 	// 决策链进度保留
 	const state = readAuditState(dir);
 	assert.equal(state.inFlight, false);
-	assert.equal(state.roundsSinceAudit, 0);
 	// signatureConvLine 推进到当前 convlog 行数
 	assert.ok(state.signatureConvLine >= convLogLineCount(dir) - 0);
 });
@@ -708,4 +694,65 @@ test("convLogLineCount 统计对话行", () => {
 	appendConv(dir, "user", "你好");
 	appendConv(dir, "assistant", "收到");
 	assert.equal(convLogLineCount(dir), 2);
+});
+
+test("hasUncommittedChanges：真实产物判定（git 未提交改动）", () => {
+	// 非 git 仓库（tmp 目录）→ false（无代码产物可审；决策条目由 entriesSinceLastAudit 兜底）
+	const dir = tmpDir();
+	assert.equal(hasUncommittedChanges(dir), false);
+
+	// git 仓库且干净 → false
+	const gitDir = tmpDir();
+	const run = (args: string[]) =>
+		execFileSync("git", args, {
+			cwd: gitDir,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+	run(["init", "-q"]);
+	run(["config", "user.email", "t@t"]);
+	run(["config", "user.name", "t"]);
+	fs.writeFileSync(path.join(gitDir, "a.txt"), "v1", "utf-8");
+	run(["add", "."]);
+	run(["commit", "-qm", "init"]);
+	assert.equal(hasUncommittedChanges(gitDir), false);
+
+	// 未提交改动 → true
+	fs.writeFileSync(path.join(gitDir, "a.txt"), "v2", "utf-8");
+	assert.equal(hasUncommittedChanges(gitDir), true);
+
+	// 未跟踪新文件 → true（--untracked-files=all）
+	fs.writeFileSync(path.join(gitDir, "new.txt"), "x", "utf-8");
+	assert.equal(hasUncommittedChanges(gitDir), true);
+
+	// R11：扩展自身状态目录（.pi/ .pi-subagents/）不算产物——审计状态/convlog 写入不触发审计
+	// 先让工作树干净（提交 a.txt v2，删除 new.txt 也提交），只剩 .pi 未跟踪
+	run(["add", "-A"]);
+	run(["commit", "-qm", "v2"]);
+	fs.unlinkSync(path.join(gitDir, "new.txt"));
+	run(["add", "-A"]);
+	run(["commit", "-qm", "drop new"]);
+	fs.mkdirSync(path.join(gitDir, ".pi", "decision-auditor"), {
+		recursive: true,
+	});
+	fs.writeFileSync(
+		path.join(gitDir, ".pi", "decision-auditor", "state.json"),
+		"{}",
+		"utf-8",
+	);
+	fs.mkdirSync(path.join(gitDir, ".pi-subagents", "artifacts"), {
+		recursive: true,
+	});
+	fs.writeFileSync(
+		path.join(gitDir, ".pi-subagents", "artifacts", "x.md"),
+		"x",
+		"utf-8",
+	);
+	assert.equal(
+		hasUncommittedChanges(gitDir),
+		false,
+		".pi/.pi-subagents 写入不得算产物（纯咨询会话仍零审计）",
+	);
+	// 真实改动 + 状态目录并存 → 仍 true
+	fs.writeFileSync(path.join(gitDir, "a.txt"), "v3", "utf-8");
+	assert.equal(hasUncommittedChanges(gitDir), true);
 });
