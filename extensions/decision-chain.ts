@@ -16,6 +16,7 @@ import {
 	chainPath,
 	checkAuditDue,
 	convLogLineCount,
+	convlogForeignRuns,
 	convlogPath,
 	entriesSinceLastAudit,
 	listEntries,
@@ -197,7 +198,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 		`对话日志: ${convlogPath(cwd)}（只记用户提示与助手最终回复，供你推导目标）`,
 	);
 	lines.push(
-		`【会话隔离】convlog 由同一 cwd 下多个 pi 实例共享追加：只有带 \`<!--run:${RUN_ID}-->\` 标记的行属于本会话；无标记或其它 run 标记的行（其他实例的对话、审计者 run 自己的输出）一律忽略，不得据此推导目标。`,
+		`【会话隔离】convlog 由同一 cwd 下多个 pi 实例共享追加：本会话行 = 带 \`<!--run:${RUN_ID}-->\` 标记的行，推导目标只依据它们；无标记行（升级前历史/无法归属）仅作上下文理解、不得据此推导目标；其他 run 标记的行（其他实例的对话、审计者 run 自己的输出）一律忽略。`,
 	);
 	lines.push(`审计状态: ${auditStatePath(cwd)}（含签名状态与 blockedStreak）`);
 	lines.push(
@@ -409,7 +410,7 @@ function buildChainAuditTask(cwd: string): string {
 	lines.push(`决策链: ${chainPath(cwd)}`);
 	lines.push(`对话日志: ${convlogPath(cwd)}（只记用户提示与助手最终回复）`);
 	lines.push(
-		`【会话隔离】convlog 由同一 cwd 下多个 pi 实例共享追加：只有带 \`<!--run:${RUN_ID}-->\` 标记的行属于本会话；无标记或其它 run 标记的行（其他实例的对话、审计者 run 自己的输出）一律忽略，不得据此提取决策。`,
+		`【会话隔离】convlog 由同一 cwd 下多个 pi 实例共享追加：本会话行 = 带 \`<!--run:${RUN_ID}-->\` 标记的行，提取决策只依据它们；无标记行（升级前历史/无法归属）仅作上下文理解、不得据此提取决策；其他 run 标记的行（其他实例的对话、审计者 run 自己的输出）一律忽略。`,
 	);
 	lines.push(
 		`审计状态: ${auditStatePath(cwd)}（含 convExtractedLine 定位已提取位置）`,
@@ -503,7 +504,7 @@ function buildAuditTask(cwd: string, opts: AuditOptions): string {
 		`对话日志: ${convlogPath(cwd)}（只记用户提示与助手最终回复，供你推导任务目标）`,
 	);
 	lines.push(
-		`【会话隔离】convlog 由同一 cwd 下多个 pi 实例共享追加：只有带 \`<!--run:${RUN_ID}-->\` 标记的行属于本会话；无标记或其它 run 标记的行（其他实例的对话、审计者 run 自己的输出）一律忽略，不得据此推导目标。`,
+		`【会话隔离】convlog 由同一 cwd 下多个 pi 实例共享追加：本会话行 = 带 \`<!--run:${RUN_ID}-->\` 标记的行，推导目标只依据它们；无标记行（升级前历史/无法归属）仅作上下文理解、不得据此推导目标；其他 run 标记的行（其他实例的对话、审计者 run 自己的输出）一律忽略。`,
 	);
 	lines.push(
 		"【路径检查】若上述决策链不存在：用 ls 检查 cwd 是否为仓库根（有 src/ Cargo.toml 等）；不是则定位真实项目根，审该根下 docs/decisions/chain.md。",
@@ -569,7 +570,7 @@ const DELIVERY_ANGLES: Array<{
 		prompt: (cwd) =>
 			`你是交付前独立审查者（角度：目标一致性/漂移）。项目: ${cwd}。\n` +
 			`读 .pi/decision-auditor/convlog.md（用户提示记录）推导任务目标，对照 git diff 与决策链：\n` +
-			`注意 convlog 由同一 cwd 下多个 pi 实例共享追加——仅带 \`<!--run:${RUN_ID}-->\` 标记的行属于本会话，其余行（其他实例/审计者输出）忽略：\n` +
+			`注意 convlog 由同一 cwd 下多个 pi 实例共享追加——本会话行 = 带 \`<!--run:${RUN_ID}-->\` 标记的行，推导目标只依据它们；无标记行（升级前历史/无法归属）仅作上下文、不得据此推导；其他 run 标记行（其他实例/审计者输出）忽略：\n` +
 			`1. 当前改动是否服务于推导出的用户目标？有无目标外扩张？\n` +
 			`2. 决策链条目是否与用户实际要求一致？\n` +
 			`3. 主 agent 自述不可信，以 convlog 用户原话为准。\n` +
@@ -872,6 +873,20 @@ export default function (pi: ExtensionAPI): void {
 				newLines > 0 || entriesSinceLastAudit(projectRoot(ctx.cwd)).length > 0;
 			if (!hasPending) return; // 本轮无工作，无需审计
 
+			// 多实例混写检测：同 cwd 下存在其他实例的真实用户行 → 自动审计会错审/旁路
+			// （run 级过滤 vs 全局状态机错配），显式跳过并警告，不静默错审
+			if (convlogForeignRuns(projectRoot(ctx.cwd), RUN_ID) > 0) {
+				try {
+					ctx.ui.notify(
+						"⚠ 检测到同一 cwd 下多个 pi 实例共享 convlog（存在其他实例的真实对话），本轮自动审计已跳过——多实例场景下审计会错审。在不同目录运行或设 PI_PAIR_PROJECT_ROOT 指向单一项目根后恢复。",
+						"warning",
+					);
+				} catch {
+					/* print/无 UI 模式降级 */
+				}
+				return;
+			}
+
 			const t0 = Date.now(); // 审计阻塞计时起点
 
 			// 已有审计在跑（inFlight）→ 等待它完成；否则复用常驻审计者 或 首次 spawn
@@ -989,6 +1004,7 @@ export default function (pi: ExtensionAPI): void {
 				writeAuditState(root, { ...state, inFlight: false });
 			}
 			// L0：累积达阈值 → 链维护审计（非阻塞；L1 门禁之后触发，不抢阻塞窗口）
+			if (convlogForeignRuns(root, RUN_ID) > 0) return; // 多实例混写：跳过 L0（避免跨实例捕获）
 			if (checkAuditDue(root)) {
 				void spawnL0Audit(pi, rpc, readyPromise, root);
 			}
@@ -1046,7 +1062,7 @@ export default function (pi: ExtensionAPI): void {
 					accumulateRound(projectRoot(ctx.cwd), text.length);
 					// 意图信号记录（高信号过滤，≤200 字符；PI_PAIR_PROCESS_LOG=0 关闭——CI 跑分基线用）
 					if (process.env.PI_PAIR_PROCESS_LOG !== "0") {
-						appendProcessSignal(projectRoot(ctx.cwd), text);
+						appendProcessSignal(projectRoot(ctx.cwd), text, RUN_ID);
 					}
 				}
 			}

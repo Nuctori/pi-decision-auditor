@@ -488,9 +488,15 @@ export function processPath(cwd: string): string {
 /**
  * 追加一条意图信号（高信号过滤）：assistant 回复命中决策信号词才记录。
  * 单条 ≤200 字符截断；文件超 100 条滚动截断（保留最近 50 条）。
+ * runId：与 convlog 同源的多实例隔离键（行尾 `<!--run:<id>-->`），
+ * 避免其他 pi 实例的意图信号污染本会话审计者的意图轨迹对照。
  * 返回是否记录了。
  */
-export function appendProcessSignal(cwd: string, text: string): boolean {
+export function appendProcessSignal(
+	cwd: string,
+	text: string,
+	runId?: string,
+): boolean {
 	if (!PROCESS_SIGNAL_RE.test(text)) return false;
 	const clean = text.replace(/\r?\n/g, " ").trim();
 	if (!clean) return false;
@@ -500,7 +506,8 @@ export function appendProcessSignal(cwd: string, text: string): boolean {
 	const dir = path.dirname(file);
 	fs.mkdirSync(dir, { recursive: true });
 	if (!fs.existsSync(file)) fs.writeFileSync(file, PROCESS_HEADER, "utf-8");
-	fs.appendFileSync(file, `\n- 🤔 ${clipped}\n`, "utf-8");
+	const tag = runId ? ` <!--run:${runId}-->` : "";
+	fs.appendFileSync(file, `\n- 🤔 ${clipped}${tag}\n`, "utf-8");
 
 	// 滚动截断：正文行（非注释）超 100 条 → 保留最近 50 条 + 头注释
 	try {
@@ -547,6 +554,32 @@ export function convLogLineCount(cwd: string): number {
 			}
 		}
 		return count;
+	} catch {
+		return 0;
+	}
+}
+
+/**
+ * 检测 convlog 中"其他 pi 实例的真实用户行"数量（多实例混写检测）。
+ * 判定：带 runId 标记、非本实例、且非审计任务注入（Task: 前缀）的 ## 👤 行。
+ * >0 → 同一 cwd 下存在其他实例的真实会话 → 自动审计应跳过（run 级过滤 vs 全局
+ * 状态机错配时，多实例下审计会错审/旁路，显式降级优于静默错审）。
+ * 无标记行（旧代码历史/未升级实例）无法归属，不误报。
+ */
+export function convlogForeignRuns(cwd: string, ownRunId: string): number {
+	try {
+		const raw = fs.readFileSync(convlogPath(cwd), "utf-8");
+		let n = 0;
+		for (const line of raw.split(/\r?\n/)) {
+			const t = line.trim();
+			if (!t.startsWith("## 👤")) continue; // 只看用户行
+			const m = t.match(/<!--run:([a-zA-Z0-9-]+)-->/);
+			if (!m) continue; // 无标记（旧历史/未升级实例）——无法归属，不误报
+			if (m[1] === ownRunId) continue; // 本实例
+			if (t.includes("Task:")) continue; // 审计者任务注入（user-role 记录），非真实会话
+			n++;
+		}
+		return n;
 	} catch {
 		return 0;
 	}

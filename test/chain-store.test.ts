@@ -17,6 +17,7 @@ import {
 	chainPath,
 	checkAuditDue,
 	convLogLineCount,
+	convlogForeignRuns,
 	convlogPath,
 	entriesSinceLastAudit,
 	listEntries,
@@ -394,8 +395,8 @@ test("接线守卫：L0 触发链在扩展里接通（防断线回归）", () =>
 	);
 	// process 记录接线（意图信号，受 PI_PAIR_PROCESS_LOG 开关控制）
 	assert.ok(
-		src.includes("appendProcessSignal(projectRoot(ctx.cwd), text)"),
-		"message_end 必须调 appendProcessSignal 记意图信号",
+		src.includes("appendProcessSignal(projectRoot(ctx.cwd), text, RUN_ID)"),
+		"message_end 必须调 appendProcessSignal 记意图信号（带 runId 隔离）",
 	);
 	assert.ok(
 		src.includes('process.env.PI_PAIR_PROCESS_LOG !== "0"'),
@@ -421,6 +422,32 @@ test("接线守卫：L0 触发链在扩展里接通（防断线回归）", () =>
 	assert.ok(
 		src.includes("链的实际位置以 find 到的真实文件为准"),
 		"审计任务路径提示必须引导 find 真实链（防 cwd 解析误导）",
+	);
+	// 会话隔离接线：写入点传 RUN_ID、4 处 prompt 注入过滤规则、多实例检测接通
+	assert.ok(
+		src.includes('appendConv(projectRoot(ctx.cwd), "user", text, RUN_ID)'),
+		"message_end 用户行必须带 RUN_ID 标记（会话隔离）",
+	);
+	assert.ok(
+		src.includes('appendConv(projectRoot(ctx.cwd), "assistant", text, RUN_ID)'),
+		"message_end 助手行必须带 RUN_ID 标记（会话隔离）",
+	);
+	assert.ok(
+		src.includes("appendProcessSignal(projectRoot(ctx.cwd), text, RUN_ID)"),
+		"process.md 意图信号必须带 RUN_ID 标记（隔离）",
+	);
+	const ruleCount = src.split("<!--run:${RUN_ID}-->").length - 1;
+	assert.ok(
+		ruleCount >= 4,
+		`4 处审计/L2 prompt 必须注入会话隔离规则（防重构删掉），实际 ${ruleCount} 处`,
+	);
+	assert.ok(
+		src.includes("convlogForeignRuns(projectRoot(ctx.cwd), RUN_ID) > 0"),
+		"agent_end 必须做多实例混写检测（跳过错审）",
+	);
+	assert.ok(
+		src.includes("convlogForeignRuns(root, RUN_ID) > 0"),
+		"agent_settled 必须做多实例混写检测（跳过跨实例捕获）",
 	);
 });
 
@@ -461,6 +488,42 @@ test("appendProcessSignal：滚动截断（超 100 条保留最近 50）", () =>
 	// 保留的是最近条目（第 101 次触发截断删掉最早的）
 	assert.ok(raw.includes("第 109 个方案"));
 	assert.ok(!raw.includes("第 0 个方案"), "最早的应被截断");
+});
+
+test("appendProcessSignal：runId 标记隔离", () => {
+	const dir = tmpDir();
+	appendProcessSignal(dir, "我决定采用方案 X", "run-a");
+	const raw = fs.readFileSync(processPath(dir), "utf-8");
+	assert.ok(raw.includes("<!--run:run-a-->"), "带 runId 的行必须标记");
+	// 无 runId（旧格式）不产生标记
+	appendProcessSignal(dir, "我决定采用方案 Y");
+	const raw2 = fs.readFileSync(processPath(dir), "utf-8");
+	assert.ok(!/方案 Y.*<!--run:/.test(raw2), "无 runId 调用不得标记");
+});
+
+test("convlogForeignRuns：多实例混写检测", () => {
+	const dir = tmpDir();
+	appendConv(dir, "user", "本实例用户请求", "run-a");
+	appendConv(dir, "assistant", "本实例回复", "run-a");
+	appendConv(dir, "user", "其他实例的 ctx_knowledge 讨论", "run-b");
+	appendConv(dir, "user", "旧代码无标记行", undefined);
+
+	// 本实例视角：run-b 是外来真实用户行 → 检测到多实例
+	assert.equal(convlogForeignRuns(dir, "run-a"), 1);
+	// 反向视角：run-a 对 run-b 同样是外来
+	assert.equal(convlogForeignRuns(dir, "run-b"), 1);
+	// 无标记行（历史无法归属）不误报
+	const dirLegacy = tmpDir();
+	appendConv(dirLegacy, "user", "旧代码无标记行", undefined);
+	assert.equal(convlogForeignRuns(dirLegacy, "run-x"), 0);
+	// 审计任务注入（Task: 前缀）不算外来会话
+	const dirTask = tmpDir();
+	appendConv(dirTask, "user", "Task: 你是链维护审计者…", "run-c");
+	assert.equal(convlogForeignRuns(dirTask, "run-x"), 0);
+	// 纯单实例：无外来行
+	const dir2 = tmpDir();
+	appendConv(dir2, "user", "只有本实例", "run-a");
+	assert.equal(convlogForeignRuns(dir2, "run-a"), 0);
 });
 
 test("lastAuditDurationMs：读写与消毒", () => {

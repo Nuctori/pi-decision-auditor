@@ -186,6 +186,7 @@ Window rules: the auditor runs only inside the `agent_end` blocking window. It m
 - **`pi -p` (print mode)**: `agent_end` audit does not block — pi drops the extension handler at the spawn await; the auditor completes in the background and still signs, but the gate's blocking semantics are fully effective only in interactive mode (TUI / RPC).
 - **Same-model auditor**: the auditor uses the main agent's model by default — the adversarial stance mitigates groupthink, but shared blind spots (both miss the same thing) are still possible. Cross-model auditing is on the roadmap.
 - **CI E2E** uses a free no-key model (opencode CLI); audit verdicts are model-dependent by nature — the CI asserts mechanisms (capture / signature / lock), not verdict quality.
+- **Multi-instance same-cwd**: the conversation log is keyed by cwd and shared by any pi instance running there. Since v1.0.14 every log line carries a per-instance `<!--run:<id>-->` tag and auditors only extract decisions from the tagged lines of the spawning session; untagged legacy lines count as context only. When another instance's real conversation is detected, automatic audits are skipped with a warning instead of silently mis-attributing decisions. Set `PI_PAIR_PROJECT_ROOT` to a single authoritative project root (or run from different cwds) to keep instances apart.
 
 ## Roadmap
 
