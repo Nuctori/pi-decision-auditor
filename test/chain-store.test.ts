@@ -196,6 +196,33 @@ test("convlog 追加与截断", () => {
 	assert.ok(!tail2.includes(long));
 });
 
+test("convlog 多实例 runId 标记：按 run 隔离对话行", () => {
+	const dir = tmpDir();
+	// 实例 A（本会话）与实例 B（其他会话）并发写同一 convlog
+	appendConv(dir, "user", "A 的决策请求", "run-a");
+	appendConv(dir, "user", "B 的 ctx_knowledge 讨论", "run-b");
+	appendConv(dir, "assistant", "A 的回复", "run-a");
+	appendConv(dir, "assistant", "B 的回复", "run-b");
+
+	const raw = fs.readFileSync(convlogPath(dir), "utf-8");
+	const lines = raw.split(/\r?\n/);
+	const aLines = lines.filter((l) => l.includes("<!--run:run-a-->"));
+	const bLines = lines.filter((l) => l.includes("<!--run:run-b-->"));
+	// 各自只有自己的行（无交叉、无混入）
+	assert.equal(aLines.length, 2);
+	assert.equal(bLines.length, 2);
+	assert.ok(aLines.every((l) => !l.includes("ctx_knowledge")));
+	assert.ok(bLines.every((l) => !l.includes("决策请求")));
+
+	// 无 runId（旧格式/历史行）不产生标记
+	appendConv(dir, "user", "旧格式行");
+	const raw2 = fs.readFileSync(convlogPath(dir), "utf-8");
+	assert.ok(!/旧格式行.*<!--run:/.test(raw2));
+
+	// 对话行计数不受标记影响（带标记的行照常计入）
+	assert.equal(convLogLineCount(dir), 5);
+});
+
 test("坏状态文件容错", () => {
 	const dir = tmpDir();
 	fs.mkdirSync(path.dirname(auditStatePath(dir)), { recursive: true });
@@ -601,7 +628,10 @@ test("resolveProjectRoot：PI_PAIR_PROJECT_ROOT 显式权威根（跨盘符兜�
 		process.env.PI_PAIR_PROJECT_ROOT = explicit;
 		// 任意 cwd 都解析到显式根（跨盘符/复杂场景的单一权威）
 		assert.equal(resolveProjectRoot(dir), explicit);
-		assert.equal(resolveProjectRoot(path.join(dir, "deep", "nested")), explicit);
+		assert.equal(
+			resolveProjectRoot(path.join(dir, "deep", "nested")),
+			explicit,
+		);
 	} finally {
 		if (prev === undefined) delete process.env.PI_PAIR_PROJECT_ROOT;
 		else process.env.PI_PAIR_PROJECT_ROOT = prev;

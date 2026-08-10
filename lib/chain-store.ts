@@ -425,11 +425,15 @@ export function convlogPath(cwd: string): string {
 	return path.join(cwd, ".pi", "decision-auditor", "convlog.md");
 }
 
-/** 追加一条对话（用户提示或 assistant 文本），自动截断单条长度。 */
+/** 追加一条对话（用户提示或 assistant 文本），自动截断单条长度。
+ *  runId：调用方（扩展实例）唯一标识，写入行尾 `<!--run:<id>-->`。
+ *  convlog 按 cwd 定位、多实例共享追加——审计者凭该标记过滤出本会话的行，
+ *  避免把同 cwd 下其他 pi 实例（其他会话/审计者 run）的对话误当本会话决策。 */
 export function appendConv(
 	cwd: string,
 	role: "user" | "assistant",
 	text: string,
+	runId?: string,
 	maxLen = 800,
 ): void {
 	const file = convlogPath(cwd);
@@ -439,8 +443,11 @@ export function appendConv(
 	const clean = text.replace(/\r?\n/g, " ").trim();
 	if (!clean) return;
 	const clipped = clean.length > maxLen ? clean.slice(0, maxLen) + "…" : clean;
+	const tag = runId ? ` <!--run:${runId}-->` : "";
 	const line =
-		role === "user" ? `## 👤 用户: ${clipped}` : `## 🤖 助手: ${clipped}`;
+		role === "user"
+			? `## 👤 用户: ${clipped}${tag}`
+			: `## 🤖 助手: ${clipped}${tag}`;
 	fs.appendFileSync(file, `\n${line}\n`, "utf-8");
 }
 

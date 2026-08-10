@@ -163,6 +163,11 @@ const AUDITOR_AGENT = "pi-pair.decision-auditor";
 // TTL 对齐 spawn 超时（900s），避免审计运行中锁过期导致并发双审计
 const IN_FLIGHT_TTL_MS = 16 * 60 * 1000; // 16 分钟 > spawn timeout 15 分钟
 
+/** 本扩展实例唯一标识（进程 + 随机）：convlog 按 cwd 多实例共享追加的隔离键。
+ *  审计者凭 `<!--run:${RUN_ID}-->` 过滤出本会话的对话行，排除同 cwd 下
+ *  其他 pi 实例（其他会话 / 审计者 run 自身输出）的内容。 */
+const RUN_ID = `run-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+
 /** cwd 是否有进行中的审计（含 TTL 过期清理）。 */
 function hasInFlight(cwd: string): boolean {
 	const rec = inFlightAudits.get(cwd);
@@ -190,6 +195,9 @@ function buildIncrementalAuditTask(cwd: string): string {
 	lines.push(`决策链: ${chainPath(cwd)}`);
 	lines.push(
 		`对话日志: ${convlogPath(cwd)}（只记用户提示与助手最终回复，供你推导目标）`,
+	);
+	lines.push(
+		`【会话隔离】convlog 由同一 cwd 下多个 pi 实例共享追加：只有带 \`<!--run:${RUN_ID}-->\` 标记的行属于本会话；无标记或其它 run 标记的行（其他实例的对话、审计者 run 自己的输出）一律忽略，不得据此推导目标。`,
 	);
 	lines.push(`审计状态: ${auditStatePath(cwd)}（含签名状态与 blockedStreak）`);
 	lines.push(
@@ -401,6 +409,9 @@ function buildChainAuditTask(cwd: string): string {
 	lines.push(`决策链: ${chainPath(cwd)}`);
 	lines.push(`对话日志: ${convlogPath(cwd)}（只记用户提示与助手最终回复）`);
 	lines.push(
+		`【会话隔离】convlog 由同一 cwd 下多个 pi 实例共享追加：只有带 \`<!--run:${RUN_ID}-->\` 标记的行属于本会话；无标记或其它 run 标记的行（其他实例的对话、审计者 run 自己的输出）一律忽略，不得据此提取决策。`,
+	);
+	lines.push(
 		`审计状态: ${auditStatePath(cwd)}（含 convExtractedLine 定位已提取位置）`,
 	);
 	lines.push("");
@@ -492,6 +503,9 @@ function buildAuditTask(cwd: string, opts: AuditOptions): string {
 		`对话日志: ${convlogPath(cwd)}（只记用户提示与助手最终回复，供你推导任务目标）`,
 	);
 	lines.push(
+		`【会话隔离】convlog 由同一 cwd 下多个 pi 实例共享追加：只有带 \`<!--run:${RUN_ID}-->\` 标记的行属于本会话；无标记或其它 run 标记的行（其他实例的对话、审计者 run 自己的输出）一律忽略，不得据此推导目标。`,
+	);
+	lines.push(
 		"【路径检查】若上述决策链不存在：用 ls 检查 cwd 是否为仓库根（有 src/ Cargo.toml 等）；不是则定位真实项目根，审该根下 docs/decisions/chain.md。",
 	);
 	if (opts.onlyFrom) {
@@ -555,6 +569,7 @@ const DELIVERY_ANGLES: Array<{
 		prompt: (cwd) =>
 			`你是交付前独立审查者（角度：目标一致性/漂移）。项目: ${cwd}。\n` +
 			`读 .pi/decision-auditor/convlog.md（用户提示记录）推导任务目标，对照 git diff 与决策链：\n` +
+			`注意 convlog 由同一 cwd 下多个 pi 实例共享追加——仅带 \`<!--run:${RUN_ID}-->\` 标记的行属于本会话，其余行（其他实例/审计者输出）忽略：\n` +
 			`1. 当前改动是否服务于推导出的用户目标？有无目标外扩张？\n` +
 			`2. 决策链条目是否与用户实际要求一致？\n` +
 			`3. 主 agent 自述不可信，以 convlog 用户原话为准。\n` +
@@ -714,9 +729,7 @@ export default function (pi: ExtensionAPI): void {
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
 			if (params.raw) {
 				return {
-					content: [
-						{ type: "text", text: readRaw(projectRoot(ctx.cwd)) },
-					],
+					content: [{ type: "text", text: readRaw(projectRoot(ctx.cwd)) }],
 					details: {},
 				};
 			}
@@ -856,8 +869,7 @@ export default function (pi: ExtensionAPI): void {
 			// 本轮是否有新产物/决策：convlog 有新增 or 有未审计决策
 			const newLines = Math.max(0, totalLines - state.convExtractedLine);
 			const hasPending =
-				newLines > 0 ||
-				entriesSinceLastAudit(projectRoot(ctx.cwd)).length > 0;
+				newLines > 0 || entriesSinceLastAudit(projectRoot(ctx.cwd)).length > 0;
 			if (!hasPending) return; // 本轮无工作，无需审计
 
 			const t0 = Date.now(); // 审计阻塞计时起点
@@ -1016,7 +1028,7 @@ export default function (pi: ExtensionAPI): void {
 			if (!msg) return;
 			if (msg.role === "user") {
 				const text = extractText(msg.content);
-				if (text) appendConv(projectRoot(ctx.cwd), "user", text);
+				if (text) appendConv(projectRoot(ctx.cwd), "user", text, RUN_ID);
 				// L2 交付审查：用户明确要求交付（提交/发布/merge/交付/收工）→ 并行 fanout 深度审查
 				if (/提交|发布|merge|交付|收工|上线|部署|推送/.test(text)) {
 					void triggerDeliveryAudit(
@@ -1029,7 +1041,7 @@ export default function (pi: ExtensionAPI): void {
 			} else if (msg.role === "assistant") {
 				const text = extractText(msg.content);
 				if (text) {
-					appendConv(projectRoot(ctx.cwd), "assistant", text);
+					appendConv(projectRoot(ctx.cwd), "assistant", text, RUN_ID);
 					// L0 记账：每轮累计 convlog 增量（达到阈值后 agent_settled 触发链维护审计）
 					accumulateRound(projectRoot(ctx.cwd), text.length);
 					// 意图信号记录（高信号过滤，≤200 字符；PI_PAIR_PROCESS_LOG=0 关闭——CI 跑分基线用）
