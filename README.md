@@ -60,9 +60,10 @@ Requires **pi-subagents** (spawns/resumes the auditor). See [Installation](#inst
 each session (session_start)
   └─ persistent auditor (runId persisted, resumed across rounds, hits prompt cache)
 
-L0 — chain maintenance (non-blocking, batched)
+L0 — chain maintenance (non-blocking, batched, same auditor run)
   └─ every round: accumulateRound (convlog delta) — zero cost
-  └─ threshold hit (6 rounds / 8000 chars / max 15): spawn auditor
+  └─ threshold hit (6 rounds / 8000 chars / max 15): resume the SAME
+     resident auditor run (one holder of the lamp, shared context)
       · capture incremental decisions into chain (append-only, auto-numbered)
       · adversarial chain review (5 elegance dimensions: atomicity / correctness /
         consistency / cohesion / completeness)
@@ -93,7 +94,7 @@ L2 — delivery review (on "submit/publish/merge/deploy")
 | Capability | Description |
 | --- | --- |
 | **Artifacts must be cross-audited** | `agent_end` blocks until audit signature; blocked artifacts trigger an immediate fix round (max 3×), then release-with-warning |
-| **Persistent pairing** | auditor resumed across rounds, remembers the whole pairing history & goal |
+| **Persistent pairing** | one resident auditor run per session — L0 (chain maintenance) and L1 (artifact gate) resume the same instance, sharing context; no second agent |
 | **Not dependent on main agent** | decisions extracted from convlog, facts verified from repo, by an independent agent |
 | **Decision chain** | default `.pi/decision-auditor/chain.md` (private, no git pollution); `PI_PAIR_CHAIN_PUBLIC=1` → `docs/decisions/chain.md` (team-visible) |
 | **In-window communication** | auditor talks to the main agent only inside the agent_end window (contact_supervisor, 60s cap); negotiated stop on timeout — no out-of-window wake-ups |
@@ -156,6 +157,7 @@ Window rules: the auditor runs only inside the `agent_end` blocking window. It m
 | `PI_PAIR_MAX_BATCH` | 15 | forced-audit fallback when decisions are sparse |
 | `PI_PAIR_CHAIN_PUBLIC=1` | off | write chain to `docs/decisions/chain.md` (team-visible); default is `.pi/decision-auditor/chain.md` (private) |
 | `PI_PAIR_PROCESS_LOG=0` | on | disable intent-signal process log (CI bench baseline) |
+| `PI_PAIR_PROJECT_ROOT` | — | explicit single authoritative project root (cross-drive / complex setups); default auto-detects upward from cwd |
 | `PI_DECISION_AUDITOR_INJECT=off` | on | disable chain-status injection (legacy, ignore) |
 
 ## Decision chain format

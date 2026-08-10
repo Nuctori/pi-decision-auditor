@@ -60,9 +60,10 @@ pi install npm:pi-pair
 每个会话（session_start）
   └─ 常驻审计者（runId 持久化，跨轮 resume 复用，命中 prompt 缓存）
 
-L0 — 链维护（非阻塞、批量）
+L0 — 链维护（非阻塞、批量、同一审计者 run）
   └─ 每轮：accumulateRound 记账（convlog 增量）——零成本
-  └─ 达阈值（6 轮 / 8000 字符 / 最多 15 轮）：唤起审计者
+  └─ 达阈值（6 轮 / 8000 字符 / 最多 15 轮）：resume 同一个常驻
+     审计者 run（一个持灯人，共享上下文）
       · 批量捕获增量决策入链（append-only、自动编号）
       · 对抗式链级复审（五维度：原子性 / 正确性 / 一致性 / 内聚 / 完备）
       · findings → chainFindings → 下轮注入主 agent（低优先级）
@@ -91,7 +92,7 @@ L2 — 交付审查（用户说"提交/发布/merge/部署"等）
 | 能力 | 说明 |
 | --- | --- |
 | **产物必须交叉审计** | `agent_end` 阻塞等签名；blocked 触发当场修复轮（最多 3 次），之后带警告放行 |
-| **常驻结对** | 审计者 resume 复用，记得整个结对历史与目标 |
+| **常驻结对** | 每会话**一个**常驻审计者 run——L0（链维护）与 L1（产物门禁）resume 同一实例、共享上下文，不新增第二个 agent |
 | **不靠主 agent 自觉** | 决策从对话日志提取、事实从仓库核实，独立第三方完成 |
 | **决策链** | 默认 `.pi/decision-auditor/chain.md`（私有，不污染 git）；`PI_PAIR_CHAIN_PUBLIC=1` 写 `docs/decisions/chain.md`（团队可见） |
 | **窗口内通信** | 审计者只在 agent_end 窗口内联系主 agent（contact_supervisor 60s 上限）；超时协商中止——无窗口外忽然唤起 |
@@ -154,6 +155,7 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 | `PI_PAIR_MAX_BATCH` | 15 | 决策稀疏时强制审计兜底（轮） |
 | `PI_PAIR_CHAIN_PUBLIC=1` | 关 | 决策链写 `docs/decisions/chain.md`（团队可见）；默认写 `.pi/decision-auditor/chain.md`（私有） |
 | `PI_PAIR_PROCESS_LOG=0` | 开 | 关闭意图信号过程日志（CI 跑分基线） |
+| `PI_PAIR_PROJECT_ROOT` | — | 显式指定单一权威项目根（跨盘符/复杂场景）；默认从 cwd 向上自动探测 |
 | `PI_DECISION_AUDITOR_INJECT=off` | 开 | 关闭链状态注入（历史遗留，默认可忽略） |
 
 ## 决策链格式

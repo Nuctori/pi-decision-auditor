@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.0.13] - 2026-08-10
+
+收敛回"一个结对审计者"（单一权威 state + L0/L1 同一 run）。
+
+### 背景（用户批评，D-059）
+
+双 state 分裂（C: 与 D: 两棵树各自记账）+ L0/L1 两个独立 spawn——违背"一个持灯人连续在场"的结对语义，成本语义上像"两个 agent"。
+
+### A: 单一权威 state
+
+- `resolveProjectRoot` 支持 `PI_PAIR_PROJECT_ROOT` 显式权威根（跨盘符场景——向上探测限于祖先链，C:\ 会话 + D:\ 项目必须显式指定）
+- 扩展层会话级 `projectRoot` 缓存：session_start 解析一次固定，session_shutdown 重置；40 处 handler 调用点统一改用（杜绝同一会话双树）
+
+### B: L0 复用 L1 常驻 run
+
+- `spawnL0Audit` 不再 fresh spawn：`state.auditorRunId` 存在则 `resume` 同一 run（共享 L1 过程上下文 + 命中 prompt 缓存）；首次才 spawn 并记 runId——一个持灯人，两种职责，不新增实例
+
+### 其他
+
+- 协商关闭文案同步 120s→180s（steer 消息 + blockers 文案）
+
+### 测试
+
+- 28 单测通过（新增：resolveProjectRoot 显式权威根测试；接线守卫更新——projectRoot 缓存存在、无裸 resolveProjectRoot(ctx.cwd)、L0 resume 复用、PI_PAIR_PROJECT_ROOT 支持）
+
+## [1.0.12] - 2026-08-10
+
+- 审计预算调整：阻塞等待 120s→180s，协商关闭窗口 30s→720s（尽可能走协商关闭，确保审计真能审出东西）；总预算 900s < 960s TTL
+
+## [1.0.11] - 2026-08-10
+
+- README 社区级重构（中英）：badges/TOC/痛点叙事/快速开始/已知限制/Roadmap
+
 ## [1.0.10] - 2026-08-10
 
 审计 prompt 优化（实证盲区维度）+ 路径提示修复。

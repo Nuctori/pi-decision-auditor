@@ -56,10 +56,15 @@ const PROJECT_ROOT_MARKERS = [
 ];
 
 /**
- * 定位真实项目根：从 cwd 向上找带仓库根标记的目录，退化到 cwd。
+ * 定位真实项目根（单一权威 state 的关键）：
+ * 1. PI_PAIR_PROJECT_ROOT 显式指定 → 直接用（跨盘符/复杂场景的权威根）
+ * 2. 否则从 cwd 向上找带仓库根标记的目录，退化到 cwd。
  * 解决"会话在 A 目录启动但项目在 B 目录"的 cwd 错位（chain.md/state.json 应放项目根）。
+ * 注意：向上探测限于祖先链，跨盘符（如 C:\ 会话 + D:\ 项目）必须用 PI_PAIR_PROJECT_ROOT。
  */
 export function resolveProjectRoot(cwd: string): string {
+	const explicit = process.env.PI_PAIR_PROJECT_ROOT;
+	if (explicit && explicit.trim()) return path.resolve(explicit.trim());
 	try {
 		let cur = path.resolve(cwd);
 		let best = cur;

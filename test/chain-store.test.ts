@@ -315,10 +315,27 @@ test("接线守卫：L0 触发链在扩展里接通（防断线回归）", () =>
 		path.join(process.cwd(), "extensions", "decision-chain.ts"),
 		"utf-8",
 	);
-	// message_end 记账
+	// message_end 记账（单一权威根：projectRoot 缓存）
 	assert.ok(
-		src.includes("accumulateRound(resolveProjectRoot(ctx.cwd), text.length)"),
-		"message_end 必须调 accumulateRound 记账",
+		src.includes("accumulateRound(projectRoot(ctx.cwd), text.length)"),
+		"message_end 必须调 accumulateRound 记账（用 projectRoot）",
+	);
+	// 单一权威 state：会话级根缓存 + 无裸 resolveProjectRoot(ctx.cwd)
+	assert.ok(
+		src.includes("const projectRoot = (cwd: string)"),
+		"扩展必须定义会话级 projectRoot 缓存（单一权威 state）",
+	);
+	assert.ok(
+		src.includes("cachedProjectRoot = null"),
+		"session_start 必须重置根缓存（新会话重新解析）",
+	);
+	assert.ok(
+		!src.includes("resolveProjectRoot(ctx.cwd)"),
+		"handler 必须统一用 projectRoot（杜绝双 state 分裂）",
+	);
+	assert.ok(
+		src.includes("PI_PAIR_PROJECT_ROOT"),
+		"resolveProjectRoot 必须支持 PI_PAIR_PROJECT_ROOT 显式权威根（跨盘符兜底）",
 	);
 	// agent_settled 判断+唤起
 	assert.ok(
@@ -333,6 +350,11 @@ test("接线守卫：L0 触发链在扩展里接通（防断线回归）", () =>
 		src.includes("spawnL0Audit(pi, rpc, readyPromise, root)"),
 		"agent_settled 必须 spawn L0",
 	);
+	// L0 复用 L1 常驻 run（一个持灯人，不新增实例）
+	assert.ok(
+		src.includes("state.auditorRunId") && src.includes('"resume"'),
+		"spawnL0Audit 必须 resume 常驻审计者 run（L0/L1 同一实例）",
+	);
 	// L1 任务不碰记账字段
 	assert.ok(
 		src.includes("不要清 roundsSinceAudit/pendingChars"),
@@ -340,12 +362,12 @@ test("接线守卫：L0 触发链在扩展里接通（防断线回归）", () =>
 	);
 	// decision_add 走 L0
 	assert.ok(
-		src.includes("checkAuditDue(resolveProjectRoot(ctx.cwd), true)"),
+		src.includes("checkAuditDue(projectRoot(ctx.cwd), true)"),
 		"decision_add 必须 force 触发 L0",
 	);
 	// process 记录接线（意图信号，受 PI_PAIR_PROCESS_LOG 开关控制）
 	assert.ok(
-		src.includes("appendProcessSignal(resolveProjectRoot(ctx.cwd), text)"),
+		src.includes("appendProcessSignal(projectRoot(ctx.cwd), text)"),
 		"message_end 必须调 appendProcessSignal 记意图信号",
 	);
 	assert.ok(
@@ -568,6 +590,24 @@ test("resolveProjectRoot 定位仓库根", () => {
 	fs.mkdirSync(node, { recursive: true });
 	fs.writeFileSync(path.join(root, "package.json"), "{}", "utf-8");
 	assert.equal(resolveProjectRoot(node), root);
+});
+
+test("resolveProjectRoot：PI_PAIR_PROJECT_ROOT 显式权威根（跨盘符兜底）", () => {
+	const dir = tmpDir();
+	const explicit = path.join(dir, "real-root");
+	fs.mkdirSync(explicit, { recursive: true });
+	const prev = process.env.PI_PAIR_PROJECT_ROOT;
+	try {
+		process.env.PI_PAIR_PROJECT_ROOT = explicit;
+		// 任意 cwd 都解析到显式根（跨盘符/复杂场景的单一权威）
+		assert.equal(resolveProjectRoot(dir), explicit);
+		assert.equal(resolveProjectRoot(path.join(dir, "deep", "nested")), explicit);
+	} finally {
+		if (prev === undefined) delete process.env.PI_PAIR_PROJECT_ROOT;
+		else process.env.PI_PAIR_PROJECT_ROOT = prev;
+	}
+	// 未设置时恢复正常探测
+	assert.equal(resolveProjectRoot(dir), dir);
 });
 
 test("convLogLineCount 统计对话行", () => {

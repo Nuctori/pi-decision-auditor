@@ -314,7 +314,7 @@ async function negotiateStop(
 				{
 					id: runId,
 					message:
-						'【协商中止】审计窗口（120s）已超时。请立即把你当前已发现的问题整理成 blockers，用 decision_signoff(status="blocked", blockers=[...]) 签名——主 agent 会马上确认并修复，不必等完整审计。若确认无问题，签名 passed；若无法给出结论，回复确认中止。',
+						'【协商关闭】审计窗口（180s）已超时。请把你当前已发现的问题整理成 blockers，用 decision_signoff(status="blocked", blockers=[...]) 签名——主 agent 会马上确认并修复；若确认无问题，签名 passed。不必等完整审计，当前发现即有价值。',
 				},
 				10_000,
 			);
@@ -429,7 +429,9 @@ function buildChainAuditTask(cwd: string): string {
 
 /**
  * L0 链维护审计唤起（agent_settled / decision_add 调用，非阻塞）：
- * 独立内存锁（不占 state.inFlight，避免抢 L1 门禁的阻塞窗口）；spawn 后不 await。
+ * 复用 L1 的常驻审计者 run（state.auditorRunId）——同一个持灯人做链维护，共享过程上下文，
+ * 不新增实例（成本 = resume 缓存命中）。首次才 spawn 并记 runId。
+ * 独立内存锁（不占 state.inFlight，避免抢 L1 门禁的阻塞窗口）；不 await。
  */
 async function spawnL0Audit(
 	pi: ExtensionAPI,
@@ -443,16 +445,37 @@ async function spawnL0Audit(
 	l0AuditsInFlight.set(cwd, { startedAt: Date.now() });
 	try {
 		await readyPromise;
-		await rpc<{ runId?: string; asyncId?: string }>(
-			"spawn",
-			{
-				agent: AUDITOR_AGENT,
-				task: buildChainAuditTask(cwd),
-				async: true,
-				context: "fresh",
-			},
-			900_000, // client 超时：spawn ACK 最长等 15 分钟
-		);
+		const state = readAuditState(cwd);
+		if (state.auditorRunId) {
+			// 复用 L1 常驻审计者：同一个 run 做链维护（共享会话历史 + 命中 prompt 缓存）
+			await rpc(
+				"resume",
+				{
+					id: state.auditorRunId,
+					message: buildChainAuditTask(cwd),
+				},
+				900_000,
+			);
+		} else {
+			// 首次：spawn 并记 runId（L1/L0 共用的常驻 run）
+			const result = await rpc<{ runId?: string; asyncId?: string }>(
+				"spawn",
+				{
+					agent: AUDITOR_AGENT,
+					task: buildChainAuditTask(cwd),
+					async: true,
+					context: "fresh",
+				},
+				900_000, // client 超时：spawn ACK 最长等 15 分钟
+			);
+			const runId = result?.runId ?? result?.asyncId ?? "";
+			if (runId) {
+				writeAuditState(cwd, {
+					...readAuditState(cwd),
+					auditorRunId: runId,
+				});
+			}
+		}
 		return true;
 	} catch {
 		l0AuditsInFlight.delete(cwd);
@@ -588,13 +611,26 @@ export default function (pi: ExtensionAPI): void {
 	const rpc = makeRpc(pi);
 	const readyPromise = waitForRpcReady(pi);
 
-	// ---- 会话边界：新会话开始清跨会话待签名状态（保留决策链进度）----
+	// ---- 会话级单一项目根（单一权威 state 的关键）：首次解析后固定，全部 handler 共用 ----
+	let cachedProjectRoot: string | null = null;
+	const projectRoot = (cwd: string): string => {
+		if (cachedProjectRoot) return cachedProjectRoot;
+		const root = resolveProjectRoot(cwd);
+		if (root) cachedProjectRoot = root;
+		return root;
+	};
+
+	// ---- 会话边界：新会话重置根缓存（重新解析）+ 清跨会话待签名状态 ----
 	pi.on("session_start", (event, ctx) => {
 		try {
-			resetForSessionStart(resolveProjectRoot(ctx.cwd));
+			cachedProjectRoot = null; // 新会话重新解析（或读 PI_PAIR_PROJECT_ROOT）
+			resetForSessionStart(projectRoot(ctx.cwd));
 		} catch {
 			/* noop */
 		}
+	});
+	pi.on("session_shutdown", () => {
+		cachedProjectRoot = null;
 	});
 
 	// ---- 工具：decision_add（写链，agent 模式）----
@@ -636,7 +672,7 @@ export default function (pi: ExtensionAPI): void {
 			),
 		}),
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			const entry = appendDecision(resolveProjectRoot(ctx.cwd), {
+			const entry = appendDecision(projectRoot(ctx.cwd), {
 				summary: params.summary,
 				context: params.context,
 				decision: params.decision,
@@ -646,14 +682,14 @@ export default function (pi: ExtensionAPI): void {
 				supersedes: params.supersedes,
 			});
 			// 自动唤起：新决策落地后立即链维护审计（手动 decision_add = 关键决策信号，force 跳过节流）
-			if (checkAuditDue(resolveProjectRoot(ctx.cwd), true)) {
-				void spawnL0Audit(pi, rpc, readyPromise, resolveProjectRoot(ctx.cwd));
+			if (checkAuditDue(projectRoot(ctx.cwd), true)) {
+				void spawnL0Audit(pi, rpc, readyPromise, projectRoot(ctx.cwd));
 			}
 			return {
 				content: [
 					{
 						type: "text",
-						text: `已追加 ${entry.id}: ${entry.summary} → ${chainPath(resolveProjectRoot(ctx.cwd))}`,
+						text: `已追加 ${entry.id}: ${entry.summary} → ${chainPath(projectRoot(ctx.cwd))}`,
 					},
 				],
 				details: { entry: renderEntry(entry) },
@@ -679,12 +715,12 @@ export default function (pi: ExtensionAPI): void {
 			if (params.raw) {
 				return {
 					content: [
-						{ type: "text", text: readRaw(resolveProjectRoot(ctx.cwd)) },
+						{ type: "text", text: readRaw(projectRoot(ctx.cwd)) },
 					],
 					details: {},
 				};
 			}
-			const entries = listEntries(resolveProjectRoot(ctx.cwd), params.onlyFrom);
+			const entries = listEntries(projectRoot(ctx.cwd), params.onlyFrom);
 			if (entries.length === 0) {
 				return {
 					content: [{ type: "text", text: "决策链为空（或指定范围无条目）。" }],
@@ -716,13 +752,13 @@ export default function (pi: ExtensionAPI): void {
 			),
 		}),
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			recordSignature(resolveProjectRoot(ctx.cwd), {
+			recordSignature(projectRoot(ctx.cwd), {
 				status: params.status,
 				...(params.blockers && params.blockers.length > 0
 					? { blockers: params.blockers }
 					: {}),
 			});
-			const sig = readAuditState(resolveProjectRoot(ctx.cwd)).signature;
+			const sig = readAuditState(projectRoot(ctx.cwd)).signature;
 			return {
 				content: [
 					{
@@ -754,7 +790,7 @@ export default function (pi: ExtensionAPI): void {
 			}
 			if (rest) opts.message = rest;
 
-			const task = buildAuditTask(resolveProjectRoot(ctx.cwd), opts);
+			const task = buildAuditTask(projectRoot(ctx.cwd), opts);
 			try {
 				await readyPromise;
 				const result = await rpc<{ runId?: string; asyncId?: string }>(
@@ -786,7 +822,7 @@ export default function (pi: ExtensionAPI): void {
 	// ---- L0 findings 注入：上一轮链级复审的问题带给主 agent（低优先级，不阻塞）----
 	pi.on("before_agent_start", async (event, ctx) => {
 		try {
-			const state = readAuditState(resolveProjectRoot(ctx.cwd));
+			const state = readAuditState(projectRoot(ctx.cwd));
 			if (state.chainFindings && state.chainFindings.length > 0) {
 				return {
 					message: {
@@ -815,34 +851,34 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("agent_end", async (event, ctx) => {
 		try {
-			const state = readAuditState(resolveProjectRoot(ctx.cwd));
-			const totalLines = convLogLineCount(resolveProjectRoot(ctx.cwd));
+			const state = readAuditState(projectRoot(ctx.cwd));
+			const totalLines = convLogLineCount(projectRoot(ctx.cwd));
 			// 本轮是否有新产物/决策：convlog 有新增 or 有未审计决策
 			const newLines = Math.max(0, totalLines - state.convExtractedLine);
 			const hasPending =
 				newLines > 0 ||
-				entriesSinceLastAudit(resolveProjectRoot(ctx.cwd)).length > 0;
+				entriesSinceLastAudit(projectRoot(ctx.cwd)).length > 0;
 			if (!hasPending) return; // 本轮无工作，无需审计
 
 			const t0 = Date.now(); // 审计阻塞计时起点
 
 			// 已有审计在跑（inFlight）→ 等待它完成；否则复用常驻审计者 或 首次 spawn
-			if (!state.inFlight && !hasInFlight(resolveProjectRoot(ctx.cwd))) {
-				inFlightAudits.set(resolveProjectRoot(ctx.cwd), {
+			if (!state.inFlight && !hasInFlight(projectRoot(ctx.cwd))) {
+				inFlightAudits.set(projectRoot(ctx.cwd), {
 					runId: "",
 					startedAt: Date.now(),
 				});
 				// auditStartedAt 在 spawn/resume 的 rpc await **之前**写：
 				// print 模式下 handler 可能在 rpc await 处被丢弃，写在之后会丢（CI 跑分 duration=0）
-				writeAuditState(resolveProjectRoot(ctx.cwd), {
-					...readAuditState(resolveProjectRoot(ctx.cwd)),
+				writeAuditState(projectRoot(ctx.cwd), {
+					...readAuditState(projectRoot(ctx.cwd)),
 					inFlight: true,
 					lastAuditAt: Date.now(),
 					auditStartedAt: Date.now(),
 				});
 				try {
 					await readyPromise;
-					const task = buildIncrementalAuditTask(resolveProjectRoot(ctx.cwd));
+					const task = buildIncrementalAuditTask(projectRoot(ctx.cwd));
 					// 复用常驻审计者：resume 同一个 run（带 session 历史 + 命中缓存），否则首次 spawn
 					if (state.auditorRunId) {
 						await rpc(
@@ -867,24 +903,24 @@ export default function (pi: ExtensionAPI): void {
 						const runId = result?.runId ?? result?.asyncId ?? "";
 						// 记住常驻审计者 runId（跨轮 resume）
 						if (runId) {
-							writeAuditState(resolveProjectRoot(ctx.cwd), {
-								...readAuditState(resolveProjectRoot(ctx.cwd)),
+							writeAuditState(projectRoot(ctx.cwd), {
+								...readAuditState(projectRoot(ctx.cwd)),
 								auditorRunId: runId,
 							});
 						}
-						inFlightAudits.set(resolveProjectRoot(ctx.cwd), {
+						inFlightAudits.set(projectRoot(ctx.cwd), {
 							runId,
 							startedAt: Date.now(),
 						});
 					}
 				} catch {
-					inFlightAudits.delete(resolveProjectRoot(ctx.cwd));
+					inFlightAudits.delete(projectRoot(ctx.cwd));
 					// spawn/resume 失败：释放 inFlight 锁 + 产物未过审标记 blocked
-					writeAuditState(resolveProjectRoot(ctx.cwd), {
-						...readAuditState(resolveProjectRoot(ctx.cwd)),
+					writeAuditState(projectRoot(ctx.cwd), {
+						...readAuditState(projectRoot(ctx.cwd)),
 						inFlight: false,
 					});
-					recordSignature(resolveProjectRoot(ctx.cwd), {
+					recordSignature(projectRoot(ctx.cwd), {
 						status: "blocked",
 						blockers: ["审计触发失败，产物未过审"],
 					});
@@ -892,16 +928,16 @@ export default function (pi: ExtensionAPI): void {
 				}
 			}
 
-			// 【阻塞等待】审计完成（Pi awaits handler，等待生效）——降低阻塞：只审本轮增量 + 120s 上限
-			const sig = await waitForAuditCompletion(resolveProjectRoot(ctx.cwd));
-			recordAuditDuration(resolveProjectRoot(ctx.cwd), t0);
+			// 【阻塞等待】审计完成（Pi awaits handler，等待生效）——降低阻塞：只审本轮增量 + 180s 上限
+			const sig = await waitForAuditCompletion(projectRoot(ctx.cwd));
+			recordAuditDuration(projectRoot(ctx.cwd), t0);
 			if (sig === null) {
 				// 超时：协商中止——steer 通知审计者快速反馈已发现的问题，收尾窗口内采纳其结论
-				const settled = await negotiateStop(rpc, resolveProjectRoot(ctx.cwd));
-				recordAuditDuration(resolveProjectRoot(ctx.cwd), t0); // 协商时长计入阻塞
+				const settled = await negotiateStop(rpc, projectRoot(ctx.cwd));
+				recordAuditDuration(projectRoot(ctx.cwd), t0); // 协商时长计入阻塞
 				if (settled) {
 					// 协商窗口内审计者已签名 → 采纳结论（passed=门禁通过；blocked=快速确认修复）
-					const s = readAuditState(resolveProjectRoot(ctx.cwd));
+					const s = readAuditState(projectRoot(ctx.cwd));
 					if (
 						s.signature &&
 						(s.signature.status === "passed" ||
@@ -909,15 +945,15 @@ export default function (pi: ExtensionAPI): void {
 					) {
 						return; // B1 门禁通过
 					}
-					await handleBlocked(pi, ctx, resolveProjectRoot(ctx.cwd));
+					await handleBlocked(pi, ctx, projectRoot(ctx.cwd));
 					return;
 				}
 				// 协商无果 → 超时按 blocked 计（递增 streak），进修复循环或降级放行
-				recordSignature(resolveProjectRoot(ctx.cwd), {
+				recordSignature(projectRoot(ctx.cwd), {
 					status: "timeout",
-					blockers: ["审计超时（120s），协商中止后产物未过审"],
+					blockers: ["审计超时（180s），协商关闭后产物未过审"],
 				});
-				await handleBlocked(pi, ctx, resolveProjectRoot(ctx.cwd));
+				await handleBlocked(pi, ctx, projectRoot(ctx.cwd));
 				return;
 			}
 			// 审计者已签名（passed/blocked/timeout），blockedStreak 已由 recordSignature 递增/清零
@@ -925,7 +961,7 @@ export default function (pi: ExtensionAPI): void {
 				return; // B1 门禁通过，end 就是 end
 			}
 			// blocked：B1 当场修复（streak<上限）或 A2 降级放行（streak>=上限）
-			await handleBlocked(pi, ctx, resolveProjectRoot(ctx.cwd));
+			await handleBlocked(pi, ctx, projectRoot(ctx.cwd));
 		} catch {
 			/* noop：不崩溃 */
 		}
@@ -934,7 +970,7 @@ export default function (pi: ExtensionAPI): void {
 	// ---- 锁兜底：审计完成释放残留锁 + L0 链维护审计触发（非阻塞，L1 门禁之后）----
 	pi.on("agent_settled", async (event, ctx) => {
 		try {
-			const root = resolveProjectRoot(ctx.cwd);
+			const root = projectRoot(ctx.cwd);
 			const state = readAuditState(root);
 			if (state.inFlight && !hasInFlight(root)) {
 				// 内存锁已过期/不存在但文件锁残留——审计大概率已完成，释放
@@ -980,25 +1016,25 @@ export default function (pi: ExtensionAPI): void {
 			if (!msg) return;
 			if (msg.role === "user") {
 				const text = extractText(msg.content);
-				if (text) appendConv(resolveProjectRoot(ctx.cwd), "user", text);
+				if (text) appendConv(projectRoot(ctx.cwd), "user", text);
 				// L2 交付审查：用户明确要求交付（提交/发布/merge/交付/收工）→ 并行 fanout 深度审查
 				if (/提交|发布|merge|交付|收工|上线|部署|推送/.test(text)) {
 					void triggerDeliveryAudit(
 						pi,
 						rpc,
 						readyPromise,
-						resolveProjectRoot(ctx.cwd),
+						projectRoot(ctx.cwd),
 					);
 				}
 			} else if (msg.role === "assistant") {
 				const text = extractText(msg.content);
 				if (text) {
-					appendConv(resolveProjectRoot(ctx.cwd), "assistant", text);
+					appendConv(projectRoot(ctx.cwd), "assistant", text);
 					// L0 记账：每轮累计 convlog 增量（达到阈值后 agent_settled 触发链维护审计）
-					accumulateRound(resolveProjectRoot(ctx.cwd), text.length);
+					accumulateRound(projectRoot(ctx.cwd), text.length);
 					// 意图信号记录（高信号过滤，≤200 字符；PI_PAIR_PROCESS_LOG=0 关闭——CI 跑分基线用）
 					if (process.env.PI_PAIR_PROCESS_LOG !== "0") {
-						appendProcessSignal(resolveProjectRoot(ctx.cwd), text);
+						appendProcessSignal(projectRoot(ctx.cwd), text);
 					}
 				}
 			}
