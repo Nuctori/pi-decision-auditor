@@ -372,6 +372,10 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		"纯咨询快速退出路径必须存在（推进游标、零价值点注入）",
 	);
 	assert.ok(
+		src.includes("发散核实") && src.includes("收敛核实"),
+		"独立核实必须分两层：收敛（对账）+ 发散（找未声明的风险）——审计不能只是看事实是否吻合",
+	);
+	assert.ok(
 		src.includes("deliveryRequested"),
 		"交付信号必须在 message_end 登记（提交/发布/merge → agent_end 同步门禁）",
 	);
