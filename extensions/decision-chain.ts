@@ -17,9 +17,9 @@ import {
 	convlogForeignRuns,
 	convlogPath,
 	entriesSinceLastAudit,
+	hasNewConversation,
 	hasUncommittedChanges,
 	listEntries,
-	needsSignoff,
 	parseChain,
 	processPath,
 	readAuditState,
@@ -209,6 +209,16 @@ function buildIncrementalAuditTask(cwd: string): string {
 		"【路径检查】若上述决策链/状态文件不存在：用 ls 检查 cwd 是否仓库根（有 src/ Cargo.toml 等），不是则定位真实项目根（向上找 Cargo.toml/package.json/go.mod/.git）再审计；链的实际位置以 find 到的真实文件为准（指定路径可能因 cwd 解析不准而缺失）。",
 	);
 	lines.push("");
+	lines.push("【第零步：判定本轮是否有值得审计的工作（先做这个）】");
+	lines.push(
+		"用 read 读对话日志增量（convlog 自 convExtractedLine 之后）。判断本轮是否有**决策性工作**（方案取舍/采纳用户要求/架构决定/推翻旧决策）或**产物**（代码改动/文件）。",
+	);
+	lines.push(
+		"**若本轮纯咨询**（如技术对比问答、信息查询，无决策无产物）：**快速退出**——用 write 更新 state.json：inFlight=false、convExtractedLine 推进到当前行、auditFindings=['本轮纯咨询，无审计对象']，**不写 signature 不注入任何价值点**（用户零感知）。退出后立即停止。",
+	);
+	lines.push(
+		"**若有决策性工作或产物**：继续以下步骤——提取决策入链 + 审决策/产物质量 + 签名。",
+	);
 	lines.push("【第一步：提取增量决策入链】");
 	lines.push(
 		"1. 用 read 读对话日志，从 state.json 的 convExtractedLine 标记的对话行之后开始（convExtractedLine = ## 👤/## 🤖 行计数）。",
@@ -236,7 +246,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 		"立场：产物默认有缺陷（guilty until proven innocent）。不要‘检查有没有错’——要主动尝试推翻：每个维度找具体缺陷，找到 = 偏离 ✗；五个维度全部无法推翻才判通过。",
 	);
 	lines.push(
-		"1. 读 git diff（本轮未提交改动），按五维度逐项进攻：① 原子性（独立评审/回滚？混入无关主题？）② 正确性（逻辑/边界/错误路径真的对？事实与仓库一致？）③ 一致性（决策间/实现与决策/既有模式一致？）④ 内聚（一个决策一个主题？职责放对？过度设计？）⑤ 完备（边界/错误/依赖/文档/测试覆盖？产物真的执行了本轮目标？）。",
+		"1. **有 git diff（未提交改动）**：按五维度逐项进攻①原子性 ②正确性 ③一致性 ④内聚 ⑤完备（详见维度定义）。**plan 阶段无 git diff**：审决策质量——本轮提取的决策条目是否自足（Context 可验证/Decision 明确/Rationale 由 Context 推出/Alternatives 认真考虑）？决策是否服务于推导出的目标（有无漂移）？",
 	);
 	lines.push(
 		"2. 独立核实：用 read/grep 核实涉及的事实与代码一致（不信任记录，事实不符 = 偏离 ✗）。",
@@ -718,10 +728,13 @@ export default function (pi: ExtensionAPI): void {
 			// 交付标记先消费（任何早退路径都不泄漏到下轮——Medium-2）
 			const isDelivery = deliveryRequested.has(root);
 			deliveryRequested.delete(root);
-			// 真实产物判定：有未提交 git 改动 或 有未审计决策条目 → 审计；
-			// 纯咨询/运维会话（无代码产物、无决策）→ 零审计零噪音
+			// 工作判据（两个便宜信号，无需语义理解——语义判断交给审计者 AI）：
+			// 1. 有代码产物（git 未提交改动）→ 必审
+			// 2. 有对话增量（convlog 新行）→ spawn 审计者，它 AI 判定是否有决策性工作/产物；
+			//    纯咨询 → 判"无工作"快速退出（推进游标，零注入）；plan 阶段 → 提取决策入链 + 审决策
 			const hasWork =
-				hasUncommittedChanges(root) || entriesSinceLastAudit(root).length > 0;
+				hasUncommittedChanges(root) ||
+				hasNewConversation(root, state.convExtractedLine ?? 0);
 			if (!hasWork) return;
 
 			// 多实例混写检测：同 cwd 下存在其他实例的真实用户行 → 自动审计会错审/旁路

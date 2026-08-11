@@ -24,10 +24,15 @@
 ### T1. agent_end 触发（每轮结束时）
 
 ```
-[本轮无真实产物] ── hasUncommittedChanges=false 且 entriesSinceLastAudit 为空 ──▶ 不触发（零噪音）
+[无代码产物 且 无对话增量] ── hasUncommittedChanges=false 且 hasNewConversation=false ──▶ 不触发（零噪音）
 [多实例混写]     ── convlogForeignRuns>0 ──────────────────────────────────▶ 跳过 + notify（防错审）
 [常规轮]         ── fresh spawn（context:"fork"）→ inFlight=true → 立即返回（不阻塞）
 [交付轮]         ── fresh spawn → inFlight=true → await 签名（300s 上限）
+
+触发后审计者【第零步】AI 判定本轮有无工作（不做正则信号词判定——语义判断交给审计者）：
+  纯咨询（问答无决策无产物）→ 快速退出：推进 convExtractedLine、写 auditFindings=["本轮纯咨询，无审计对象"]、不写 signature、零注入
+  plan 阶段（有决策无 git 产物）→ 提取决策入链 + 审决策质量 + 签名
+  实现阶段（有 git 产物）→ 审产物 + 签名
 ```
 
 ### T2. 审计者收尾（写入 signature）

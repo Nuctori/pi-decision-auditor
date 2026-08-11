@@ -19,6 +19,7 @@ import {
 	convlogForeignRuns,
 	convlogPath,
 	entriesSinceLastAudit,
+	hasNewConversation,
 	hasUncommittedChanges,
 	listEntries,
 	needsSignoff,
@@ -356,11 +357,19 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		src.includes("convlogForeignRuns(root, RUN_ID) > 0"),
 		"agent_end 必须做多实例混写检测（跳过错审）",
 	);
-	// 真实产物判定 + 常规轮异步 + 交付轮同步门禁
+	// 工作判据（便宜信号）+ 审计者 AI 判定（第零步）
 	assert.ok(
 		src.includes("hasUncommittedChanges(root)") &&
-			src.includes("entriesSinceLastAudit(root).length > 0"),
-		"agent_end 必须用真实产物判定（git 改动 or 未审计决策）——纯咨询/运维会话零审计",
+			src.includes("hasNewConversation(root, state.convExtractedLine"),
+		"agent_end 用两个便宜信号触发：git 产物 or 对话增量（语义判断交给审计者，不做正则信号词判定）",
+	);
+	assert.ok(
+		src.includes("第零步：判定本轮是否有值得审计的工作"),
+		"审计任务必须先 AI 判定本轮有无工作（纯咨询快速退出零注入；plan 阶段提取决策+审决策）",
+	);
+	assert.ok(
+		src.includes("本轮纯咨询，无审计对象"),
+		"纯咨询快速退出路径必须存在（推进游标、零价值点注入）",
 	);
 	assert.ok(
 		src.includes("deliveryRequested"),
@@ -756,4 +765,18 @@ test("hasUncommittedChanges：真实产物判定（git 未提交改动）", () =
 	// 真实改动 + 状态目录并存 → 仍 true
 	fs.writeFileSync(path.join(gitDir, "a.txt"), "v3", "utf-8");
 	assert.equal(hasUncommittedChanges(gitDir), true);
+});
+
+test("hasNewConversation：对话增量判据（plan 阶段触发审计）", () => {
+	const dir = tmpDir();
+	// 无对话 → 无增量（不触发）
+	assert.equal(hasNewConversation(dir, 0), false);
+	// 有对话 → 增量（触发：spawn 审计者由它 AI 判定）
+	appendConv(dir, "user", "我们采用方案 B 吧，放弃 A");
+	assert.equal(hasNewConversation(dir, 0), true);
+	// 审计者推进游标后 → 该段对话不再触发
+	assert.equal(hasNewConversation(dir, 1), false);
+	// 新对话 → 再次触发
+	appendConv(dir, "assistant", "好，按方案 B 实现");
+	assert.equal(hasNewConversation(dir, 1), true);
 });

@@ -424,6 +424,20 @@ export function hasUncommittedChanges(cwd: string): boolean {
 	}
 }
 
+/**
+ * 对话增量判据：convlog 对话行数是否超过 convExtractedLine（上次审计者已检查的位置）。
+ * 触发语义：有新的对话（用户提问/助手回复）→ spawn 审计者，由审计者 AI 判定本轮是否有
+ * 值得审计的工作（决策性工作或产物）。纯咨询会话审计者会判"无工作"快速退出并推进游标。
+ * 不做正则信号词判定（模式匹配无法可靠识别决策——漏检/误检），语义判断交给审计者。
+ */
+export function hasNewConversation(cwd: string, extractedLine: number): boolean {
+	try {
+		return convLogLineCount(cwd) > extractedLine;
+	} catch {
+		return false;
+	}
+}
+
 // ---- 对话流日志（目标推导用）----
 // 存 <cwd>/.pi/decision-auditor/convlog.md：只记用户提示 + assistant 最终文本，
 // 不含工具调用/代码/思考（不是全文 transcript）。审计者读它推导任务目标。

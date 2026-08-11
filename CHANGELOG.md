@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.16] - 2026-08-11
+
+plan 阶段审计修复——决策信号交给 AI 判定，不做模式匹配：
+
+- **触发判据改为两个便宜信号**：`hasUncommittedChanges(root) || hasNewConversation(root, convExtractedLine)`——git 产物 or 对话增量（无语义理解，任何会话有真实交互都触发）
+- **语义判断移给审计者（第零步）**：审计任务先 AI 判定本轮有无值得审计的工作——纯咨询 → 快速退出（推进 convExtractedLine、写 auditFindings=["本轮纯咨询，无审计对象"]、不写 signature、零注入）；plan 阶段（有决策无 git 产物）→ 提取决策入链 + 审决策质量；实现阶段 → 审产物
+- **废弃正则信号词判据**：`hasNewDecisionSignals`（PROCESS_SIGNAL_RE 模式匹配）删除——"那我们就用 B 吧"类真实决策不命中信号词会漏检，模式匹配无法可靠识别决策
+- **修复 follow_me 式漏审**：非 git 目录有真实开发（src/*.js）→ 对话增量触发 → 审计者审；纯咨询非 git（问答）→ 审计者判无工作退出
+- 新增单测：`hasNewConversation`（无对话/有对话/游标推进/新对话四态）+ 守卫断言（第零步判定存在、纯咨询退出路径存在）
+- 28/28 测试通过、tsc 0 错误
+
 ## [1.0.15] - 2026-08-11
 
 交叉审计修复（发布前）——3 个真缺陷 + 文档残留全清：
