@@ -430,7 +430,10 @@ export function hasUncommittedChanges(cwd: string): boolean {
  * 值得审计的工作（决策性工作或产物）。纯咨询会话审计者会判"无工作"快速退出并推进游标。
  * 不做正则信号词判定（模式匹配无法可靠识别决策——漏检/误检），语义判断交给审计者。
  */
-export function hasNewConversation(cwd: string, extractedLine: number): boolean {
+export function hasNewConversation(
+	cwd: string,
+	extractedLine: number,
+): boolean {
 	try {
 		return convLogLineCount(cwd) > extractedLine;
 	} catch {
