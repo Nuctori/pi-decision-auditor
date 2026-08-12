@@ -446,15 +446,29 @@ export function hasNewConversation(
  * 单位钳制（B2 修复）：审计者写 convExtractedLine 可能用文件行号（read 工具自然单位），
  * 而扩展按 convLogLineCount（只计 ## 👤/## 🤖 对话行）比较——审计者写超（文件行号 >
  * 对话行数）会让"对话增量"触发永久断线。钳制到对话行数：写超视为"已读完当前全部对话"。
+ * 纯读：不落盘——落盘由调用方（扩展 agent_end）在 inFlight 锁处理之后统一做，
+ * 避免在谓词求值中与审计者进程的 state.json 读-改-写形成竞态（reviewer Medium）。
  */
 export function clampConvExtractedLine(cwd: string): number {
 	const total = convLogLineCount(cwd);
 	const state = readAuditState(cwd);
-	if (state.convExtractedLine > total) {
-		writeAuditState(cwd, { ...state, convExtractedLine: total });
-		return total;
-	}
-	return state.convExtractedLine;
+	return state.convExtractedLine > total ? total : state.convExtractedLine;
+}
+
+/**
+ * 中间态注入判据（B1 行为级测试目标，从扩展 handler 抽出的纯函数）：
+ * 注入 ⇔ 有已写 findings 且 审计仍在跑（inFlight=true，被杀时文件锁残留）且 同轮未注入过。
+ * 纯咨询轮审计者主动写 inFlight=false → 不注入（零注入承诺，D-006）。
+ */
+export function shouldInjectInterimFindings(
+	state: AuditState,
+	injectedAt: number | undefined,
+): boolean {
+	return (
+		state.auditFindings.length > 0 &&
+		state.inFlight === true &&
+		injectedAt !== state.auditStartedAt
+	);
 }
 
 // ---- 对话流日志（目标推导用）----

@@ -33,6 +33,7 @@ import {
 	recordSignature,
 	resetForSessionStart,
 	resolveProjectRoot,
+	shouldInjectInterimFindings,
 	writeAuditState,
 } from "../lib/chain-store.js";
 
@@ -439,10 +440,10 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		src.includes("完成即停") && src.includes("签名后的一切继续都是浪费"),
 		"审计者 prompt 必须含完成即停边界（签名后不再扩大范围）",
 	);
-	// B1：中间态注入判据 = inFlight===true（纯咨询轮 inFlight=false → 零注入，D-006）
+	// B1：中间态注入判据 = shouldInjectInterimFindings 纯函数（行为级测试锁定，非字符串守卫）
 	assert.ok(
-		src.includes("state.inFlight === true"),
-		"中间态注入判据必须是 state.inFlight===true（纯咨询轮零注入承诺）",
+		src.includes("shouldInjectInterimFindings(state, injectedInterimAt.get(root))"),
+		"中间态注入必须走 shouldInjectInterimFindings 纯函数（行为级测试在 lib 单测）",
 	);
 	// B2：convExtractedLine 单位钳制（审计者写文件行号超界 → 钳制，防对话增量触发断线）
 	assert.ok(
@@ -811,17 +812,40 @@ test("hasNewConversation：对话增量判据（plan 阶段触发审计）", () 
 	assert.equal(hasNewConversation(dir, 1), true);
 });
 
-test("clampConvExtractedLine：单位钳制（审计者写文件行号 → 钳制为对话行数，防触发断线）", () => {
+test("clampConvExtractedLine：单位钳制（纯读，不落盘——落盘由扩展合并进锁写点）", () => {
 	const dir = tmpDir();
 	appendConv(dir, "user", "一条");
 	appendConv(dir, "assistant", "两条");
 	// 正常值（≤ 对话行数）不受影响
 	writeAuditState(dir, { ...readAuditState(dir), convExtractedLine: 1 });
 	assert.equal(clampConvExtractedLine(dir), 1);
-	// 审计者误写文件行号（> 对话行数，含头注释行）→ 钳制为对话行总数并落盘
+	// 审计者误写文件行号（> 对话行数）→ 返回钳制值；纯读不落盘（防与审计者进程读-改-写竞态）
 	writeAuditState(dir, { ...readAuditState(dir), convExtractedLine: 500 });
 	assert.equal(clampConvExtractedLine(dir), 2);
-	assert.equal(readAuditState(dir).convExtractedLine, 2);
-	// 钳制后 → 无对话增量不触发（不再断线也不空转）
+	assert.equal(readAuditState(dir).convExtractedLine, 500, "clamp 是纯读，不落盘");
+	// 钳制值用于判据 → 无对话增量不触发（不再断线也不空转）
 	assert.equal(hasNewConversation(dir, clampConvExtractedLine(dir)), false);
+});
+
+test("shouldInjectInterimFindings：中间态注入判据（B1 行为级）", () => {
+	const base = {
+		...readAuditState(tmpDir()),
+		auditFindings: ["推导目标 ✓"],
+		inFlight: true,
+		auditStartedAt: 1000,
+	};
+	// 审计被杀（inFlight=true 锁残留）→ 注入
+	assert.equal(shouldInjectInterimFindings(base, undefined), true);
+	// 同轮已注入过（injectedAt === auditStartedAt）→ 去重不注入
+	assert.equal(shouldInjectInterimFindings(base, 1000), false);
+	// 纯咨询轮（审计者主动写 inFlight=false）→ 零注入（D-006 承诺）
+	assert.equal(
+		shouldInjectInterimFindings({ ...base, inFlight: false }, undefined),
+		false,
+	);
+	// 无 findings → 不注入
+	assert.equal(
+		shouldInjectInterimFindings({ ...base, auditFindings: [] }, undefined),
+		false,
+	);
 });

@@ -33,12 +33,12 @@ pi-pair makes deliberate trade-offs. Read these before deciding whether to adopt
 - **Adversarial, not polite.** Artifacts are *guilty until proven innocent*: the auditor actively tries to break each dimension. A review that finds nothing to attack is a weak review, not a good one.
 - **Simplicity is a feature, not a shortcut.** One audit layer, fresh-spawn runs, no resident process, no negotiation windows — each mechanism that survives earns its keep, each that fails is deleted rather than patched. The cost is fewer knobs; the payoff is a system you can reason about.
 - **Value is observable, process is hidden.** The user sees the *fixed result* — blockers delivered and repaired — not the audit machinery (counts, timeouts, negotiations). Audit findings are injected user-visible; process noise never is.
-- **Audit only what is real.** Pure-chat and ops rounds (no code, no decisions) get zero noise. Auditing empty rounds would be theater, and theater teaches the auditor to rubber-stamp.
+- **Audit only what is real.** The auditor spawns only when real work may exist (git changes or new conversation), then AI-judges (step zero) whether to proceed — pure-chat rounds quick-exit with zero injection. Auditing empty rounds would be theater, and theater teaches the auditor to rubber-stamp.
 - **Gate at delivery, not every round.** Normal rounds run async — the auditor works in the background and you're never blocked. The gate tightens only when it matters: submit / publish / merge / deploy.
 - **Interim results over final ceremony.** The auditor writes findings continuously (`auditFindings`), so being killed mid-audit still delivers value. A finished signature is a formality, not the point.
 - **Stop when done.** After signing, the auditor stops — no scope creep, no "just one more check". Open questions go to the next round, where the next agent has full context.
 
-**What this means for you**: pi-pair raises output precision by (a) catching drift and fabricated reasoning before they ship, and (b) making the fixes cheap by surfacing them immediately. What it does *not* do: it does not guarantee correctness (same-model blind spots exist), it does not audit chat-only sessions, and its value is proportional to how much real code/decision work your sessions produce.
+**What this means for you**: pi-pair raises output precision by (a) catching drift and fabricated reasoning before they ship, and (b) making the fixes cheap by surfacing them immediately. What it does *not* do: it does not guarantee correctness (same-model blind spots exist), chat-only rounds get a quick-exit verdict instead of an audit, and its value is proportional to how much real code/decision work your sessions produce.
 
 ## Quick start
 

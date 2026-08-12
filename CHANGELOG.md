@@ -1,6 +1,15 @@
 # Changelog
 
-# Changelog
+## [1.0.19] - 2026-08-12
+
+L2 交付审查（3 个 fresh reviewer）复审 v1.0.18 后的修复轮——无 blocker，处理 2 Medium + 4 Low：
+
+- **clamp 落盘竞态（Medium）**：`clampConvExtractedLine` 改为纯读（不落盘）——原实现在谓词求值中做 state.json 读-改-写，与异步审计者进程形成竞态（窄窗口可覆盖刚写入的签名）。钳制落盘合并进 agent_end 的两个既有写点（残留锁释放 / spawn 前全量写）
+- **B5 代码级兜底（Medium）**：`waitForAuditCompletion` 完成判定补 `at===0` 分支——审计者手写 signature 漏 `at`（消毒为 0）时，用 `lastAuditAt >= startedAt` 判定刚签名完成（收尾写必置 lastAuditAt；旧轮无 at 签名不会被误判），交付轮不再 300s 超时覆盖真实结论
+- **B1 行为级测试**：注入判据抽为 `shouldInjectInterimFindings` 纯函数（lib），扩展 handler 调用它；4 态行为测试（被杀→注入 / 同轮去重 / 纯咨询零注入 / 无 findings）替换字符串守卫
+- **中间态 inFlight 保真**：审计任务 prompt + agent 协议明确「中间态写入必须保留 inFlight=true，仅收尾签名写 false」——防止审计者提前释放锁导致被杀后 findings 无法注入交付
+- **Low 清理**：CHANGELOG 重复 `# Changelog` 头（v1.0.18 引入的回归）、README 英文设计哲学两处对齐 D-011（chat-only quick-exit 语义）、agents/decision-auditor.md 删除不可达的 decision_signoff 优先推荐（工具不在 tools 列表）
+- 30/30 测试通过、tsc 0 错误
 
 ## [1.0.18] - 2026-08-11
 

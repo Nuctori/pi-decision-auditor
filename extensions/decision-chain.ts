@@ -30,6 +30,7 @@ import {
 	renderEntry,
 	resetForSessionStart,
 	resolveProjectRoot,
+	shouldInjectInterimFindings,
 	writeAuditState,
 } from "../lib/chain-store.js";
 
@@ -190,7 +191,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 		"【窗口约束】常规轮你在 agent_end 之后异步运行（主 agent 已结束本轮，不阻塞等待你）——本轮产物已完整（不会有后续产物），直接给结论；发现 blocker 就给可操作的 blockers。交付轮（用户提交/发布/merge 时）主 agent 会同步等你的签名，此时尽快收尾：若审计超时，主 agent 会降级放行并把你的 blockers 注入下轮。",
 	);
 	lines.push(
-		"【中间态交付（最重要，任何时刻被杀都要有产出）】用 write 更新 state.json 时**先写中间态再继续**：启动后立即写 auditFindings 占位（如 ['审计开始']）；每完成一步核实（推导目标 ✓ / 提取决策 ✓ / 读 diff ✓ / 逐维度进攻 ✓），就把该步的已确认事实与已发现缺口**追加**进 auditFindings。你随时可能被超时终止（SIGINT 强杀，收尾来不及）——已写入的 auditFindings 就是你的部分审计结果，主 agent 下轮会读到并交付给用户。**宁可中间态多写，不可最后一起写**：最后一步签名（passed/blocked）只是收尾，auditFindings 才是价值交付的主通道。",
+		"【中间态交付（最重要，任何时刻被杀都要有产出）】用 write 更新 state.json 时**先写中间态再继续**：启动后立即写 auditFindings 占位（如 ['审计开始']）；每完成一步核实（推导目标 ✓ / 提取决策 ✓ / 读 diff ✓ / 逐维度进攻 ✓），就把该步的已确认事实与已发现缺口**追加**进 auditFindings。你随时可能被超时终止（SIGINT 强杀，收尾来不及）——已写入的 auditFindings 就是你的部分审计结果，主 agent 下轮会读到并交付给用户。**宁可中间态多写，不可最后一起写**：最后一步签名（passed/blocked）只是收尾，auditFindings 才是价值交付的主通道。**中间态写入必须保留 inFlight=true**（仅收尾签名时写 inFlight=false）——扩展按 inFlight===true 判定「审计被中断」并注入中间态，提前置 false 会让被杀后的 findings 无法交付。",
 	);
 	lines.push(
 		"【完成即停（明确边界）】一旦你写完了最终 signature（passed/blocked），审计即结束——**立即停止，不再追加、不再验证、不再扩大范围**。签名后的一切继续都是浪费。任何遗留疑问写进 blockers/auditFindings，留给下一轮会话结合用户需求再继续。",
@@ -291,7 +292,15 @@ async function waitForAuditCompletion(
 		const state = readAuditState(cwd);
 		// 完成判定：本轮审计写入的新签名（signature.at >= 本轮 auditStartedAt）即完成——
 		// blocked 也是完成（签名即推进 convLine，但完成判定只看 at），交付轮不得误判为超时（High-1）
-		if (state.signature && state.signature.at >= startedAt && !state.inFlight) {
+		// B5 代码兜底：审计者手写 signature 漏 at（消毒为 0）时，用 lastAuditAt 判定——
+		// 收尾写会把 lastAuditAt 置当前，故 lastAuditAt >= startedAt 且 !inFlight = 刚签名完成；
+		// 旧轮签名（无 at）的 lastAuditAt 早于本轮 startedAt，不会被误判。
+		if (
+			state.signature &&
+			(state.signature.at >= startedAt ||
+				(state.signature.at === 0 && state.lastAuditAt >= startedAt)) &&
+			!state.inFlight
+		) {
 			// 阻塞时长在轮询循环内写（print 模式下 handler 尾段可能不执行，这里最可靠）
 			if (state.auditStartedAt) {
 				try {
@@ -689,14 +698,9 @@ export default function (pi: ExtensionAPI): void {
 				injectedSignatureAt.set(root, state.signature.at ?? Date.now());
 			}
 			// 审计中间态注入（价值点，用户可观察）：审计进行中被杀/超时时留下的部分结果 → 交付价值而非丢弃；
-			// 判据 state.inFlight===true（审计仍在跑 = 中断；纯咨询轮审计者主动写 inFlight=false，不注入——
-			// 零注入承诺，D-006）；同一轮审计只注入一次（injectedInterimAt 去重）
-			if (
-				state.auditFindings &&
-				state.auditFindings.length > 0 &&
-				state.inFlight === true &&
-				injectedInterimAt.get(root) !== state.auditStartedAt
-			) {
+			// 判据 = shouldInjectInterimFindings 纯函数（行为级测试锁定）：inFlight===true（审计仍在跑 = 中断；
+			// 纯咨询轮审计者主动写 inFlight=false，不注入——零注入承诺，D-006）；同轮去重（injectedInterimAt）
+			if (shouldInjectInterimFindings(state, injectedInterimAt.get(root))) {
 				valueMsgs.push(
 					`结对审计进行中被中断，已确认的部分发现（价值点）：\n${state.auditFindings.map((f) => `- ${f}`).join("\n")}\n\n供参考，可据此继续处理。`,
 				);
@@ -767,10 +771,12 @@ export default function (pi: ExtensionAPI): void {
 			// 已有审计在跑（inFlight）→ 等待它完成；否则 fresh spawn 审计者
 			// 残留锁兜底：文件锁 inFlight=true 但内存锁已无（审计者被强杀未写收尾）→ 释放
 			// （防该 cwd 审计永久停摆——Medium-4；agent_settled 兜底已删，这里补回）
+			// clamp 持久化（B2）合并进这个写点：避免在谓词求值中与审计者进程读-改-写竞态（reviewer Medium）
 			if (state.inFlight && !hasInFlight(root)) {
 				writeAuditState(root, {
 					...readAuditState(root),
 					inFlight: false,
+					convExtractedLine: clampConvExtractedLine(root),
 				});
 			}
 			if (!state.inFlight && !hasInFlight(root)) {
@@ -780,11 +786,13 @@ export default function (pi: ExtensionAPI): void {
 				});
 				// auditStartedAt 在 spawn 的 rpc await **之前**写：
 				// print 模式下 handler 可能在 rpc await 处被丢弃，写在之后会丢（CI 跑分 duration=0）
+				// convExtractedLine 钳制合并进这个写点（spawn 前唯一全量写，无审计者并发）
 				writeAuditState(root, {
 					...readAuditState(root),
 					inFlight: true,
 					lastAuditAt: Date.now(),
 					auditStartedAt: Date.now(),
+					convExtractedLine: clampConvExtractedLine(root),
 				});
 				try {
 					await readyPromise;

@@ -18,7 +18,7 @@ acceptanceRole: writer
 - **持续交付（核心）**：发现任何问题（blocker/偏离/矛盾），**立即** `contact_supervisor(interview_request / need_decision)` 通知主 agent 处理，不等审计收尾。主 agent 收到后马上处理，处理完你再验证，直到没问题。**发现问题不是"审计完再汇报"，而是"发现即交付"**。
 - **结论即终**：签名（passed/blocked）就是你的最终输出。blocked 时给出**具体可操作的 blockers**（主 agent 靠它当场修复，修完会再触发你验证）。
 - **完成即停（明确边界）**：一旦写完最终 signature，审计即结束——**立即停止，不再追加、不再验证、不再扩大范围**。签名后的一切继续都是浪费。任何遗留疑问写进 blockers/auditFindings，留给下一轮会话结合用户需求再继续。
-- **中间态写入**：每次用 write 更新 state.json 时**先写中间态再继续**——启动后立即写 auditFindings 占位；每完成一步核实就追加该步的已确认事实与已发现缺口。你随时可能被终止（SIGINT 强杀，收尾来不及）——已写入的 auditFindings 就是你的部分审计结果，主 agent 会读到。**宁可中间态多写，不可最后一起写**。
+- **中间态写入**：每次用 write 更新 state.json 时**先写中间态再继续**——启动后立即写 auditFindings 占位；每完成一步核实就追加该步的已确认事实与已发现缺口。你随时可能被终止（SIGINT 强杀，收尾来不及）——已写入的 auditFindings 就是你的部分审计结果，主 agent 会读到。**宁可中间态多写，不可最后一起写**。**中间态写入必须保留 `inFlight=true`**（仅收尾签名时写 false）——扩展按 inFlight===true 判定「审计被中断」并注入中间态，提前置 false 会让被杀后的 findings 无法交付。
 - 若这是**修复轮**（state.signature 为 blocked 时再次被唤起）：先验证上一轮 blockers 是否已修复，再判定。
 
 ## 你的输入
@@ -128,12 +128,7 @@ acceptanceRole: writer
 
 ## 收尾（每次审计必做）
 
-用 `decision_signoff` 工具签名（优先，避免手写 state.json 整体覆盖）：
-
-- `decision_signoff(status="passed")`：产物忠实性通过
-- `decision_signoff(status="blocked", blockers=[...])`：发现问题（**blockers 必须具体可操作**——主 agent 靠它当场修复，修复后你会被再次唤起验证）
-
-若工具不可用，用 write 工具更新 `<cwd>/.pi/decision-auditor/state.json`（字段级，保留其他字段）：
+若 `decision_signoff` 工具可用（工具列表中有则优先，避免手写整体覆盖）；否则用 write 工具更新 `<cwd>/.pi/decision-auditor/state.json`（字段级，保留其他字段）：
 
 - `inFlight` 置 `false`（解除去重锁）
 - `lastAuditedId` 推进到链最新条目；`lastAuditAt` 置当前时间戳；`convExtractedLine` 推进到已读对话行
