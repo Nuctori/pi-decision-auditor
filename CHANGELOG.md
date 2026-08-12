@@ -1,5 +1,19 @@
 # Changelog
 
+# Changelog
+
+## [1.0.18] - 2026-08-11
+
+项目自审修复轮（决策链 D-011~D-015 已捕获 v1.0.16/v1.0.17 变更）——6 个真实缺口：
+
+- **B1 纯咨询轮零注入承诺被打破**：中间态注入判据 `(inFlight || !signature)` 会把纯咨询轮的「本轮纯咨询，无审计对象」占位当作"审计被中断"注入 display:true（signature=null 的新项目首轮咨询必现）。改为 `state.inFlight === true`（审计在跑 = 真中断；纯咨询轮主动写 inFlight=false → 零注入）
+- **B2 对话增量触发可静默断线**：convExtractedLine 单位不一致——审计者按 read 文件行号推进、扩展按 convLogLineCount（只计对话行）比较，审计者写超即断线（本仓实证 578>471）。新增 `clampConvExtractedLine`：agent_end 触发前钳制为对话行总数并落盘；审计任务 prompt 两处明确"对话行计数，非文件行号"
+- **B3 权威文档自相矛盾**：signatureConvLine 语义代码（recordSignature 恒推进）与文档（blocked 不推进）冲突，且 H2 后 agent_end 已不读 convLine、L140 括号理由失效。统一为"**签名即推进**"（修复走 blockers 注入通道）——改 audit-state-machine.md T2/不变量 1/6、architecture.md、agents/decision-auditor.md、审计任务收尾文案
+- **B4 判据文案过期**：README 中英「pure chat → no audit」/「不 spawn 任何 run」、architecture.md「不做 L2 交付审查的分层」与代码保留的 triggerDeliveryAudit 矛盾、lib 注释 entriesSinceLastAudit 残留、CHANGELOG 重复行——全部对齐 v1.0.16 触发判据（git 产物 or 对话增量 → 审计者 AI 判定）
+- **B5 审计者手写 signature 缺 at 字段**：扩展按 `signature.at ≥ auditStartedAt` 判定审计完成，但收尾 prompt 未要求写 at → 交付轮会把真实结论误判为超时并覆盖。收尾 prompt + agents/decision-auditor.md 明确 signature 必须带 `at`（= lastAuditAt）
+- **P1 自动审计永久停摆（多实例守卫误杀历史会话）**：`convlogForeignRuns` 旧语义统计 convlog 全部历史外来行，而 convlog 按 cwd 永久追加、RUN_ID 每个进程不同 → 第二个会话起守卫恒 >0，agent_end 自动审计（含修复轮复审）永久跳过，blocked 签名永不更新、过期 blockers 反复注入（实证：本仓 165+97 行历史 run 标记导致 B1-B5 修复轮复审从未触发）。修复：只统计本实例首行**之后**的外来行（并发交错窗口）——历史行不算；并发检测一侧命中即足够（先启动方必然看到后者的交错行）。P1 回归测试锁定
+- 新增守卫断言（B1/B2/B3/B5 各一条）+ clampConvExtractedLine 单测 + P1 回归用例；29/29 测试通过、tsc 0 错误
+
 ## [1.0.17] - 2026-08-11
 
 审计核实升级——两层核实（收敛 + 可控发散）：
@@ -11,8 +25,6 @@
 - 28/28 测试通过、tsc 0 错误
 
 ## [1.0.16] - 2026-08-11
-
-plan 阶段审计修复——决策信号交给 AI 判定，不做模式匹配：
 
 plan 阶段审计修复——决策信号交给 AI 判定，不做模式匹配：
 
@@ -50,7 +62,6 @@ convlog 会话隔离（多实例混写防护）——修复同 cwd 多 pi 实例
 ### 审计预算调整（180s→300s / 720s→600s）+ 伪造标记修复
 
 - 阻塞等待上限 180s→300s，协商关闭窗口 720s→600s（演进中间态；最终架构删除协商窗口——超时直接降级放行，见下方架构重构）
-- 文案同步：steer 协商消息、超时 blockers、注释、审计者规约（约 120s→约 300s）、README/SVG 一致化（原 120s 声明 v1.0.12 起即过期）
 - 文案同步：steer 协商消息、超时 blockers、注释、审计者规约（约 120s→约 300s）、README/SVG 一致化（原 120s 声明 v1.0.12 起即过期）
 - `convlogForeignRuns` 正则锚定行尾（`/<!--run:...-->\s*$/`）：真实标记由 appendConv 追加在行尾，防用户正文内嵌伪造标记误判外来实例（可永久关闭审计门禁）；新增回归单测
 
@@ -463,8 +474,3 @@ subagent 交叉审计收敛方案：分层触发 + 会话边界隔离。
 - 本地路径安装（`pi install ./...`）时 pi-subagents 不自动发现包内 agent，需手动复制到 `~/.pi/agent/agents/`；npm/git 分发自动发现
 - shell allowlist 可能拦截审计者的只读命令执行（exit 126），审计者以物理文件核查兜底
 - `subagent:async-complete` 内存锁匹配不可靠，依赖 TTL + 文件锁兜底
-
-## [Unreleased]
-
-- 审计者加 bash 只读命令（已授权工具，受 shell allowlist 约束）
-- 决策链 `D-000: 任务目标` 基线条目（可选，与 convlog 目标推导互补）

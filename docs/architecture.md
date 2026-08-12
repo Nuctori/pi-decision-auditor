@@ -9,11 +9,12 @@
 ## 设计原则
 
 1. **一个审计者，一次任务**：每轮对话一次审计任务 = 推导目标 + 审产物 + 签名。
-   不做 L0 链维护 / L1 门禁 / L2 交付审查的分层。
+   不做 L0 链维护分层；L2 交付审查保留为交付轮并行 fanout（真实产物门禁，非分层常驻）。
 2. **fresh spawn + 会话上下文延续**：每次审计新起 run（不常驻），但 spawn 用
    `context: "fork"`（继承主会话上下文）+ 任务注入会话上下文摘要（convlog 尾部 /
    决策链 / 上次签名 / process log 路径）——审计者理解"同一会话"在做什么，而非从零开始。
-3. **真实产物才审计**：git 未提交改动 或 未审计决策条目 → 审；否则零噪音。
+3. **真实产物才审计**：git 未提交改动 或 对话增量（审计者 AI 判定有无决策性工作）→ 审；
+   纯咨询轮审计者快速退出、零注入。
 4. **交付轮同步门禁，常规轮异步**：交付词（提交/发布/merge/部署…）→ agent_end 等签名；
    常规轮 → spawn 后不阻塞。
 5. **价值点可观察，流程隐藏**：blockers/auditFindings → display:true 注入（用户感知价值）；
@@ -28,7 +29,7 @@
 
 + `null` → 未审计
 + `passed` → 通过（blockedStreak 清零）
-+ `blocked` → 有缺口（blockedStreak+1；signatureConvLine 不推进）
++ `blocked` → 有缺口（blockedStreak+1；signatureConvLine 同样推进——签名即推进）
 + `passed-with-warning` → 交付轮超时降级 或 连续 blocked≥3（A2 退出，blockedStreak 清零）
 + `timeout` 状态**不存在**（超时直接降级 passed-with-warning）
 
@@ -36,8 +37,8 @@
 
 ```
 agent_end（有产物）:
-  ├─ 常规轮 → spawn/resume（异步，不 await）→ inFlight=true
-  ├─ 交付轮 → spawn/resume → await 签名（300s 上限）
+  ├─ 常规轮 → fresh spawn（异步，不 await）→ inFlight=true
+  ├─ 交付轮 → fresh spawn → await 签名（300s 上限）
   │     ├─ passed → 门禁通过
   │     ├─ blocked（streak<3）→ 保留 blocked，下轮注入
   │     ├─ blocked（streak≥3）→ 降级 passed-with-warning
@@ -46,7 +47,8 @@ agent_end（有产物）:
 
 before_agent_start:
   ├─ signature.blocked/passed-with-warning 且未注入 → display:true 价值点注入
-  └─ auditFindings 非空 且审计未完成 → display:true 中间态注入
+  └─ auditFindings 非空 且 inFlight===true → display:true 中间态注入
+     （纯咨询轮 inFlight=false → 零注入）
 
 async-complete（审计完成）:
   └─ signature.blocked → sendUserMessage 立即交付主 agent

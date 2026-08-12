@@ -13,6 +13,7 @@ import {
 	appendProcessSignal,
 	auditStatePath,
 	chainPath,
+	clampConvExtractedLine,
 	convLogLineCount,
 	convlogForeignRuns,
 	convlogPath,
@@ -214,7 +215,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 		"用 read 读对话日志增量（convlog 自 convExtractedLine 之后）。判断本轮是否有**决策性工作**（方案取舍/采纳用户要求/架构决定/推翻旧决策）或**产物**（代码改动/文件）。",
 	);
 	lines.push(
-		"**若本轮纯咨询**（如技术对比问答、信息查询，无决策无产物）：**快速退出**——用 write 更新 state.json：inFlight=false、convExtractedLine 推进到当前行、auditFindings=['本轮纯咨询，无审计对象']，**不写 signature 不注入任何价值点**（用户零感知）。退出后立即停止。",
+		"**若本轮纯咨询**（如技术对比问答、信息查询，无决策无产物）：**快速退出**——用 write 更新 state.json：inFlight=false、convExtractedLine 推进到当前对话行总数（只数 `## 👤`/`## 🤖` 行，不是文件行号）、auditFindings=['本轮纯咨询，无审计对象']，**不写 signature 不注入任何价值点**（用户零感知）。退出后立即停止。",
 	);
 	lines.push(
 		"**若有决策性工作或产物**：继续以下步骤——提取决策入链 + 审决策/产物质量 + 签名。",
@@ -227,7 +228,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 		`2. 识别主 agent 实际做的关键决策（方案取舍/架构改动/采纳的用户要求），用 write **append** 到 ${chainPath(cwd)}（## D-XXX: 标题 [Accepted]，Context/Decision/Rationale/Alternatives/Confidence/Date，编号 = 现有最大 D-NNN+1）。不记：命名、格式、单文件实现细节。`,
 	);
 	lines.push(
-		"3. 用 write 更新 state.json：convExtractedLine 推进到最后一条对话行。无决策也推进。",
+		"3. 用 write 更新 state.json：convExtractedLine 推进到当前对话行总数（单位：只数 `## 👤`/`## 🤖` 开头的行，不是文件行号；写错单位会被扩展钳制，但写对可避免重审）。无决策也推进。",
 	);
 	lines.push("");
 	lines.push("【第二步：推导目标】");
@@ -265,7 +266,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 	lines.push("【输出】逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 产物总评。");
 	lines.push("");
 	lines.push(
-		`【收尾】用 write 更新 ${auditStatePath(cwd)}：inFlight=false，lastAuditedId 推进，lastAuditAt 置当前。产物通过 → signature={status:"passed"}、signatureConvLine 推进到 convlog 当前行；发现 blocker → signature={status:"blocked", blockers:[...具体可操作缺口]}、signatureConvLine 不推进。**保留 auditFindings（中间态历史不删）**。写完后立即停止。`,
+		`【收尾】用 write 更新 ${auditStatePath(cwd)}：inFlight=false，lastAuditedId 推进，lastAuditAt 置当前。产物通过 → signature={status:"passed", at:<当前 epoch ms>}、signatureConvLine 推进到当前对话行总数；发现 blocker → signature={status:"blocked", at:<当前 epoch ms>, blockers:[...具体可操作缺口]}、signatureConvLine 同样推进（签名即推进——修复走 blockers 注入通道，不靠 convLine 滞后）。**signature 必须带 at 字段**（值 = lastAuditAt，epoch ms）——扩展按 signature.at ≥ auditStartedAt 判定审计完成，缺 at 会被交付轮误判为超时。**保留 auditFindings（中间态历史不删）**。写完后立即停止。`,
 	);
 	lines.push(
 		"写权限仅限：append chain.md + 改 state.json。禁止修改任何其他文件。",
@@ -289,8 +290,7 @@ async function waitForAuditCompletion(
 	while (Date.now() < deadline) {
 		const state = readAuditState(cwd);
 		// 完成判定：本轮审计写入的新签名（signature.at >= 本轮 auditStartedAt）即完成——
-		// blocked 签名不推进 signatureConvLine（协议规定），但仍是本轮结论，必须识别，
-		// 否则交付轮会把真实 blockers 误判为"超时"并覆盖（High-1）
+		// blocked 也是完成（签名即推进 convLine，但完成判定只看 at），交付轮不得误判为超时（High-1）
 		if (state.signature && state.signature.at >= startedAt && !state.inFlight) {
 			// 阻塞时长在轮询循环内写（print 模式下 handler 尾段可能不执行，这里最可靠）
 			if (state.auditStartedAt) {
@@ -688,12 +688,13 @@ export default function (pi: ExtensionAPI): void {
 				);
 				injectedSignatureAt.set(root, state.signature.at ?? Date.now());
 			}
-			// 审计中间态注入（价值点，用户可观察）：审计未完成但有已写入的 auditFindings
-			// （审计者被杀/超时时留下的部分结果）→ 交付价值而非丢弃；同一轮审计只注入一次
+			// 审计中间态注入（价值点，用户可观察）：审计进行中被杀/超时时留下的部分结果 → 交付价值而非丢弃；
+			// 判据 state.inFlight===true（审计仍在跑 = 中断；纯咨询轮审计者主动写 inFlight=false，不注入——
+			// 零注入承诺，D-006）；同一轮审计只注入一次（injectedInterimAt 去重）
 			if (
 				state.auditFindings &&
 				state.auditFindings.length > 0 &&
-				(state.inFlight || !state.signature) &&
+				state.inFlight === true &&
 				injectedInterimAt.get(root) !== state.auditStartedAt
 			) {
 				valueMsgs.push(
@@ -737,11 +738,12 @@ export default function (pi: ExtensionAPI): void {
 			deliveryRequested.delete(root);
 			// 工作判据（两个便宜信号，无需语义理解——语义判断交给审计者 AI）：
 			// 1. 有代码产物（git 未提交改动）→ 必审
-			// 2. 有对话增量（convlog 新行）→ spawn 审计者，它 AI 判定是否有决策性工作/产物；
+			// 2. 有对话增量（convlog 新对话行）→ spawn 审计者，它 AI 判定是否有决策性工作/产物；
 			//    纯咨询 → 判"无工作"快速退出（推进游标，零注入）；plan 阶段 → 提取决策入链 + 审决策
+			// convExtractedLine 先经单位钳制（审计者可能写文件行号，超界会让增量触发断线——B2）
 			const hasWork =
 				hasUncommittedChanges(root) ||
-				hasNewConversation(root, state.convExtractedLine ?? 0);
+				hasNewConversation(root, clampConvExtractedLine(root));
 			if (!hasWork) return;
 
 			// 多实例混写检测：同 cwd 下存在其他实例的真实用户行 → 自动审计会错审/旁路
@@ -835,7 +837,7 @@ export default function (pi: ExtensionAPI): void {
 				});
 				return;
 			}
-			// 审计者已签名（passed/blocked/timeout），blockedStreak 已由 recordSignature 递增/清零
+			// 审计者已签名（passed/blocked），blockedStreak 已由 recordSignature 递增/清零
 			if (sig.status === "passed" || sig.status === "passed-with-warning") {
 				return; // 门禁通过，end 就是 end
 			}

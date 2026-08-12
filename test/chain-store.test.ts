@@ -15,6 +15,7 @@ import {
 	appendProcessSignal,
 	auditStatePath,
 	chainPath,
+	clampConvExtractedLine,
 	convLogLineCount,
 	convlogForeignRuns,
 	convlogPath,
@@ -235,7 +236,8 @@ test("坏状态文件容错", () => {
 });
 
 // L0 独立层已删除（单层审计）：accumulateRound/checkAuditDue 记账与节流测试随之移除——
-// agent_end 按真实产物判定（hasUncommittedChanges or entriesSinceLastAudit）直接触发审计。
+// agent_end 按两个便宜信号判定（hasUncommittedChanges or hasNewConversation）触发审计，
+// 语义判断（有无决策性工作）交给审计者 AI 第零步。
 
 test("L0 记账字段已从状态移除（单层架构）", () => {
 	const dir = tmpDir();
@@ -360,7 +362,7 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	// 工作判据（便宜信号）+ 审计者 AI 判定（第零步）
 	assert.ok(
 		src.includes("hasUncommittedChanges(root)") &&
-			src.includes("hasNewConversation(root, state.convExtractedLine"),
+			src.includes("hasNewConversation(root, clampConvExtractedLine(root))"),
 		"agent_end 用两个便宜信号触发：git 产物 or 对话增量（语义判断交给审计者，不做正则信号词判定）",
 	);
 	assert.ok(
@@ -417,7 +419,7 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	// H2：waitForAuditCompletion 完成判定 = 本轮新签名（blocked 也算完成，防覆盖真实 blockers）
 	assert.ok(
 		src.includes("state.signature.at >= startedAt"),
-		"完成判定必须用 signature.at >= auditStartedAt（blocked 签名不推进 convLine 但仍是本轮结论）",
+		"完成判定必须用 signature.at >= auditStartedAt（blocked 也是完成，完成判定只看 at）",
 	);
 	// M2：交付标记先消费（无泄漏到下轮）
 	assert.ok(
@@ -436,6 +438,26 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	assert.ok(
 		src.includes("完成即停") && src.includes("签名后的一切继续都是浪费"),
 		"审计者 prompt 必须含完成即停边界（签名后不再扩大范围）",
+	);
+	// B1：中间态注入判据 = inFlight===true（纯咨询轮 inFlight=false → 零注入，D-006）
+	assert.ok(
+		src.includes("state.inFlight === true"),
+		"中间态注入判据必须是 state.inFlight===true（纯咨询轮零注入承诺）",
+	);
+	// B2：convExtractedLine 单位钳制（审计者写文件行号超界 → 钳制，防对话增量触发断线）
+	assert.ok(
+		src.includes("clampConvExtractedLine(root)"),
+		"agent_end 必须对 convExtractedLine 做单位钳制（防审计者写文件行号导致触发断线）",
+	);
+	// B5：审计者手写 signature 必须带 at（扩展按 signature.at ≥ auditStartedAt 判定完成）
+	assert.ok(
+		src.includes("signature 必须带 at 字段"),
+		"审计任务收尾必须要求 signature 带 at 字段（缺 at 会被交付轮误判为超时）",
+	);
+	// B3：签名即推进（blocked 也推进 signatureConvLine——修复走 blockers 注入通道）
+	assert.ok(
+		src.includes("签名即推进"),
+		"审计任务收尾必须明确签名即推进（blocked 也推进 convLine，不靠 convLine 滞后）",
 	);
 });
 
@@ -489,17 +511,18 @@ test("appendProcessSignal：runId 标记隔离", () => {
 	assert.ok(!/方案 Y.*<!--run:/.test(raw2), "无 runId 调用不得标记");
 });
 
-test("convlogForeignRuns：多实例混写检测", () => {
+test("convlogForeignRuns：多实例混写检测（并发窗口语义）", () => {
+	// 交错追加：run-a 先写，run-b 在 run-a 首行之后交错写入 → 本实例（run-a）视角检测到并发
 	const dir = tmpDir();
 	appendConv(dir, "user", "本实例用户请求", "run-a");
 	appendConv(dir, "assistant", "本实例回复", "run-a");
-	appendConv(dir, "user", "其他实例的 ctx_knowledge 讨论", "run-b");
+	appendConv(dir, "user", "并发实例的 ctx_knowledge 讨论", "run-b");
 	appendConv(dir, "user", "旧代码无标记行", undefined);
 
-	// 本实例视角：run-b 是外来真实用户行 → 检测到多实例
 	assert.equal(convlogForeignRuns(dir, "run-a"), 1);
-	// 反向视角：run-a 对 run-b 同样是外来
-	assert.equal(convlogForeignRuns(dir, "run-b"), 1);
+	// 反向视角：run-b 首行之后只有无标记行 → run-a 的行是"首行之前的历史"（run-b 视角
+	// 无法区分历史与先启动的并发实例——检测只需一侧命中：先启动方必然看到后者的交错行）
+	assert.equal(convlogForeignRuns(dir, "run-b"), 0);
 	// 无标记行（历史无法归属）不误报
 	const dirLegacy = tmpDir();
 	appendConv(dirLegacy, "user", "旧代码无标记行", undefined);
@@ -517,10 +540,13 @@ test("convlogForeignRuns：多实例混写检测", () => {
 		"run-a",
 	);
 	assert.equal(convlogForeignRuns(dirSpoof, "run-a"), 0);
-	// 真实行尾标记（其他实例）仍必须检出
-	const dirReal = tmpDir();
-	appendConv(dirReal, "user", "其他实例的 ctx_knowledge 讨论", "run-b");
-	assert.equal(convlogForeignRuns(dirReal, "run-a"), 1);
+	// P1 回归：本实例首行之前的**历史**外来行不算（convlog 按 cwd 永久追加，历史行
+	// 恒在 → 旧语义下第二个会话起守卫恒 >0、自动审计永久停摆）
+	const dirHistory = tmpDir();
+	appendConv(dirHistory, "user", "上一会话的用户请求", "run-old");
+	appendConv(dirHistory, "assistant", "上一会话的回复", "run-old");
+	appendConv(dirHistory, "user", "本会话用户请求", "run-new");
+	assert.equal(convlogForeignRuns(dirHistory, "run-new"), 0);
 	// 纯单实例：无外来行
 	const dir2 = tmpDir();
 	appendConv(dir2, "user", "只有本实例", "run-a");
@@ -711,7 +737,7 @@ test("convLogLineCount 统计对话行", () => {
 });
 
 test("hasUncommittedChanges：真实产物判定（git 未提交改动）", () => {
-	// 非 git 仓库（tmp 目录）→ false（无代码产物可审；决策条目由 entriesSinceLastAudit 兜底）
+	// 非 git 仓库（tmp 目录）→ false（对话增量判据兜底触发）
 	const dir = tmpDir();
 	assert.equal(hasUncommittedChanges(dir), false);
 
@@ -783,4 +809,19 @@ test("hasNewConversation：对话增量判据（plan 阶段触发审计）", () 
 	// 新对话 → 再次触发
 	appendConv(dir, "assistant", "好，按方案 B 实现");
 	assert.equal(hasNewConversation(dir, 1), true);
+});
+
+test("clampConvExtractedLine：单位钳制（审计者写文件行号 → 钳制为对话行数，防触发断线）", () => {
+	const dir = tmpDir();
+	appendConv(dir, "user", "一条");
+	appendConv(dir, "assistant", "两条");
+	// 正常值（≤ 对话行数）不受影响
+	writeAuditState(dir, { ...readAuditState(dir), convExtractedLine: 1 });
+	assert.equal(clampConvExtractedLine(dir), 1);
+	// 审计者误写文件行号（> 对话行数，含头注释行）→ 钳制为对话行总数并落盘
+	writeAuditState(dir, { ...readAuditState(dir), convExtractedLine: 500 });
+	assert.equal(clampConvExtractedLine(dir), 2);
+	assert.equal(readAuditState(dir).convExtractedLine, 2);
+	// 钳制后 → 无对话增量不触发（不再断线也不空转）
+	assert.equal(hasNewConversation(dir, clampConvExtractedLine(dir)), false);
 });

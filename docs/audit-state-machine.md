@@ -10,9 +10,9 @@
 | `inFlight` | `false \| true` | 是否有审计 run 在跑（防重入） |
 | `signature.status` | `null \| "passed" \| "blocked" \| "passed-with-warning"` | 最近一次审计结论 |
 | `signature.blockers` | `string[]` | blocked / passed-with-warning 时的具体缺口（价值点） |
-| `signature.at` | `epoch ms` | 签名时间（注入去重键） |
+| `signature.at` | `epoch ms` | 签名时间（注入去重键 + 完成判定键） |
 | `blockedStreak` | `0..3` | 连续 blocked 次数（A2 门禁） |
-| `signatureConvLine` | `number` | 签名覆盖到的 convlog 行号（防签名过期复用） |
+| `signatureConvLine` | `number` | 签名覆盖到的 convlog 对话行数（每次签名都推进到当前行，needsSignoff 用） |
 | `auditFindings` | `string[]` | 审计中间态（审计者边审边追加，被杀/超时也可交付） |
 
 > **已移除状态/字段**：`timeout`（v1.0.15 前存在）——超时直接降级为
@@ -25,12 +25,12 @@
 
 ```
 [无代码产物 且 无对话增量] ── hasUncommittedChanges=false 且 hasNewConversation=false ──▶ 不触发（零噪音）
-[多实例混写]     ── convlogForeignRuns>0 ──────────────────────────────────▶ 跳过 + notify（防错审）
+[多实例混写]     ── convlogForeignRuns>0（并发窗口：本实例首行之后的外来行）──▶ 跳过 + notify（防错审）
 [常规轮]         ── fresh spawn（context:"fork"）→ inFlight=true → 立即返回（不阻塞）
 [交付轮]         ── fresh spawn → inFlight=true → await 签名（300s 上限）
 
 触发后审计者【第零步】AI 判定本轮有无工作（不做正则信号词判定——语义判断交给审计者）：
-  纯咨询（问答无决策无产物）→ 快速退出：推进 convExtractedLine、写 auditFindings=["本轮纯咨询，无审计对象"]、不写 signature、零注入
+  纯咨询（问答无决策无产物）→ 快速退出：推进 convExtractedLine（对话行计数，非文件行号）、写 auditFindings=["本轮纯咨询，无审计对象"]、不写 signature、零注入
   plan 阶段（有决策无 git 产物）→ 提取决策入链 + 审决策质量 + 签名
   实现阶段（有 git 产物）→ 审产物 + 签名
 ```
@@ -38,8 +38,8 @@
 ### T2. 审计者收尾（写入 signature）
 
 ```
-审计通过        → signature={status:"passed"}、signatureConvLine=当前行、blockedStreak=0
-发现缺口        → signature={status:"blocked", blockers:[...]}、signatureConvLine 不推进、blockedStreak+1
+审计通过        → signature={status:"passed", at:now}、signatureConvLine=当前对话行、blockedStreak=0
+发现缺口        → signature={status:"blocked", blockers:[...], at:now}、signatureConvLine 同样推进（签名即推进——修复走 blockers 注入通道，不靠 convLine 滞后）、blockedStreak+1
 交付轮超时      → signature={status:"passed-with-warning", blockers:[超时提示]}、blockedStreak=0
 连续 blocked≥3  → signature={status:"passed-with-warning", blockers: 原缺口}、blockedStreak=0（A2 降级放行）
 ```
@@ -57,8 +57,8 @@
 ```
 signature.blocked / passed-with-warning 且未注入过（injectedSignatureAt≠signature.at）
   → 价值点注入 display:true（用户可观察：审计抓出的缺口）
-auditFindings 非空 且 (inFlight 残留 或 无签名) 且未注入过（injectedInterimAt≠auditStartedAt）
-  → 中间态注入 display:true（审计被杀/超时的部分发现）
+auditFindings 非空 且 inFlight===true 且未注入过（injectedInterimAt≠auditStartedAt）
+  → 中间态注入 display:true（审计被杀/超时的部分发现；纯咨询轮 inFlight=false 不注入——零注入承诺）
 ```
 
 ### T5. 生命周期（fresh spawn，无常驻 run）
@@ -80,21 +80,24 @@ passed-with-warning → blockedStreak=0（降级放行即退出门禁循环）
 
 ## 不变量
 
-1. **签名必覆盖**：`signature` 存在 ⇔ `signatureConvLine ≥ 当前行`（passed 时），blocked 时不推进（待修复）。
+1. **签名必覆盖**：`signature` 存在 ⇔ `signatureConvLine = 签名时的对话行总数`（passed / blocked 都推进——修复经 blockers 注入通道，不靠 convLine 滞后）。
 2. **单写者**：state.json 原子写（tmp+rename）；inFlight 防并发双审计；多实例混写检测跳过；
    签名即释放 inFlight（recordSignature 置 false）；agent_end 对"文件锁残留但内存锁无"兜底释放。
 3. **价值点可观察 / 流程隐藏**：审计抓出的缺口（blockers / auditFindings）display:true；
-   等待/计数/协商等流程信息不呈现给用户。
+   等待/计数/协商等流程信息不呈现给用户；纯咨询轮零注入（inFlight=false 不触发中间态注入）。
 4. **生命周期 = fresh spawn**：每次审计新起 run（context:"fork" 继承主会话上下文），审计完即死；
-   session_shutdown 只清内存锁——无跨会话残留，纯咨询会话零后台 run。
+   session_shutdown 只清内存锁——无跨会话残留，纯咨询轮 spawn 后快速退出（零后台停留）。
 5. **中间态优先**：审计者宁可多写 auditFindings（每步核实即追加），不可最后一起写（被杀即丢）。
 6. **blocked 也是完成**：本轮新签名（signature.at ≥ auditStartedAt 且 !inFlight）即完成判定——
-   blocked 签名不推进 signatureConvLine 但仍是本轮结论，交付轮不得误判为超时（防覆盖真实 blockers）。
+   blocked 仍推进 signatureConvLine，完成判定只看 at，交付轮不得误判为超时（防覆盖真实 blockers）。
+7. **游标单位一致**：convExtractedLine / signatureConvLine 一律为对话行计数（## 👤/## 🤖 行数）；
+   扩展在 agent_end 用 clampConvExtractedLine 钳制（审计者写文件行号超界 → 视为已读完，防触发断线）。
 
 ## 测试锁定
 
 - `blockedStreak`：blocked 递增、passed / passed-with-warning 清零（test/chain-store.test.ts）
 - `needsSignoff` 状态机：无对话→false；有对话→true；签名后→false；blocked 也解除待签名
 - `recordSignature` 释放 inFlight（签名=审计结束，防锁泄漏）
+- `clampConvExtractedLine` 单位钳制：审计者写文件行号超界 → 钳制为对话行总数（防触发断线）
 - 接线守卫：真实产物判定、交付标记先消费（无泄漏）、fresh spawn（无 L0/常驻 run）、
-  价值点 display:true、L2 真实产物门禁、async-complete 持续交付、完成即停
+  价值点 display:true、L2 真实产物门禁、async-complete 持续交付、完成即停、中间态注入判据（inFlight===true）

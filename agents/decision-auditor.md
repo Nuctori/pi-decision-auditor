@@ -137,7 +137,7 @@ acceptanceRole: writer
 
 - `inFlight` 置 `false`（解除去重锁）
 - `lastAuditedId` 推进到链最新条目；`lastAuditAt` 置当前时间戳；`convExtractedLine` 推进到已读对话行
-- **签名语义**：产物通过 → `signature={status:"passed"}` 且 `signatureConvLine` 推进到 convlog 当前行数；发现 blocker → `signature={status:"blocked", blockers:[...可操作缺口]}` 且 **`signatureConvLine` 不推进**（agent_end 会看到未过审并触发修复）
+- **签名语义**：产物通过 → `signature={status:"passed", at:<epoch ms>}` 且 `signatureConvLine` 推进到当前对话行总数（## 👤/## 🤖 行数）；发现 blocker → `signature={status:"blocked", at:<epoch ms>, blockers:[...可操作缺口]}` 且 `signatureConvLine` **同样推进**（签名即推进——修复走 blockers 注入通道，不靠 convLine 滞后）。**signature 必须带 `at`**（= lastAuditAt 的 epoch ms）：扩展按 `signature.at ≥ auditStartedAt` 判定完成，缺 at 会被交付轮误判为超时并覆盖真实 blockers。
 - 不要写 `passed-with-warning`——那是扩展在连续 blocked 达上限（3 次）或交付轮超时时的降级动作，不是你的结论。
 
 这是产物过审的证明：签名后立即停止（完成即停）。

@@ -395,9 +395,10 @@ export function entriesSinceLastAudit(cwd: string): DecisionEntry[] {
 
 /**
  * 是否有未提交的真实产物（git 未提交改动/新增文件，排除扩展自身状态目录）。
- * agent_end 触发判据：无代码产物且无新决策 → 本轮不审计（纯咨询/运维会话零审计零噪音）。
+ * agent_end 触发判据的一半：无代码产物且无对话增量 → 本轮不审计（纯咨询/运维会话零审计零噪音；
+ * 对话增量触发的语义判断交给审计者 AI 第零步，见 hasNewConversation）。
  * 排除 .pi/ 与 .pi-subagents/（审计状态/convlog/链自身写入不算产物，防自触发）。
- * 非 git 仓库或 git 不可用 → false（无代码产物可审；决策条目由 entriesSinceLastAudit 兜底）。
+ * 非 git 仓库或 git 不可用 → false（对话增量判据兜底触发）。
  */
 export function hasUncommittedChanges(cwd: string): boolean {
 	try {
@@ -439,6 +440,21 @@ export function hasNewConversation(
 	} catch {
 		return false;
 	}
+}
+
+/**
+ * 单位钳制（B2 修复）：审计者写 convExtractedLine 可能用文件行号（read 工具自然单位），
+ * 而扩展按 convLogLineCount（只计 ## 👤/## 🤖 对话行）比较——审计者写超（文件行号 >
+ * 对话行数）会让"对话增量"触发永久断线。钳制到对话行数：写超视为"已读完当前全部对话"。
+ */
+export function clampConvExtractedLine(cwd: string): number {
+	const total = convLogLineCount(cwd);
+	const state = readAuditState(cwd);
+	if (state.convExtractedLine > total) {
+		writeAuditState(cwd, { ...state, convExtractedLine: total });
+		return total;
+	}
+	return state.convExtractedLine;
 }
 
 // ---- 对话流日志（目标推导用）----
@@ -593,18 +609,34 @@ export function convLogLineCount(cwd: string): number {
 }
 
 /**
- * 检测 convlog 中"其他 pi 实例的真实用户行"数量（多实例混写检测）。
- * 判定：带 runId 标记、非本实例、且非审计任务注入（Task: 前缀）的 ## 👤 行。
- * >0 → 同一 cwd 下存在其他实例的真实会话 → 自动审计应跳过（run 级过滤 vs 全局
+ * 检测 convlog 中"并发其他 pi 实例的真实用户行"数量（多实例混写检测）。
+ * 判定：本实例首行**之后**（实时交错追加）、带 runId 标记、非本实例、且非审计任务
+ * 注入（Task: 前缀）的 ## 👤 行。
+ * >0 → 同一 cwd 下存在**并发**实例的真实会话 → 自动审计应跳过（run 级过滤 vs 全局
  * 状态机错配时，多实例下审计会错审/旁路，显式降级优于静默错审）。
+ * 本实例首行**之前**的历史行（已结束的旧会话）不算——convlog 按 cwd 永久追加，
+ * 若计入历史行则第二个会话起守卫恒 >0，自动审计永久停摆（实证：本仓 165+97 行
+ * 历史 run 标记曾导致复审永不触发）。并发检测只需一侧命中：先启动的实例会在
+ * 后启动实例首行之后继续追加，先启动方必然检测到后者。
  * 无标记行（旧代码历史/未升级实例）无法归属，不误报。
  */
 export function convlogForeignRuns(cwd: string, ownRunId: string): number {
 	try {
 		const raw = fs.readFileSync(convlogPath(cwd), "utf-8");
+		const lines = raw.split(/\r?\n/);
+		// 本实例首行（行尾锚定的真实标记，防正文伪造）——首行前 = 历史，首行后 = 并发窗口
+		const ownTag = `<!--run:${ownRunId}-->`;
+		let firstOwn = -1;
+		for (let i = 0; i < lines.length; i++) {
+			if (lines[i].trimEnd().endsWith(ownTag)) {
+				firstOwn = i;
+				break;
+			}
+		}
+		if (firstOwn < 0) return 0; // 本实例尚未写入（首条消息之前），无可判定
 		let n = 0;
-		for (const line of raw.split(/\r?\n/)) {
-			const t = line.trim();
+		for (let i = firstOwn + 1; i < lines.length; i++) {
+			const t = lines[i].trim();
 			if (!t.startsWith("## 👤")) continue; // 只看用户行
 			// 真实标记由 appendConv 追加在行尾——锚定行尾取真标记，防用户正文内嵌
 			// `<!--run:xxx-->` 文本被误判为外来实例（伪造即可关闭审计门禁）
@@ -622,4 +654,4 @@ export function convlogForeignRuns(cwd: string, ownRunId: string): number {
 
 // ---- 待审增量记账（增量累积唤起）----
 // 已删除：L0 独立层（accumulateRound/checkAuditDue/AuditConfig）——单层审计在 agent_end
-// 直接按真实产物判定（hasUncommittedChanges or entriesSinceLastAudit）触发，无需累积记账。
+// 直接按两个便宜信号判定（hasUncommittedChanges or hasNewConversation）触发，无需累积记账。

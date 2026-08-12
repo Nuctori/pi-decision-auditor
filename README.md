@@ -76,8 +76,8 @@ Requires **pi-subagents** (spawns the auditor). See [Installation](#installation
 
 ```text
 each agent_end (when real artifacts exist)
-  └─ real artifacts? (git changes / new decisions — .pi state excluded) → audit
-     · pure chat / ops rounds (no code, no decisions) → zero noise, no audit
+  └─ real artifacts? (git changes — .pi state excluded — or new conversation) → spawn auditor
+     · auditor AI judges (step zero): pure chat / no decision / no artifacts → quick-exit, zero injection
   └─ normal rounds: async — agent_end does NOT block
      · fresh spawn auditor (context:"fork" — inherits this session's context)
      · one task = capture decisions into chain + audit artifacts + sign
@@ -107,7 +107,7 @@ L2 — delivery review (on "submit/publish/merge/deploy")
 | **Single-layer pairing** | one audit per round — capture decisions into chain + audit artifacts + sign, in a single fresh-spawn run (context:"fork" inherits session context) |
 | **Not dependent on main agent** | decisions extracted from convlog, facts verified from repo, by an independent agent |
 | **Decision chain** | default `.pi/decision-auditor/chain.md` (private, no git pollution); `PI_PAIR_CHAIN_PUBLIC=1` → `docs/decisions/chain.md` (team-visible) |
-| **Fresh-spawn lifecycle** | audit run ends when the audit ends — no resident process, no residue after session shutdown; pure-chat rounds spawn nothing |
+| **Fresh-spawn lifecycle** | audit run ends when the audit ends — no resident process, no residue after session shutdown; pure-chat rounds spawn, quick-exit with zero injection |
 | **Adversarial, calibrated** | 7-dimension attack (5 elegance + mechanism integrity + runtime-mode behavior), calibrated on real defects the same-model auditor missed |
 | **Cost control** | real-artifact gating (no empty audits) + once-per-delivery L2 + process-log intent channel; CI bench regression guard on wall time |
 | **cwd adaptive** | finds the real project root from any start dir (Cargo.toml/package.json/.git etc) |
