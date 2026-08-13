@@ -107,3 +107,17 @@ passed-with-warning → blockedStreak=0（降级放行即退出门禁循环）
 - `clampConvExtractedLine` 单位钳制：审计者写文件行号超界 → 钳制为对话行总数（防触发断线）
 - 接线守卫：真实产物判定、交付标记先消费（无泄漏）、fresh spawn（无 L0/常驻 run）、
   价值点 display:true、L2 真实产物门禁、async-complete 持续交付、完成即停、中间态注入判据（inFlight===true）
+
+## 审计者子进程 state 字段责任表（2026-08-13 并发覆盖事故后）
+
+state.json 是共享文件（extension 与审计者子进程并发读写）。M3 修复分两层：extension 侧 writeAuditState mtime 乐观锁（冲突放弃）；审计者子进程侧【state 写入纪律】（字段级合并写——write 前 read 最新、只改自己字段、其他原样保留、write 后 read 验证）。
+
+| 字段 | 审计者子进程（write 工具）| extension（writeAuditState）|
+|---|---|---|
+| auditFindings | ✅ 负责（中间态追加/占位替换）| 只读（注入/降级读取）|
+| inFlight | ✅ 负责（中间态保持 true，收尾 false）| ✅ 锁管理（spawn 前置位/清残留）|
+| convExtractedLine | ✅ 负责（推进）| 钳制（读）|
+| signature / signatureConvLine / lastAuditedId / lastAuditAt | ✅ 负责（收尾写）| 只读 + 降级写（超时 passed-with-warning）|
+| 其他字段 | 禁止覆盖 | 只读 |
+
+冲突检测：审计者 write 前 read，若目标字段已被推进（值 > read 时）→ 基于最新值，绝不回退覆盖。

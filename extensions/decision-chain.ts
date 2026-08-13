@@ -194,7 +194,10 @@ function buildIncrementalAuditTask(cwd: string): string {
 		"【窗口约束】常规轮你在 agent_end 之后异步运行（主 agent 已结束本轮，不阻塞等待你）——本轮产物已完整（不会有后续产物），直接给结论；发现 blocker 就给可操作的 blockers。交付轮（用户提交/发布/merge 时）主 agent 会同步等你的签名，此时尽快收尾：若审计超时，主 agent 会降级放行并把你的 blockers 注入下轮。",
 	);
 	lines.push(
-		"【中间态交付（最重要，任何时刻被杀都要有产出）】用 write 更新 state.json 时**先写中间态再继续**：启动后立即把 auditFindings **替换**为占位（如 ['审计开始']）——**清掉上一轮的旧 findings**（超时降级会把 findings 当 blockers 注入，陈旧/已解决内容会污染价值点）；之后每完成一步核实（推导目标 ✓ / 提取决策 ✓ / 读 diff ✓ / 逐维度进攻 ✓），就把该步的已确认事实与已发现缺口**追加**进 auditFindings。你随时可能被超时终止（SIGINT 强杀，收尾来不及）——已写入的 auditFindings 就是你的部分审计结果，主 agent 下轮会读到并交付给用户。**宁可中间态多写，不可最后一起写**：最后一步签名（passed/blocked）只是收尾，auditFindings 才是价值交付的主通道。**中间态写入必须保留 inFlight=true**（仅收尾签名时写 inFlight=false）——扩展按 inFlight===true 判定「审计被中断」并注入中间态，提前置 false 会让被杀后的 findings 无法交付。",
+		"【state 写入纪律（最高优先，事故教训：2026-08-13 reviewer 实证审查期间 signatureConvLine 3139→3159 被并发改写——审计者 write 全量覆盖了 extension 并发推进的字段）】state.json 是共享文件（extension 与审计者子进程并发读写）。每次 write 前**必须 read 最新内容**；write 的 content = **最新原文 + 只修改你负责的字段**（中间态：auditFindings/inFlight；推进：convExtractedLine；收尾：signature/lastAuditedId/lastAuditAt/signatureConvLine），**其他字段原样保留**——禁止全量覆盖任何你没在最新 read 里见过的字段；write 后**立即 read 验证**你的字段生效且其他字段未被你的 write 改动；若 read 发现你负责的字段已被 extension 或他人推进（值 > 你 read 时的值）→ 基于最新值继续，绝不回退覆盖。**宁可中间态多写，不可覆盖他人字段**。",
+	);
+	lines.push(
+		"【中间态交付（最重要，任何时刻被杀都要有产出）】用 write 更新 state.json 时**先写中间态再继续**（按【state 写入纪律】：只改 auditFindings/inFlight 两字段，其他字段原样保留）：启动后立即把 auditFindings **替换**为占位（如 ['审计开始']）——**清掉上一轮的旧 findings**（超时降级会把 findings 当 blockers 注入，陈旧/已解决内容会污染价值点）；之后每完成一步核实（推导目标 ✓ / 提取决策 ✓ / 读 diff ✓ / 逐维度进攻 ✓），就把该步的已确认事实与已发现缺口**追加**进 auditFindings。你随时可能被超时终止（SIGINT 强杀，收尾来不及）——已写入的 auditFindings 就是你的部分审计结果，主 agent 下轮会读到并交付给用户。**宁可中间态多写，不可最后一起写**：最后一步签名（passed/blocked）只是收尾，auditFindings 才是价值交付的主通道。**中间态写入必须保留 inFlight=true**（仅收尾签名时写 inFlight=false）——扩展按 inFlight===true 判定「审计被中断」并注入中间态，提前置 false 会让被杀后的 findings 无法交付。",
 	);
 	lines.push(
 		"【完成即停（明确边界）】一旦你写完了最终 signature（passed/blocked），审计即结束——**立即停止，不再追加、不再验证、不再扩大范围**。签名后的一切继续都是浪费。任何遗留疑问写进 blockers/auditFindings，留给下一轮会话结合用户需求再继续。",
@@ -232,7 +235,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 		`2. 识别主 agent 实际做的关键决策（方案取舍/架构改动/采纳的用户要求），用 write **append** 到 ${chainPath(cwd)}（## D-XXX: 标题 [Accepted]，Context/Decision/Rationale/Alternatives/Confidence/Date，编号 = 现有最大 D-NNN+1）。不记：命名、格式、单文件实现细节。**链写入纪律（事故教训：2026-08-13 曾误用 write 覆盖致 D-001~D-013 丢失）**：写前必须用 read 读全链，write 的 content 必须 = 原文完整内容 + 新条目追加（一个字符都不能少），禁止整体重写/精简/截断；无把握时宁可不写（留 auditFindings）也不要覆盖。`,
 	);
 	lines.push(
-		"3. 用 write 更新 state.json：convExtractedLine 推进到当前对话行总数（单位：只数 `## 👤`/`## 🤖` 开头的行，不是文件行号；写错单位会被扩展钳制，但写对可避免重审）。无决策也推进。",
+		"3. 用 write 更新 state.json：convExtractedLine 推进到当前对话行总数（单位：只数 `## 👤`/`## 🤖` 开头的行，不是文件行号；写错单位会被扩展钳制，但写对可避免重审）。无决策也推进。（按【state 写入纪律】：只改 convExtractedLine 字段，其他字段原样保留；若 read 发现 convExtractedLine 已被推进 > 你的值 → 基于最新值继续）",
 	);
 	lines.push("");
 	lines.push("【第二步：推导目标】");
@@ -278,7 +281,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 	lines.push("【输出】逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 产物总评。");
 	lines.push("");
 	lines.push(
-		`【收尾】写 signature **之前**先用 read 看 state.json：若已有 signature 且 status==="passed-with-warning" **且 at ≥ 本轮 auditStartedAt**（at 是本轮内主 agent 才因交付轮超时降级——陈旧降级（上轮遗留/blockedStreak≥3）不跳过，照常签名，否则签名流永久停滞：blockers 只留 findings、下轮被替换占位抹除）→ **不再写签名**（避免覆盖降级结论，仅保留 auditFindings 后停止）。否则用 write 更新 ${auditStatePath(cwd)}：inFlight=false，lastAuditedId 推进，lastAuditAt 置当前。产物通过 → signature={status:"passed", at:<当前 epoch ms>}、signatureConvLine 推进到当前对话行总数；发现 blocker → signature={status:"blocked", at:<当前 epoch ms>, blockers:[...具体可操作缺口]}、signatureConvLine 同样推进（签名即推进——修复走 blockers 注入通道，不靠 convLine 滞后）。**signature 必须带 at 字段**（值 = lastAuditAt，epoch ms）——扩展按 signature.at ≥ auditStartedAt 判定审计完成，缺 at 会被交付轮误判为超时。**保留本轮 auditFindings（不删）**。写完后立即停止。`,
+		`【收尾】写 signature **之前**先用 read 看 state.json（按【state 写入纪律】：收尾只改 signature/lastAuditedId/lastAuditAt/signatureConvLine 字段，auditFindings 保留原值不删不覆盖；若 read 发现 signatureConvLine 已被 extension 推进（> 你 read 时的值）→ 基于最新值推进，绝不回退覆盖）：若已有 signature 且 status==="passed-with-warning" **且 at ≥ 本轮 auditStartedAt**（at 是本轮内主 agent 才因交付轮超时降级——陈旧降级（上轮遗留/blockedStreak≥3）不跳过，照常签名，否则签名流永久停滞：blockers 只留 findings、下轮被替换占位抹除）→ **不再写签名**（避免覆盖降级结论，仅保留 auditFindings 后停止）。否则用 write 更新 ${auditStatePath(cwd)}：inFlight=false，lastAuditedId 推进，lastAuditAt 置当前。产物通过 → signature={status:"passed", at:<当前 epoch ms>}、signatureConvLine 推进到当前对话行总数；发现 blocker → signature={status:"blocked", at:<当前 epoch ms>, blockers:[...具体可操作缺口]}、signatureConvLine 同样推进（签名即推进——修复走 blockers 注入通道，不靠 convLine 滞后）。**signature 必须带 at 字段**（值 = lastAuditAt，epoch ms）——扩展按 signature.at ≥ auditStartedAt 判定审计完成，缺 at 会被交付轮误判为超时。**保留本轮 auditFindings（不删）**。写完后立即停止。`,
 	);
 	lines.push(
 		"写权限仅限：append chain.md + 改 state.json。禁止修改任何其他文件。",
