@@ -321,13 +321,41 @@ export function readAuditState(cwd: string): AuditState {
 	}
 }
 
-/** 写审计状态（原子写）。 */
-export function writeAuditState(cwd: string, state: AuditState): void {
+/** state.json 当前 mtime（epoch ms）；不存在返回 null。多写者乐观锁用。 */
+export function auditStateMtime(cwd: string): number | null {
+	try {
+		return fs.statSync(auditStatePath(cwd)).mtimeMs;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * 写审计状态（原子写 + mtime 乐观锁）。
+ * expectedMtime 提供时：写前校验当前 mtime 是否仍等于它——不匹配（其他写者已改，
+ * read-modify-write 竞态）→ 放弃本次提交（防丢失更新），console.warn 后返回 false。
+ * 无 expectedMtime（新初始化）照写。返回是否写入。
+ */
+export function writeAuditState(
+	cwd: string,
+	state: AuditState,
+	expectedMtime?: number | null,
+): boolean {
 	const file = auditStatePath(cwd);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
+	if (expectedMtime !== undefined) {
+		const cur = auditStateMtime(cwd);
+		if (cur !== expectedMtime) {
+			console.warn(
+				`audit state 冲突，放弃提交（多写者）: ${file} cur=${cur} expected=${expectedMtime}`,
+			);
+			return false;
+		}
+	}
 	const tmp = `${file}.tmp`;
 	fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf-8");
 	fs.renameSync(tmp, file);
+	return true;
 }
 
 /**
@@ -345,23 +373,32 @@ export function needsSignoff(cwd: string): boolean {
 	}
 }
 
-/** 记录本轮审计签名（agent 完成审计阶段后调用）。签名即审计结束：释放 inFlight 锁。 */
+/** 记录本轮审计签名（agent 完成审计阶段后调用）。签名即审计结束：释放 inFlight 锁。
+ * 多写者防护：读后写前校验 mtime，冲突（他写者已改）→ 重读最新重试一次。 */
 export function recordSignature(
 	cwd: string,
 	sig: Omit<AuditSignature, "at">,
 ): void {
-	const state = readAuditState(cwd);
-	const totalLines = convLogLineCount(cwd);
-	// A2 门禁：连续 blocked 递增；passed / 降级放行后清零。（timeout 态已移除，见 docs/audit-state-machine.md）
-	const blockedStreak = sig.status === "blocked" ? state.blockedStreak + 1 : 0;
-	writeAuditState(cwd, {
-		...state,
-		// 签名 = 审计结束：释放文件锁（防 decision_signoff 路径泄漏 inFlight → 后续审计永久停摆）
-		inFlight: false,
-		signature: { ...sig, at: Date.now() },
-		signatureConvLine: totalLines,
-		blockedStreak,
-	});
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const state = readAuditState(cwd);
+		const mtime = auditStateMtime(cwd);
+		const totalLines = convLogLineCount(cwd);
+		// A2 门禁：连续 blocked 递增；passed / 降级放行后清零。（timeout 态已移除，见 docs/audit-state-machine.md）
+		const blockedStreak = sig.status === "blocked" ? state.blockedStreak + 1 : 0;
+		const ok = writeAuditState(
+			cwd,
+			{
+				...state,
+				// 签名 = 审计结束：释放文件锁（防 decision_signoff 路径泄漏 inFlight → 后续审计永久停摆）
+				inFlight: false,
+				signature: { ...sig, at: Date.now() },
+				signatureConvLine: totalLines,
+				blockedStreak,
+			},
+			mtime,
+		);
+		if (ok || attempt > 0) return; // 冲突重试一次仍失败 → 放弃（防覆盖他写者）
+	}
 }
 
 /**
@@ -372,14 +409,19 @@ export function recordSignature(
 export function resetForSessionStart(cwd: string): void {
 	try {
 		const state = readAuditState(cwd);
+		const mtime = auditStateMtime(cwd);
 		const totalLines = convLogLineCount(cwd);
-		writeAuditState(cwd, {
-			...state,
-			// 推进到当前行数 = 视为已覆盖旧会话的对话（不触发 needsSignoff）
-			signatureConvLine: totalLines,
-			// 保留上次签名状态作参考，但不再触发待签名
-			inFlight: false,
-		});
+		writeAuditState(
+			cwd,
+			{
+				...state,
+				// 推进到当前行数 = 视为已覆盖旧会话的对话（不触发 needsSignoff）
+				signatureConvLine: totalLines,
+				// 保留上次签名状态作参考，但不再触发待签名
+				inFlight: false,
+			},
+			mtime,
+		);
 	} catch {
 		/* noop */
 	}

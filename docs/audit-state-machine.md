@@ -87,7 +87,7 @@ passed-with-warning → blockedStreak=0（降级放行即退出门禁循环）
 ## 不变量
 
 1. **签名必覆盖**：`signature` 存在 ⇔ `signatureConvLine = 签名时的对话行总数`（passed / blocked 都推进——修复经 blockers 注入通道，不靠 convLine 滞后）。
-2. **单写者**：state.json 原子写（tmp+rename）；inFlight 防并发双审计；多实例混写检测跳过；
+2. **单写者**：state.json 原子写（tmp+rename）+ **mtime 乐观锁**（writeAuditState 带 expectedMtime——读后写前校验，他写者已改 → 放弃提交防丢失更新；recordSignature 冲突重试一次；其余写点冲突放弃并 warn）；inFlight 防并发双审计；多实例混写检测跳过；
    签名即释放 inFlight（recordSignature 置 false）；agent_end 对"文件锁残留但内存锁无"兜底释放。
 3. **价值点可观察 / 流程隐藏**：审计抓出的缺口（blockers / auditFindings）display:true；
    等待/计数/协商等流程信息不呈现给用户；纯咨询轮零注入（inFlight=false 不触发中间态注入）。

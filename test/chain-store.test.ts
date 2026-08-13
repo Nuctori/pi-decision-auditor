@@ -13,6 +13,7 @@ import {
 	appendDecision,
 	appendConv,
 	appendProcessSignal,
+	auditStateMtime,
 	auditStatePath,
 	chainPath,
 	clampConvExtractedLine,
@@ -38,7 +39,6 @@ import {
 	shouldInjectInterimFindings,
 	writeAuditState,
 } from "../lib/chain-store.js";
-
 function tmpDir(): string {
 	return fs.mkdtempSync(path.join(os.tmpdir(), "chain-store-test-"));
 }
@@ -238,6 +238,47 @@ test("坏状态文件容错", () => {
 	assert.equal(state.convExtractedLine, 0);
 });
 
+test("writeAuditState mtime 乐观锁：匹配写、冲突放弃（M3 单写者）", () => {
+	const dir = tmpDir();
+	// 初始化（无 expectedMtime）
+	assert.equal(
+		writeAuditState(dir, { ...readAuditState(dir), inFlight: true }),
+		true,
+	);
+	assert.equal(fs.existsSync(auditStatePath(dir)), true);
+
+	// 正确 expectedMtime → 写入成功
+	const m1 = auditStateMtime(dir);
+	assert.equal(typeof m1, "number");
+	assert.equal(
+		writeAuditState(
+			dir,
+			{ ...readAuditState(dir), inFlight: false },
+			m1,
+		),
+		true,
+	);
+	assert.equal(readAuditState(dir).inFlight, false);
+
+	// 模拟多写者竞态：读者记录旧 mtime → 他写者（无校验）先写入 → 读者用旧 mtime 提交被拒
+	const staleMtime = auditStateMtime(dir); // 读者读时的 mtime
+	writeAuditState(dir, { ...readAuditState(dir), inFlight: true }); // 他写者无校验写入（mtime 变了）
+	const rejected = writeAuditState(
+		dir,
+		{ ...readAuditState(dir), lastAuditedId: "D-099" }, // 读者基于旧快照的修改
+		staleMtime, // 旧 mtime
+	);
+	assert.equal(rejected, false); // 冲突 → 放弃提交
+	// 文件保留他写者的内容（inFlight=true），读者的 D-099 未覆盖
+	const final = readAuditState(dir);
+	assert.equal(final.inFlight, true);
+	assert.equal(final.lastAuditedId, null);
+});
+
+test("auditStateMtime：不存在返回 null", () => {
+	const dir = tmpDir();
+	assert.equal(auditStateMtime(dir), null);
+});
 // L0 独立层已删除（单层审计）：accumulateRound/checkAuditDue 记账与节流测试随之移除——
 // agent_end 按两个便宜信号判定（hasUncommittedChanges or hasNewConversation）触发审计，
 // 语义判断（有无决策性工作）交给审计者 AI 第零步。

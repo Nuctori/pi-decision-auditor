@@ -12,6 +12,7 @@ import {
 	appendConv,
 	appendDecision,
 	appendProcessSignal,
+	auditStateMtime,
 	auditStatePath,
 	chainPath,
 	clampConvExtractedLine,
@@ -314,10 +315,14 @@ async function waitForAuditCompletion(
 			// 阻塞时长在轮询循环内写（print 模式下 handler 尾段可能不执行，这里最可靠）
 			if (state.auditStartedAt) {
 				try {
-					writeAuditState(cwd, {
-						...readAuditState(cwd),
-						lastAuditDurationMs: Date.now() - state.auditStartedAt,
-					});
+					writeAuditState(
+						cwd,
+						{
+							...readAuditState(cwd),
+							lastAuditDurationMs: Date.now() - state.auditStartedAt,
+						},
+						auditStateMtime(cwd),
+					);
 				} catch {
 					/* noop */
 				}
@@ -327,6 +332,7 @@ async function waitForAuditCompletion(
 				blockers: state.signature.blockers,
 			};
 		}
+		await sleep(pollMs);
 		await sleep(pollMs);
 	}
 	return null;
@@ -812,10 +818,14 @@ export default function (pi: ExtensionAPI): void {
 	/** 记录审计阻塞时长（agent_end 从触发到签名，CI 跑分用）。 */
 	function recordAuditDuration(cwd: string, t0: number): void {
 		try {
-			writeAuditState(cwd, {
-				...readAuditState(cwd),
-				lastAuditDurationMs: Date.now() - t0,
-			});
+			writeAuditState(
+				cwd,
+				{
+					...readAuditState(cwd),
+					lastAuditDurationMs: Date.now() - t0,
+				},
+				auditStateMtime(cwd),
+			);
 		} catch {
 			/* noop */
 		}
@@ -854,11 +864,15 @@ export default function (pi: ExtensionAPI): void {
 			// state.json 假 inFlight 挂 2.5h，纯咨询轮 return 前无人清）
 			// 清锁后重读 state：spawn 分支必须用干净快照（旧快照 inFlight=true 会让本轮 spawn 被跳过）
 			if (shouldClearStaleLock(state, hasInFlight(root))) {
-				writeAuditState(root, {
-					...readAuditState(root),
-					inFlight: false,
-					convExtractedLine: clampConvExtractedLine(root),
-				});
+				writeAuditState(
+					root,
+					{
+						...readAuditState(root),
+						inFlight: false,
+						convExtractedLine: clampConvExtractedLine(root),
+					},
+					auditStateMtime(root),
+				);
 				state = readAuditState(root);
 			}
 			if (!hasWork) return;
@@ -900,12 +914,16 @@ export default function (pi: ExtensionAPI): void {
 				// 注意：**不写 lastAuditAt**——它必须是「上次审计收尾时间」（审计窗口起点，
 				// prompt 用 signature.at / lastAuditAt 定位 git log --since）；spawn 时覆盖为
 				// 当前时间会让本轮提交全在窗口外（安全审查 HIGH find#1）
-				writeAuditState(root, {
-					...readAuditState(root),
-					inFlight: true,
-					auditStartedAt: Date.now(),
-					convExtractedLine: clampConvExtractedLine(root),
-				});
+				writeAuditState(
+					root,
+					{
+						...readAuditState(root),
+						inFlight: true,
+						auditStartedAt: Date.now(),
+						convExtractedLine: clampConvExtractedLine(root),
+					},
+					auditStateMtime(root),
+				);
 				try {
 					await readyPromise;
 					const task = buildIncrementalAuditTask(root);
@@ -932,10 +950,14 @@ export default function (pi: ExtensionAPI): void {
 					inFlightAudits.delete(root);
 					stopAuditBreath(); // spawn 失败：灯灭
 					// spawn 失败：释放 inFlight 锁 + 产物未过审标记 blocked
-					writeAuditState(root, {
-						...readAuditState(root),
-						inFlight: false,
-					});
+					writeAuditState(
+						root,
+						{
+							...readAuditState(root),
+							inFlight: false,
+						},
+						auditStateMtime(root),
+					);
 					recordSignature(root, {
 						status: "blocked",
 						blockers: ["审计触发失败，产物未过审"],
