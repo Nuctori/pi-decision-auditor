@@ -31,10 +31,10 @@ import {
 	renderEntry,
 	resetForSessionStart,
 	resolveProjectRoot,
+	shouldClearStaleLock,
 	shouldInjectInterimFindings,
 	writeAuditState,
 } from "../lib/chain-store.js";
-
 // ---- pi-subagents RPC 通道（进程内事件总线）----
 const RPC_READY = "subagents:rpc:v1:ready";
 const RPC_REQUEST = "subagents:rpc:v1:request";
@@ -787,7 +787,7 @@ export default function (pi: ExtensionAPI): void {
 			// 防「agent_end 中断后 inFlight=true 假挂起」永久残留——实证：17:41:45 提交轮 spawn 中断，
 			// state.json 假 inFlight 挂 2.5h，纯咨询轮 return 前无人清）
 			// 清锁后重读 state：spawn 分支必须用干净快照（旧快照 inFlight=true 会让本轮 spawn 被跳过）
-			if (state.inFlight && !hasInFlight(root)) {
+			if (shouldClearStaleLock(state, hasInFlight(root))) {
 				writeAuditState(root, {
 					...readAuditState(root),
 					inFlight: false,

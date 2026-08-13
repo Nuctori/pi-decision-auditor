@@ -34,6 +34,7 @@ import {
 	recordSignature,
 	resetForSessionStart,
 	resolveProjectRoot,
+	shouldClearStaleLock,
 	shouldInjectInterimFindings,
 	writeAuditState,
 } from "../lib/chain-store.js";
@@ -430,9 +431,14 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		"session_start 必须初始化 gatedHead 基线（非 git 仓库不设门禁）",
 	);
 	// M4：残留锁兜底（文件锁在但内存锁无 → 释放，防审计永久停摆）
+	// 行为级：判据走 shouldClearStaleLock 纯函数（lib 单测锁定：清锁不依赖 hasWork 信号）；
+	// 位置语义：清锁块必须先于 `if (!hasWork) return;`——纯咨询轮也清残留锁
+	// （v1.0.21 修复的实证：17:41:45 spawn 中断后假 inFlight 挂 2.5h，纯咨询轮 return 前无人清）
+	const staleLockCall = src.indexOf("shouldClearStaleLock(state, hasInFlight(root))");
+	const hasWorkReturn = src.indexOf("if (!hasWork) return;");
 	assert.ok(
-		src.includes("state.inFlight && !hasInFlight(root)"),
-		"agent_end 必须有残留锁兜底（审计者被强杀未写收尾时释放文件锁）",
+		staleLockCall !== -1 && hasWorkReturn !== -1 && staleLockCall < hasWorkReturn,
+		"残留锁兜底必须先于 hasWork 判断（纯咨询轮 return 前也清锁）——且必须走 shouldClearStaleLock 纯函数（行为级测试在 lib 单测）",
 	);
 	// 完成即停：审计者 prompt 必须含明确停止边界
 	assert.ok(
@@ -881,6 +887,22 @@ test("shouldInjectInterimFindings：中间态注入判据（B1 行为级 + 边�
 		false,
 	);
 });
+
+test("shouldClearStaleLock：残留锁兜底判据（v1.0.21 行为级）", () => {
+		const base = {
+			...readAuditState(tmpDir()),
+			inFlight: true,
+		};
+		// 文件锁在 + 内存锁无（审计者被强杀未写收尾）→ 清锁
+		assert.equal(shouldClearStaleLock(base, false), true);
+		// 文件锁在 + 内存锁也在（审计真在跑）→ 不清锁（防并发双审计）
+		assert.equal(shouldClearStaleLock(base, true), false);
+		// 无文件锁 → 不清锁
+		assert.equal(shouldClearStaleLock({ ...base, inFlight: false }, false), false);
+		// 纯咨询轮（无任何 work 信号）→ 判据与 hasWork 无关，残留锁仍清——
+		// 位置语义（先于 hasWork return）由接线守卫 indexOf 顺序断言锁定
+		assert.equal(shouldClearStaleLock(base, false), true);
+	});
 
 test("gitHead：交付门禁的客观信号（HEAD 变化）", () => {
 	const dir = tmpDir();

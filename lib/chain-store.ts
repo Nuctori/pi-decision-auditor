@@ -482,6 +482,19 @@ export function shouldInjectInterimFindings(
 }
 
 /**
+ * 残留锁兜底判据（v1.0.21 行为级测试目标，从 agent_end 抽出的纯函数）：
+ * 文件锁 inFlight=true 但内存锁已无（审计者被强杀未写收尾）→ 应释放文件锁。
+ * 位置语义（先于 hasWork 判断执行——纯咨询轮也清锁）由接线守卫的 indexOf 顺序断言锁定，
+ * 这里只锁定判据本身：清锁**不依赖** hasWork 信号（清锁≠spawn，不违反零噪音承诺）。
+ */
+export function shouldClearStaleLock(
+	state: AuditState,
+	hasInMemoryLock: boolean,
+): boolean {
+	return state.inFlight === true && !hasInMemoryLock;
+}
+
+/**
  * 当前 git HEAD（客观信号）：交付门禁用「本轮产生了提交」判定，不用词表/模式匹配
  * （完工是语义判断，模式匹配不可靠——v1.0.17 废弃 hasNewDecisionSignals 的先例；
  * 问句/任意措辞天然免疫：不产生提交就不触发）。非 git 仓库返回 null（无门禁）。
