@@ -478,17 +478,20 @@ const AUDIT_BREATH_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 let cachedAuditUi: ExtensionUIContext | null = null;
 let auditBreathTimer: ReturnType<typeof setInterval> | null = null;
 let auditBreathStart = 0;
+let auditBreathCwd: string | null = null; // cwd 隔离：多实例并发审计时只灭自己的灯（D2）
 
 function auditStatusText(secs: number): string {
-	const frame = AUDIT_BREATH_FRAMES[Math.floor(secs) % AUDIT_BREATH_FRAMES.length];
+	const frame =
+		AUDIT_BREATH_FRAMES[Math.floor(secs) % AUDIT_BREATH_FRAMES.length];
 	return UI_LANG === "en"
 		? `${frame} pair audit in progress (${secs}s)`
 		: `${frame} 结对审计进行中（${secs}s）`;
 }
 
 /** 亮灯：spawn 审计者后调用（常规轮异步/门禁轮同步共用）。 */
-function startAuditBreath(ui: ExtensionUIContext): void {
+function startAuditBreath(ui: ExtensionUIContext, cwd: string): void {
 	cachedAuditUi = ui;
+	auditBreathCwd = cwd;
 	auditBreathStart = Date.now();
 	try {
 		ui.setStatus(AUDIT_STATUS_KEY, auditStatusText(0));
@@ -506,8 +509,15 @@ function startAuditBreath(ui: ExtensionUIContext): void {
 	}, 1000);
 }
 
-/** 灭灯：审计完成（签名/async-complete）/ 超时降级 / spawn 失败 / 会话结束。 */
-function stopAuditBreath(): void {
+/**
+ * 灭灯：审计完成（签名/async-complete）/ 超时降级 / spawn 失败 / 会话结束。
+ * cwd 可选：async-complete 传完成审计的 cwd，仅当与亮灯 cwd 匹配才灭（多实例隔离，D2）；
+ * 其余出口（门禁完成/超时/spawn 失败/会话结束）不传 = 无条件灭。
+ */
+function stopAuditBreath(cwd?: string): void {
+	if (cwd !== undefined && auditBreathCwd !== null && cwd !== auditBreathCwd) {
+		return; // 完成的是其他 cwd 的审计，不动当前灯（多实例并发）
+	}
 	if (auditBreathTimer) {
 		clearInterval(auditBreathTimer);
 		auditBreathTimer = null;
@@ -518,6 +528,7 @@ function stopAuditBreath(): void {
 		/* noop */
 	}
 	cachedAuditUi = null;
+	auditBreathCwd = null;
 }
 
 export default function (pi: ExtensionAPI): void {
@@ -916,7 +927,7 @@ export default function (pi: ExtensionAPI): void {
 						startedAt: Date.now(),
 					});
 					// 呼吸灯亮：审计已 spawn（常规轮异步/门禁轮同步共用）
-					startAuditBreath(ctx.ui);
+					startAuditBreath(ctx.ui, root);
 				} catch {
 					inFlightAudits.delete(root);
 					stopAuditBreath(); // spawn 失败：灯灭
@@ -1007,7 +1018,7 @@ export default function (pi: ExtensionAPI): void {
 		}
 		// 持续交付：找到完成审计的 cwd → 若审计者已写 blocked → 立即交付主 agent
 		if (completedCwd) {
-			stopAuditBreath(); // 异步轮审计完成：灯灭
+			stopAuditBreath(completedCwd); // 异步轮审计完成：灯灭（cwd 隔离，D2）
 			try {
 				const st = readAuditState(completedCwd);
 				if (

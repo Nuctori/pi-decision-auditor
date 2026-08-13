@@ -165,6 +165,7 @@ Lifecycle rules: every audit is a fresh-spawn run (`context:"fork"` inheriting t
 | `PI_PAIR_CHAIN_PUBLIC=1` | off | write chain to `docs/decisions/chain.md` (team-visible); default is `.pi/decision-auditor/chain.md` (private) |
 | `PI_PAIR_PROCESS_LOG=0` | on | disable intent-signal process log (CI bench baseline) |
 | `PI_PAIR_PROJECT_ROOT` | — | explicit single authoritative project root (cross-drive / complex setups); default auto-detects upward from cwd |
+| `PI_PAIR_LANG=en` | zh | TUI audit status language: `en` for English, default Chinese (matches existing UI copy) |
 
 ## Decision chain format
 

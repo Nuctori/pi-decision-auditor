@@ -164,6 +164,7 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 | `PI_PAIR_CHAIN_PUBLIC=1` | 关 | 决策链写 `docs/decisions/chain.md`（团队可见）；默认写 `.pi/decision-auditor/chain.md`（私有） |
 | `PI_PAIR_PROCESS_LOG=0` | 开 | 关闭意图信号过程日志（CI 跑分基线） |
 | `PI_PAIR_PROJECT_ROOT` | — | 显式指定单一权威项目根（跨盘符/复杂场景）；默认从 cwd 向上自动探测 |
+| `PI_PAIR_LANG=en` | 中文 | TUI 审计状态语言：`en` 切英文，默认中文（与现有 UI 文案一致） |
 
 ## 决策链格式
 
