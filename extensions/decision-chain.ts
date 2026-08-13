@@ -5,6 +5,7 @@
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
@@ -466,6 +467,59 @@ async function triggerDeliveryAudit(
 
 const deliveryAuditInFlight = new Set<string>();
 
+// ---- 审计状态呼吸灯（TUI footer 常驻指示）：spawn 亮、完成/失败/超时灭 ----
+// setStatus(key, text) 是 footer 持久状态（传 undefined 清除）；无 i18n 框架，
+// 最小双语：PI_PAIR_LANG=en 切英文，默认中文（与现有 notify 文案一致）。
+const UI_LANG: "zh" | "en" = process.env.PI_PAIR_LANG === "en" ? "en" : "zh";
+const AUDIT_STATUS_KEY = "pi-pair-audit";
+// 呼吸帧（转圈），1s 间隔轮换
+const AUDIT_BREATH_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+// 缓存 ui 引用：async-complete 回调无 ctx（只有 data），需在 spawn 时保存
+let cachedAuditUi: ExtensionUIContext | null = null;
+let auditBreathTimer: ReturnType<typeof setInterval> | null = null;
+let auditBreathStart = 0;
+
+function auditStatusText(secs: number): string {
+	const frame = AUDIT_BREATH_FRAMES[Math.floor(secs) % AUDIT_BREATH_FRAMES.length];
+	return UI_LANG === "en"
+		? `${frame} pair audit in progress (${secs}s)`
+		: `${frame} 结对审计进行中（${secs}s）`;
+}
+
+/** 亮灯：spawn 审计者后调用（常规轮异步/门禁轮同步共用）。 */
+function startAuditBreath(ui: ExtensionUIContext): void {
+	cachedAuditUi = ui;
+	auditBreathStart = Date.now();
+	try {
+		ui.setStatus(AUDIT_STATUS_KEY, auditStatusText(0));
+	} catch {
+		/* print/无 UI 模式降级 */
+	}
+	if (auditBreathTimer) clearInterval(auditBreathTimer);
+	auditBreathTimer = setInterval(() => {
+		const secs = Math.round((Date.now() - auditBreathStart) / 1000);
+		try {
+			cachedAuditUi?.setStatus(AUDIT_STATUS_KEY, auditStatusText(secs));
+		} catch {
+			/* noop */
+		}
+	}, 1000);
+}
+
+/** 灭灯：审计完成（签名/async-complete）/ 超时降级 / spawn 失败 / 会话结束。 */
+function stopAuditBreath(): void {
+	if (auditBreathTimer) {
+		clearInterval(auditBreathTimer);
+		auditBreathTimer = null;
+	}
+	try {
+		cachedAuditUi?.setStatus(AUDIT_STATUS_KEY, undefined);
+	} catch {
+		/* noop */
+	}
+	cachedAuditUi = null;
+}
+
 export default function (pi: ExtensionAPI): void {
 	const rpc = makeRpc(pi);
 	const readyPromise = waitForRpcReady(pi);
@@ -497,6 +551,7 @@ export default function (pi: ExtensionAPI): void {
 		// fresh spawn 无残留 run 可停；仅清内存锁与根缓存
 		inFlightAudits.clear();
 		cachedProjectRoot = null;
+		stopAuditBreath(); // 呼吸灯灭（会话结束）
 	});
 
 	// ---- 工具：decision_add（写链，agent 模式）----
@@ -860,8 +915,11 @@ export default function (pi: ExtensionAPI): void {
 						runId,
 						startedAt: Date.now(),
 					});
+					// 呼吸灯亮：审计已 spawn（常规轮异步/门禁轮同步共用）
+					startAuditBreath(ctx.ui);
 				} catch {
 					inFlightAudits.delete(root);
+					stopAuditBreath(); // spawn 失败：灯灭
 					// spawn 失败：释放 inFlight 锁 + 产物未过审标记 blocked
 					writeAuditState(root, {
 						...readAuditState(root),
@@ -910,10 +968,12 @@ export default function (pi: ExtensionAPI): void {
 								],
 				});
 				gatedHead.set(root, head);
+				stopAuditBreath(); // 超时降级：灯灭
 				return;
 			}
 			// 门禁完成（passed/blocked/降级）——本次提交已覆盖；下次提交重新门禁
 			gatedHead.set(root, head);
+			stopAuditBreath(); // 门禁轮同步完成：灯灭
 			// 审计者已签名（passed/blocked），blockedStreak 已由 recordSignature 递增/清零
 			if (sig.status === "passed" || sig.status === "passed-with-warning") {
 				return; // 门禁通过，end 就是 end
@@ -947,6 +1007,7 @@ export default function (pi: ExtensionAPI): void {
 		}
 		// 持续交付：找到完成审计的 cwd → 若审计者已写 blocked → 立即交付主 agent
 		if (completedCwd) {
+			stopAuditBreath(); // 异步轮审计完成：灯灭
 			try {
 				const st = readAuditState(completedCwd);
 				if (
