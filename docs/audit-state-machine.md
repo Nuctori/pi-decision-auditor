@@ -26,6 +26,7 @@
 ```
 [无代码产物 且 无对话增量] ── hasUncommittedChanges=false 且 hasNewConversation=false ──▶ 不触发（零噪音）
 [纯咨询轮]        ── 对话增量但无 decision_add 决策信号、无 git 产物/提交 ──▶ 不 spawn（零噪音承诺升级：零注入 → 零 spawn，用户实测每轮问答 spawn 审计者 + 后台完成通知 = 污染）
+[plan 轮（无产物）] ── 未调 decision_add → 不 spawn，convExtractedLine 停留 → 决策由下一个产物轮的审计者按增量窗口顺带提取（不丢，仅延迟）；纯 plan 会话用 /pair-audit 或 decision_add 兜底
 [多实例混写]     ── convlogForeignRuns>0（并发窗口：本实例首行之后的外来行）──▶ 跳过 + notify（防错审）
 [常规轮]         ── fresh spawn（context:"fork"）→ inFlight=true → 立即返回（不阻塞）
 [交付轮]         ── git HEAD 变化（本轮产生了提交 = 交付的客观信号；无词表/模式匹配——完工语义判断不可靠，v1.0.17 先例）→ fresh spawn → inFlight=true → await 签名（300s 上限）

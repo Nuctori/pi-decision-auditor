@@ -33,7 +33,7 @@ pi-pair makes deliberate trade-offs. Read these before deciding whether to adopt
 - **Adversarial, not polite.** Artifacts are *guilty until proven innocent*: the auditor actively tries to break each dimension. A review that finds nothing to attack is a weak review, not a good one.
 - **Simplicity is a feature, not a shortcut.** One audit layer, fresh-spawn runs, no resident process, no negotiation windows — each mechanism that survives earns its keep, each that fails is deleted rather than patched. The cost is fewer knobs; the payoff is a system you can reason about.
 - **Value is observable, process is hidden.** The user sees the *fixed result* — blockers delivered and repaired — not the audit machinery (counts, timeouts, negotiations). Audit findings are injected user-visible; process noise never is.
-- **Audit only what is real.** The auditor spawns only when real work may exist (git changes or new conversation), then AI-judges (step zero) whether to proceed — pure-chat rounds quick-exit with zero injection. Auditing empty rounds would be theater, and theater teaches the auditor to rubber-stamp.
+- **Audit only what is real.** The auditor spawns only when real work exists: git artifacts (uncommitted changes or new commits) always spawn; conversation alone spawns only when this round used `decision_add` (an objective decision signal). Pure-chat rounds never spawn — no background task, no completion notification noise (the zero-noise promise upgraded from zero-injection to zero-spawn). Plan decisions made without `decision_add` are not lost: the convlog cursor stays put, so the next artifact round's auditor extracts them along with its own window. Auditing empty rounds would be theater, and theater teaches the auditor to rubber-stamp.
 - **Gate at delivery, not every round.** Normal rounds run async — the auditor works in the background and you're never blocked. The gate tightens only when it matters: submit / publish / merge / deploy.
 - **Interim results over final ceremony.** The auditor writes findings continuously (`auditFindings`), so being killed mid-audit still delivers value. A finished signature is a formality, not the point.
 - **Stop when done.** After signing, the auditor stops — no scope creep, no "just one more check". Open questions go to the next round, where the next agent has full context.
@@ -75,13 +75,14 @@ Requires **pi-subagents** (spawns the auditor). See [Installation](#installation
 ## How it works
 
 ```text
-each agent_end (when real artifacts exist)
-  └─ real artifacts? (git changes — .pi state excluded — or new conversation) → spawn auditor
-     · auditor AI judges (step zero): pure chat / no decision / no artifacts → quick-exit, zero injection
+each agent_end (when real work exists)
+  └─ real work? git artifacts (uncommitted changes / new commits) → always spawn;
+     conversation alone → spawn only when this round called decision_add (pure chat: never spawn — zero noise)
   └─ normal rounds: async — agent_end does NOT block
      · fresh spawn auditor (context:"fork" — inherits this session's context)
      · one task = capture decisions into chain + audit artifacts + sign
      · interim results written to state.json as auditFindings — killed mid-audit still delivers value
+     · plan decisions without decision_add are picked up by the next artifact round's auditor (cursor stays put)
   └─ delivery rounds (submit/publish/merge/deploy): agent_end awaits signature (300s cap)
       · adversarial 5-dimension attack on artifacts (guilty until proven innocent)
       · independently verify Context facts vs repository
@@ -107,7 +108,7 @@ L2 — delivery review (on "submit/publish/merge/deploy")
 | **Single-layer pairing** | one audit per round — capture decisions into chain + audit artifacts + sign, in a single fresh-spawn run (context:"fork" inherits session context) |
 | **Not dependent on main agent** | decisions extracted from convlog, facts verified from repo, by an independent agent |
 | **Decision chain** | default `.pi/decision-auditor/chain.md` (private, no git pollution); `PI_PAIR_CHAIN_PUBLIC=1` → `docs/decisions/chain.md` (team-visible) |
-| **Fresh-spawn lifecycle** | audit run ends when the audit ends — no resident process, no residue after session shutdown; pure-chat rounds spawn, quick-exit with zero injection |
+| **Fresh-spawn lifecycle** | audit run ends when the audit ends — no resident process, no residue after session shutdown; pure-chat rounds never spawn (zero noise — no background task, no completion notification) |
 | **Adversarial, calibrated** | 7-dimension attack (5 elegance + mechanism integrity + runtime-mode behavior), calibrated on real defects the same-model auditor missed |
 | **Cost control** | real-artifact gating (no empty audits) + once-per-delivery L2 + process-log intent channel; CI bench regression guard on wall time |
 | **cwd adaptive** | finds the real project root from any start dir (Cargo.toml/package.json/.git etc) |
