@@ -249,7 +249,7 @@ function buildIncrementalAuditTask(cwd: string): string {
 		"立场：产物默认有缺陷（guilty until proven innocent）。不要‘检查有没有错’——要主动尝试推翻：每个维度找具体缺陷，找到 = 偏离 ✗；五个维度全部无法推翻才判通过。",
 	);
 	lines.push(
-		"1. **审计对象 = 上次审计后的全部产物**：① 自**上次审计完成时刻**（state.json 的 signature.at——上次审计者签名的 epoch ms；**不要用 lastAuditAt**：扩展会在 spawn 时把它更新为当前时间，用作窗口起点会让本轮提交全在窗口外，主路径失效）之后**已提交**的改动——快节奏每轮提交时未提交 diff 常为空，只审未提交 diff 会让已提交产物永不过审（实证：signature=null）；无 signature（从未审计过）时窗口起点 = lastAuditAt÷1000；用 `git log --since=<窗口起点÷1000 epoch 秒>`（**13 位毫秒必须 ÷1000 转秒**；或用 `git log --since='YYYY-MM-DD HH:MM:SS'` ISO 时间，或 `git log --oneline -20`）定位窗口内提交，`git show <commit>` 逐个审；首次审计用最近 20 个提交。② 当前未提交 diff（`git diff`）。按五维度逐项进攻①原子性 ②正确性 ③一致性 ④内聚 ⑤完备（详见维度定义）。**窗口内无任何产物（无新提交且无未提交 diff）**：审决策质量——本轮提取的决策条目是否自足（Context 可验证/Decision 明确/Rationale 由 Context 推出/Alternatives 认真考虑）？决策是否服务于推导出的目标（有无漂移）？",
+		"1. **审计对象 = 上次审计后的全部产物**：① 自**上次审计完成时刻**（state.json 的 signature.at——上次审计者签名的 epoch ms，窗口起点统一用它；lastAuditAt 与 signature.at 在收尾时同步，但只有 signature.at 在交付轮降级等路径下也可靠）之后**已提交**的改动——快节奏每轮提交时未提交 diff 常为空，只审未提交 diff 会让已提交产物永不过审（实证：signature=null）；无 signature（从未审计过）时窗口起点 = lastAuditAt÷1000；用 `git log --since=<窗口起点÷1000 epoch 秒>`（**13 位毫秒必须 ÷1000 转秒**；或用 `git log --since='YYYY-MM-DD HH:MM:SS'` ISO 时间，或 `git log --oneline -20`）定位窗口内提交，`git show <commit>` 逐个审；首次审计用最近 20 个提交（**勿用 `--since=0`——git approxidate 怪癖会得空窗口**）。② 当前未提交 diff（`git diff`）。按五维度逐项进攻①原子性 ②正确性 ③一致性 ④内聚 ⑤完备（详见维度定义）。**窗口内无任何产物（无新提交且无未提交 diff）**：审决策质量——本轮提取的决策条目是否自足（Context 可验证/Decision 明确/Rationale 由 Context 推出/Alternatives 认真考虑）？决策是否服务于推导出的目标（有无漂移）？",
 	);
 	lines.push("2. **独立核实（两层，缺一不可）**：");
 	lines.push(
@@ -402,7 +402,7 @@ const DELIVERY_ANGLES: Array<{
 		name: "正确性",
 		prompt: (cwd) =>
 			`你是交付前独立审查者（角度：正确性/回归）。项目: ${cwd}。\n` +
-			`审自上次审计（.pi/decision-auditor/state.json 的 lastAuditAt，13 位毫秒 ÷1000 转秒）之后**已提交**的改动（git log --since + git show 逐个提交）与当前未提交 diff（git diff），以及 ${chainPath(cwd)}（默认 .pi/decision-auditor/chain.md，PI_PAIR_CHAIN_PUBLIC=1 时在 docs/decisions/chain.md）：\n` +
+			`审自上次审计（.pi/decision-auditor/state.json 的 signature.at——上次审计完成时间；无 signature 时用 lastAuditAt÷1000，首次审计用最近 20 个提交兜底，勿用 --since=0——git approxidate 怪癖会得空窗口）之后**已提交**的改动（git log --since + git show 逐个提交，13 位毫秒必须 ÷1000 转秒）与当前未提交 diff（git diff），以及 ${chainPath(cwd)}（默认 .pi/decision-auditor/chain.md，PI_PAIR_CHAIN_PUBLIC=1 时在 docs/decisions/chain.md）：\n` +
 			`1. 改动是否有 bug、边界错误、回归风险；\n` +
 			`2. 实现是否忠实执行了决策链中的每条决策（产物 vs 决策对照）；\n` +
 			`3. 决策链有无矛盾/悬空 supersede。\n` +
@@ -412,7 +412,7 @@ const DELIVERY_ANGLES: Array<{
 		name: "目标一致性",
 		prompt: (cwd) =>
 			`你是交付前独立审查者（角度：目标一致性/漂移）。项目: ${cwd}。\n` +
-			`读 .pi/decision-auditor/convlog.md（用户提示记录）推导任务目标，对照 git diff 与决策链：\n` +
+			`读 .pi/decision-auditor/convlog.md（用户提示记录）推导任务目标，对照**自上次审计（state.json 的 signature.at；无签名用 lastAuditAt÷1000；首次用最近 20 个提交）之后已提交的改动（git log --since + git show）+ 当前未提交 diff（git diff）**与决策链：\n` +
 			`注意 convlog 由同一 cwd 下多个 pi 实例共享追加——本会话行 = 带 \`<!--run:${RUN_ID}-->\` 标记的行，推导目标只依据它们；无标记行（升级前历史/无法归属）仅作上下文、不得据此推导；其他 run 标记行（其他实例/审计者输出）忽略：\n` +
 			`1. 当前改动是否服务于推导出的用户目标？有无目标外扩张？\n` +
 			`2. 决策链条目是否与用户实际要求一致？\n` +
@@ -423,7 +423,7 @@ const DELIVERY_ANGLES: Array<{
 		name: "安全与健壮性",
 		prompt: (cwd) =>
 			`你是交付前独立审查者（角度：安全/健壮性）。项目: ${cwd}。\n` +
-			`审 git diff 与相关文件：\n` +
+			`审**自上次审计（state.json 的 signature.at；无签名用 lastAuditAt÷1000；首次用最近 20 个提交）之后已提交的改动（git log --since + git show，13 位毫秒 ÷1000 转秒）+ 当前未提交 diff（git diff）**与相关文件：\n` +
 			`1. 注入/越界/未处理错误/竞态等安全问题；\n` +
 			`2. 状态损坏路径（如审计状态文件、并发写）；\n` +
 			`3. 不变量破坏（append-only、supersede 语义等）。\n` +
