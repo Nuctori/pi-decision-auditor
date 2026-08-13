@@ -481,8 +481,9 @@ const deliveryAuditInFlight = new Set<string>();
 // 最小双语：PI_PAIR_LANG=en 切英文，默认中文（与现有 notify 文案一致）。
 const UI_LANG: "zh" | "en" = process.env.PI_PAIR_LANG === "en" ? "en" : "zh";
 const AUDIT_STATUS_KEY = "pi-pair-audit";
-// 呼吸帧（转圈），1s 间隔轮换
-const AUDIT_BREATH_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+// 呼吸帧（ASCII spinner）：braille 帧（⠋⠙⠹）在部分终端/字体下渲染为方块乱码
+// （用户报障「飙奇怪文字」）——用经典 `- \ | /`，任何终端/字体零兼容问题（D-026）
+const AUDIT_BREATH_FRAMES = ["-", "\\", "|", "/"];
 // 缓存 ui 引用：async-complete 回调无 ctx（只有 data），需在 spawn 时保存
 let cachedAuditUi: ExtensionUIContext | null = null;
 let auditBreathTimer: ReturnType<typeof setInterval> | null = null;
