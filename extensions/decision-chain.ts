@@ -771,8 +771,7 @@ export default function (pi: ExtensionAPI): void {
 			if (head !== null && !gatedHead.has(root)) {
 				gatedHead.set(root, head);
 			}
-			const hasNewCommit =
-				head !== null && gatedHead.get(root) !== head;
+			const hasNewCommit = head !== null && gatedHead.get(root) !== head;
 			// 工作判据（便宜信号 + 决策信号，无需语义理解——语义判断交给审计者 AI）：
 			// 1. 有代码产物（git 未提交改动）或 本轮有提交 → 必审
 			// 2. 对话增量 **且 本轮调用了 decision_add**（决策信号）→ spawn 审计者审决策——
