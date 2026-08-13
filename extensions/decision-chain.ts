@@ -758,7 +758,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("agent_end", async (event, ctx) => {
 		try {
 			const root = projectRoot(ctx.cwd);
-			const state = readAuditState(root);
+			let state = readAuditState(root);
 			// 本轮决策信号消费（decision_add 置位）——对话增量触发审计的门控
 			const decisionThisRound = roundDecisionMade;
 			roundDecisionMade = false;
@@ -783,6 +783,18 @@ export default function (pi: ExtensionAPI): void {
 				hasNewCommit ||
 				(hasNewConversation(root, clampConvExtractedLine(root)) &&
 					decisionThisRound);
+			// 残留锁兜底（先于 hasWork 判断：纯咨询轮也清残留锁——清锁≠spawn，不违反零噪音承诺；
+			// 防「agent_end 中断后 inFlight=true 假挂起」永久残留——实证：17:41:45 提交轮 spawn 中断，
+			// state.json 假 inFlight 挂 2.5h，纯咨询轮 return 前无人清）
+			// 清锁后重读 state：spawn 分支必须用干净快照（旧快照 inFlight=true 会让本轮 spawn 被跳过）
+			if (state.inFlight && !hasInFlight(root)) {
+				writeAuditState(root, {
+					...readAuditState(root),
+					inFlight: false,
+					convExtractedLine: clampConvExtractedLine(root),
+				});
+				state = readAuditState(root);
+			}
 			if (!hasWork) return;
 
 			// 多实例混写检测：同 cwd 下存在其他实例的真实用户行 → 自动审计会错审/旁路
@@ -810,16 +822,7 @@ export default function (pi: ExtensionAPI): void {
 			const t0 = Date.now(); // 审计阻塞计时起点
 
 			// 已有审计在跑（inFlight）→ 等待它完成；否则 fresh spawn 审计者
-			// 残留锁兜底：文件锁 inFlight=true 但内存锁已无（审计者被强杀未写收尾）→ 释放
-			// （防该 cwd 审计永久停摆——Medium-4；agent_settled 兜底已删，这里补回）
-			// clamp 持久化（B2）合并进这个写点：避免在谓词求值中与审计者进程读-改-写竞态（reviewer Medium）
-			if (state.inFlight && !hasInFlight(root)) {
-				writeAuditState(root, {
-					...readAuditState(root),
-					inFlight: false,
-					convExtractedLine: clampConvExtractedLine(root),
-				});
-			}
+			// （残留锁兜底已上移到 hasWork 判断之前；此处 state 已是清锁后的最新快照）
 			if (!state.inFlight && !hasInFlight(root)) {
 				inFlightAudits.set(root, {
 					runId: "",
