@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-// 决策链存储：docs/decisions/chain.md（append-only，自动编号，supersede 声明）
+// 决策链存储：.pi/decision-auditor/chain.md（PI_PAIR_CHAIN_PUBLIC=1 时在 docs/decisions/chain.md）
+// （append-only，自动编号，supersede 声明）
 // 纯 Node 实现，无第三方依赖。
 
 import * as fs from "node:fs";
@@ -455,20 +456,48 @@ export function clampConvExtractedLine(cwd: string): number {
 	return state.convExtractedLine > total ? total : state.convExtractedLine;
 }
 
+/** 纯咨询轮审计者写入的 findings 占位——不算真实中间态（跨会话注入过滤用，防零注入承诺被打破）。 */
+export const PURE_CHAT_PLACEHOLDER = "本轮纯咨询，无审计对象";
+
 /**
  * 中间态注入判据（B1 行为级测试目标，从扩展 handler 抽出的纯函数）：
- * 注入 ⇔ 有已写 findings 且 审计仍在跑（inFlight=true，被杀时文件锁残留）且 同轮未注入过。
- * 纯咨询轮审计者主动写 inFlight=false → 不注入（零注入承诺，D-006）。
+ * 注入 ⇔ 有真实 findings（非纯咨询占位）且 同轮未注入过，且满足其一：
+ *  - inFlight===true：审计在跑（被杀时文件锁残留）——中途被杀/超时的部分发现；
+ *  - signature===null：审计未收尾（会话早结被杀后新会话 reset 清 inFlight 的场景——
+ *    中间态跨会话交付，边界 3）。
+ * 纯咨询轮：inFlight=false + findings=[占位] → 占位过滤后空 → 不注入（零注入承诺，D-006）。
+ * 审计正常收尾（signature 已写）：中间态不再注入，价值走 signature 通道（blockers）。
  */
 export function shouldInjectInterimFindings(
 	state: AuditState,
 	injectedAt: number | undefined,
 ): boolean {
-	return (
-		state.auditFindings.length > 0 &&
-		state.inFlight === true &&
-		injectedAt !== state.auditStartedAt
-	);
+	if (state.auditFindings.length === 0 || injectedAt === state.auditStartedAt) {
+		return false;
+	}
+	if (!state.auditFindings.some((f) => f !== PURE_CHAT_PLACEHOLDER)) {
+		return false;
+	}
+	return state.inFlight === true || state.signature === null;
+}
+
+/**
+ * 当前 git HEAD（客观信号）：交付门禁用「本轮产生了提交」判定，不用词表/模式匹配
+ * （完工是语义判断，模式匹配不可靠——v1.0.17 废弃 hasNewDecisionSignals 的先例；
+ * 问句/任意措辞天然免疫：不产生提交就不触发）。非 git 仓库返回 null（无门禁）。
+ */
+export function gitHead(cwd: string): string | null {
+	try {
+		const out = execFileSync("git", ["rev-parse", "HEAD"], {
+			cwd,
+			encoding: "utf-8",
+			stdio: ["ignore", "pipe", "ignore"],
+			timeout: 5000, // 与 hasUncommittedChanges 一致：git 挂起（损坏 .git/杀软锁）不得阻塞 agent_end
+		});
+		return out.trim() || null;
+	} catch {
+		return null;
+	}
 }
 
 // ---- 对话流日志（目标推导用）----

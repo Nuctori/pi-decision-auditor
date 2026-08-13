@@ -13,7 +13,7 @@
 | `signature.at` | `epoch ms` | 签名时间（注入去重键 + 完成判定键） |
 | `blockedStreak` | `0..3` | 连续 blocked 次数（A2 门禁） |
 | `signatureConvLine` | `number` | 签名覆盖到的 convlog 对话行数（每次签名都推进到当前行，needsSignoff 用） |
-| `auditFindings` | `string[]` | 审计中间态（审计者边审边追加，被杀/超时也可交付） |
+| `auditFindings` | `string[]` | 审计中间态（审计者边审边追加，被杀/超时也可交付）；纯咨询占位（`"本轮纯咨询，无审计对象"`）不算真实中间态 |
 
 > **已移除状态/字段**：`timeout`（v1.0.15 前存在）——超时直接降级为
 > `passed-with-warning` + blockers（无 600s 协商黑洞）。`chainFindings` / `auditorRunId` /
@@ -25,9 +25,10 @@
 
 ```
 [无代码产物 且 无对话增量] ── hasUncommittedChanges=false 且 hasNewConversation=false ──▶ 不触发（零噪音）
+[纯咨询轮]        ── 对话增量但无 decision_add 决策信号、无 git 产物/提交 ──▶ 不 spawn（零噪音承诺升级：零注入 → 零 spawn，用户实测每轮问答 spawn 审计者 + 后台完成通知 = 污染）
 [多实例混写]     ── convlogForeignRuns>0（并发窗口：本实例首行之后的外来行）──▶ 跳过 + notify（防错审）
 [常规轮]         ── fresh spawn（context:"fork"）→ inFlight=true → 立即返回（不阻塞）
-[交付轮]         ── fresh spawn → inFlight=true → await 签名（300s 上限）
+[交付轮]         ── git HEAD 变化（本轮产生了提交 = 交付的客观信号；无词表/模式匹配——完工语义判断不可靠，v1.0.17 先例）→ fresh spawn → inFlight=true → await 签名（300s 上限）
 
 触发后审计者【第零步】AI 判定本轮有无工作（不做正则信号词判定——语义判断交给审计者）：
   纯咨询（问答无决策无产物）→ 快速退出：推进 convExtractedLine（对话行计数，非文件行号）、写 auditFindings=["本轮纯咨询，无审计对象"]、不写 signature、零注入
@@ -40,7 +41,7 @@
 ```
 审计通过        → signature={status:"passed", at:now}、signatureConvLine=当前对话行、blockedStreak=0
 发现缺口        → signature={status:"blocked", blockers:[...], at:now}、signatureConvLine 同样推进（签名即推进——修复走 blockers 注入通道，不靠 convLine 滞后）、blockedStreak+1
-交付轮超时      → signature={status:"passed-with-warning", blockers:[超时提示]}、blockedStreak=0
+交付轮超时      → signature={status:"passed-with-warning", blockers=已确认的 auditFindings（价值点，无 findings 才给超时提示）}、blockedStreak=0
 连续 blocked≥3  → signature={status:"passed-with-warning", blockers: 原缺口}、blockedStreak=0（A2 降级放行）
 ```
 
@@ -57,25 +58,29 @@
 ```
 signature.blocked / passed-with-warning 且未注入过（injectedSignatureAt≠signature.at）
   → 价值点注入 display:true（用户可观察：审计抓出的缺口）
-auditFindings 非空 且 inFlight===true 且未注入过（injectedInterimAt≠auditStartedAt）
-  → 中间态注入 display:true（审计被杀/超时的部分发现；纯咨询轮 inFlight=false 不注入——零注入承诺）
-```
+auditFindings 非空（过滤纯咨询占位后）且（inFlight===true 或 signature===null）且未注入过（injectedInterimAt≠auditStartedAt）
+  → 中间态注入 display:true（审计被杀/超时的部分发现；纯咨询轮占位过滤后不注入——零注入承诺；
+    signature===null 分支覆盖会话早结被杀后新会话 reset 清 inFlight 的跨会话交付）
 
 ### T5. 生命周期（fresh spawn，无常驻 run）
 
 ```
+
 agent_end（有真实产物）→ fresh spawn 审计者（context:"fork" 继承主会话上下文）
 审计完成            → run 自然结束（无跨轮复用、无生命周期登记）
 session_shutdown    → 清内存锁（inFlightAudits）+ 根缓存——无残留 run 可停
+
 ```
 
 ### T6. recordSignature 副作用（lib/chain-store.ts）
 
 ```
+
 blocked          → blockedStreak+1（A2 计数）
 passed           → blockedStreak=0
 passed-with-warning → blockedStreak=0（降级放行即退出门禁循环）
 每次签名         → inFlight=false（释放锁，防 decision_signoff 路径泄漏）+ signatureConvLine = 当前行
+
 ```
 
 ## 不变量

@@ -146,7 +146,7 @@ Each round the auditor:
 3. **Audit**: adversarial attack in 7 dimensions — atomicity / correctness / consistency / cohesion / completeness + **mechanism integrity** (trigger chains have live call sites) + **runtime behavior vs claim** (blocking/async claims hold across print/TUI/RPC, or mode differences are flagged)
 4. **Sign**: artifacts pass → `signature=passed`; findings → `signature=blocked` with actionable blockers (the main agent fixes them immediately)
 
-Lifecycle rules: every audit is a fresh-spawn run (`context:"fork"` inheriting this session's context). Normal rounds run async after `agent_end` (the agent does not block); delivery rounds (submit/publish/merge/deploy) await the signature (300s cap — on timeout, release with warning and inject findings next round; no negotiate blackhole). The auditor may `contact_supervisor` for clarification during its run (60s cap — otherwise decide from evidence). Interim findings are written continuously to `auditFindings`; the run stops immediately after signing (完成即停).
+Lifecycle rules: every audit is a fresh-spawn run (`context:"fork"` inheriting this session's context). Normal rounds run async after `agent_end` (the agent does not block); delivery rounds (a git HEAD change — an objective signal, no keyword matching for "done") await the signature (300s cap — on timeout, release with warning and inject findings next round; no negotiate blackhole). The auditor may `contact_supervisor` for clarification during its run (60s cap — otherwise decide from evidence). Interim findings are written continuously to `auditFindings`; the run stops immediately after signing (完成即停).
 
 ## Tools
 

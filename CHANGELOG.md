@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.0.20] - 2026-08-12
+
+修复 3 个审计边界（D-017 落地）：
+
+- **边界① 交付检测：词表 → 客观提交信号**：删除 `DELIVERY_SIGNAL_RE` 词表与问句排除——「完工」是语义判断，模式匹配不可靠（v1.0.17 废弃 hasNewDecisionSignals 的同款结论；词表漏检 + 问句误伤「完成了吗」卡 300s 双缺陷）。改为 **git HEAD 变化**（`gitHead` + 会话级 `gatedHead` 基线）：本轮产生了提交 = 交付发生的客观事实，问句/任意措辞天然免疫；门禁与 L2 交付审查同源触发；非 git 仓库无门禁（异步审计照跑）
+- **边界② 修复轮 diff 漂移**：审计任务 prompt 加 blockers 可操作规范（文件 + 基线行号 + **独立于行号的问题描述**——行号会漂移，描述是重定位锚点；末尾附 git HEAD 短哈希 + 未提交文件列表作基线）；新增修复轮核对步骤（上轮 blocked → 逐个核对旧 blockers 在新产物中是否仍成立，未修复的重报，不得因产物演进而漏掉）
+- **边界③ 会话早结 findings 丢失**：`shouldInjectInterimFindings` 判据放宽——`inFlight===true`（被杀锁残留）或 `signature===null`（审计未收尾，会话早结被杀后新会话 reset 清 inFlight 的跨会话交付）；纯咨询占位（`PURE_CHAT_PLACEHOLDER`）过滤后不算真实中间态（零注入承诺保持）；注入文案标注「可能来自上次会话」
+- **边界④（实证修复）审计对象错位**：审计任务第三步的审计对象从「未提交 git diff」改为「上次审计（lastAuditAt）后的已提交窗口 + 未提交 diff」——快节奏每轮提交时未提交 diff 常为空，原定义让已提交产物永不过审（实证：follow_me v22-v28 产物 signature=null）；交付轮等的审计者现在审的是不变的历史窗口 + 当前 diff，不再因产物漂移而过时；超时降级的 blockers 改用审计者已确认的 auditFindings（价值点），无 findings 才给超时提示（实证：InitDeity 8 条真实 findings 曾被「审计超时」流程文案替换）；注入文案区分 passed-with-warning（「部分发现供参考」vs blocked 的「请修复缺口」）
+- 文档同步：audit-state-machine.md T1（门禁产物前置）、T2（超时降级 blockers=findings）、T4（新判据）、状态表 auditFindings 占位语义
+- 测试：`shouldInjectInterimFindings` 纯咨询模拟改为占位（inFlight=false + 真实 findings 语义已变为跨会话注入）+ 新增 2 态（会话早结残留→注入 / passed 残留→不注入）；`gitHead` 行为（非 git→null / init+commit→HEAD / 新提交→HEAD 变化）
+- **审查修复轮（审计者 + 3 reviewer 发现）**：① prompt `--since` 单位矛盾（lastAuditAt 毫秒喂秒 → 空窗口 → 复现边界④缺陷）→ 明确 ÷1000/ISO；② `hasWork` 判据加 `hasNewCommit`——提交后 diff 空 + 审计者可能推进对话游标 → 两便宜信号都 false → 提交轮早退绕过门禁（安全审查 Medium）；③ L2「正确性」reviewer prompt 同步为已提交窗口（L2 层已提交产物永不过审残留）；④ L2 fanout 移到多实例守卫之后（多实例场景不再白跑 3 reviewer）；⑤ `auditFindings` 每轮**替换**为占位（清旧轮陈旧内容——超时降级把 findings 当 blockers 注入时不再污染价值点）；⑥ 审计者收尾前检查主进程降级签名（passed-with-warning 已存在 → 不写签名，防超时竞态覆盖真实结论）；⑦ 陈旧注释清理（词表时代残留/L0 命名/lib 头注释/test 缩进）；D-019~D-022 入链（canGateOldAudit 删除/审计对象重定义/降级 blockers=findings/git HEAD 门禁）
+- **发布前修复轮（审计者 + 3 reviewer 终审）**：⑧ `gatedHead` 惰性初始化——扩展热重载（/reload）不重发 session_start → map 空 → 「无提交也触发门禁+L2」误触发（实证：未提交却 spawn 3 reviewer）；首次 agent_end 建基线不门禁；⑨ 门禁等待 UI 告知（提交轮同步等审计时用户可感知，≤300s）；⑩ 审计窗口起点改用 `signature.at`（上次审计完成时间）+ **spawn 块不再覆盖 `lastAuditAt`**（原覆盖为当前时间 → 本轮提交全在窗口外 → HIGH find#1）；⑪ 收尾跳过签名条件收紧为「`passed-with-warning.at ≥ 本轮 auditStartedAt`」（陈旧降级不跳过——否则签名流永久停滞）；⑫ 超时降级 blockers 过滤启动/纯咨询占位；⑬ `gitHead` 加 5s 超时（与 hasUncommittedChanges 一致）；⑭ version bump 1.0.20
+- **纯咨询轮零 spawn（用户实测污染）**：对话增量触发收紧为「增量 **且 本轮调用了 decision_add**」——纯咨询问答轮（含非 git 目录如用户主目录）不再 spawn 审计者（此前每轮 spawn + 后台完成通知 = 体验污染；零噪音承诺从「零注入」升级为「零 spawn」，D-006 语义扩展）；git 产物/提交仍无条件触发；plan 决策经 decision_add（skill 既有要求）触发审计者提取入链
+- 31/31 测试通过、tsc 0 错误
+
 ## [1.0.19] - 2026-08-12
 
 L2 交付审查（3 个 fresh reviewer）复审 v1.0.18 后的修复轮——无 blocker，处理 2 Medium + 4 Low：

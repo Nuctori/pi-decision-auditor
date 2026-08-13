@@ -20,6 +20,7 @@ import {
 	convlogForeignRuns,
 	convlogPath,
 	entriesSinceLastAudit,
+	gitHead,
 	hasNewConversation,
 	hasUncommittedChanges,
 	listEntries,
@@ -360,11 +361,12 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		src.includes("convlogForeignRuns(root, RUN_ID) > 0"),
 		"agent_end 必须做多实例混写检测（跳过错审）",
 	);
-	// 工作判据（便宜信号）+ 审计者 AI 判定（第零步）
+	// 工作判据（产物/提交信号 或 决策信号）+ 审计者 AI 判定（第零步）
 	assert.ok(
 		src.includes("hasUncommittedChanges(root)") &&
-			src.includes("hasNewConversation(root, clampConvExtractedLine(root))"),
-		"agent_end 用两个便宜信号触发：git 产物 or 对话增量（语义判断交给审计者，不做正则信号词判定）",
+			src.includes("hasNewConversation(root, clampConvExtractedLine(root))") &&
+			src.includes("decisionThisRound"),
+		"agent_end 触发判据：git 产物/提交 必审；对话增量需本轮 decision_add 决策信号——纯咨询轮零 spawn（零噪音承诺）",
 	);
 	assert.ok(
 		src.includes("第零步：判定本轮是否有值得审计的工作"),
@@ -379,18 +381,17 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		"独立核实必须分两层：收敛（对账）+ 发散（找未声明的风险）——审计不能只是看事实是否吻合",
 	);
 	assert.ok(
-		src.includes("deliveryRequested"),
-		"交付信号必须在 message_end 登记（提交/发布/merge → agent_end 同步门禁）",
+		src.includes("gitHead") && src.includes("hasNewCommit"),
+		"交付门禁必须用 git HEAD 变化（客观提交信号）——不用词表/模式匹配判定完工（v1.0.17 先例）",
 	);
 	assert.ok(
-		src.includes("if (!isDelivery) return;"),
-		"常规轮必须异步（agent_end 不阻塞等签名）——findings 下轮注入",
+		src.includes("gatedHead") && src.includes("if (!hasNewCommit) return;"),
+		"常规轮必须异步（agent_end 不阻塞等签名）——findings 下轮注入；门禁只在新提交（产物落库）时收紧",
 	);
-	// L2 交付审查必须有真实产物门禁（无 git diff 且无决策 → 不 spawn，杜绝空转）
+	// L2 交付审查：与新提交同源触发（无词表）；无提交不 spawn（杜绝空转）
 	assert.ok(
-		src.includes("hasUncommittedChanges") &&
-			src.includes("triggerDeliveryAudit"),
-		"L2 交付审查必须带真实产物门禁（无交付物不 spawn，杜绝 follow_me 空转）",
+		src.includes("hasNewCommit") && src.includes("triggerDeliveryAudit"),
+		"L2 交付审查必须与新提交同源触发（无提交不 spawn reviewer，杜绝 follow_me 空转）",
 	);
 	// 价值点可观察 / 流程隐藏
 	assert.ok(
@@ -422,13 +423,11 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		src.includes("state.signature.at >= startedAt"),
 		"完成判定必须用 signature.at >= auditStartedAt（blocked 也是完成，完成判定只看 at）",
 	);
-	// M2：交付标记先消费（无泄漏到下轮）
+	// 门禁基线：会话起始 HEAD 初始化（非 git 仓库无门禁）
 	assert.ok(
-		src.includes("deliveryRequested.delete(root)") &&
-			src.includes("const isDelivery = deliveryRequested.has(root)") &&
-			src.indexOf("const isDelivery") <
-				src.indexOf("hasUncommittedChanges(root)"),
-		"deliveryRequested 必须在 agent_end 最前消费（任何早退路径都不泄漏）",
+		src.includes("const head = gitHead(root)") &&
+			src.includes("if (head !== null) gatedHead.set(root, head)"),
+		"session_start 必须初始化 gatedHead 基线（非 git 仓库不设门禁）",
 	);
 	// M4：残留锁兜底（文件锁在但内存锁无 → 释放，防审计永久停摆）
 	assert.ok(
@@ -442,7 +441,9 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	);
 	// B1：中间态注入判据 = shouldInjectInterimFindings 纯函数（行为级测试锁定，非字符串守卫）
 	assert.ok(
-		src.includes("shouldInjectInterimFindings(state, injectedInterimAt.get(root))"),
+		src.includes(
+			"shouldInjectInterimFindings(state, injectedInterimAt.get(root))",
+		),
 		"中间态注入必须走 shouldInjectInterimFindings 纯函数（行为级测试在 lib 单测）",
 	);
 	// B2：convExtractedLine 单位钳制（审计者写文件行号超界 → 钳制，防对话增量触发断线）
@@ -822,12 +823,16 @@ test("clampConvExtractedLine：单位钳制（纯读，不落盘——落盘由�
 	// 审计者误写文件行号（> 对话行数）→ 返回钳制值；纯读不落盘（防与审计者进程读-改-写竞态）
 	writeAuditState(dir, { ...readAuditState(dir), convExtractedLine: 500 });
 	assert.equal(clampConvExtractedLine(dir), 2);
-	assert.equal(readAuditState(dir).convExtractedLine, 500, "clamp 是纯读，不落盘");
+	assert.equal(
+		readAuditState(dir).convExtractedLine,
+		500,
+		"clamp 是纯读，不落盘",
+	);
 	// 钳制值用于判据 → 无对话增量不触发（不再断线也不空转）
 	assert.equal(hasNewConversation(dir, clampConvExtractedLine(dir)), false);
 });
 
-test("shouldInjectInterimFindings：中间态注入判据（B1 行为级）", () => {
+test("shouldInjectInterimFindings：中间态注入判据（B1 行为级 + 边界 3 跨会话）", () => {
 	const base = {
 		...readAuditState(tmpDir()),
 		auditFindings: ["推导目标 ✓"],
@@ -838,14 +843,64 @@ test("shouldInjectInterimFindings：中间态注入判据（B1 行为级）", ()
 	assert.equal(shouldInjectInterimFindings(base, undefined), true);
 	// 同轮已注入过（injectedAt === auditStartedAt）→ 去重不注入
 	assert.equal(shouldInjectInterimFindings(base, 1000), false);
-	// 纯咨询轮（审计者主动写 inFlight=false）→ 零注入（D-006 承诺）
+	// 纯咨询轮（inFlight=false + 占位 findings）→ 零注入（D-006 承诺）
 	assert.equal(
-		shouldInjectInterimFindings({ ...base, inFlight: false }, undefined),
+		shouldInjectInterimFindings(
+			{
+				...base,
+				inFlight: false,
+				auditFindings: ["本轮纯咨询，无审计对象"],
+			},
+			undefined,
+		),
 		false,
 	);
 	// 无 findings → 不注入
 	assert.equal(
 		shouldInjectInterimFindings({ ...base, auditFindings: [] }, undefined),
 		false,
+	);
+	// 边界 3：会话早结被杀（新会话 reset 清 inFlight + 无 signature + 真实 findings）→ 跨会话注入
+	assert.equal(
+		shouldInjectInterimFindings(
+			{ ...base, inFlight: false, signature: null },
+			undefined,
+		),
+		true,
+	);
+	// 审计正常收尾（signature 已写，findings 残留）→ 不注入（价值走 signature 通道）
+	assert.equal(
+		shouldInjectInterimFindings(
+			{
+				...base,
+				inFlight: false,
+				signature: { status: "passed", at: 2000 },
+			},
+			undefined,
+		),
+		false,
+	);
+});
+
+test("gitHead：交付门禁的客观信号（HEAD 变化）", () => {
+	const dir = tmpDir();
+	// 非 git 仓库 → null（无门禁）
+	assert.equal(gitHead(dir), null);
+	// git 仓库：init + commit 后返回 HEAD，且提交后 HEAD 变化
+	execFileSync("git", ["init", "-q"], { cwd: dir });
+	execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+	execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+	fs.writeFileSync(path.join(dir, "a.txt"), "v1");
+	execFileSync("git", ["add", "a.txt"], { cwd: dir });
+	execFileSync("git", ["commit", "-qm", "c1"], { cwd: dir });
+	const head1 = gitHead(dir);
+	assert.ok(head1 && head1.length >= 7, "首次提交后应有 HEAD");
+	fs.writeFileSync(path.join(dir, "a.txt"), "v2");
+	execFileSync("git", ["add", "a.txt"], { cwd: dir });
+	execFileSync("git", ["commit", "-qm", "c2"], { cwd: dir });
+	assert.notEqual(
+		gitHead(dir),
+		head1,
+		"新提交后 HEAD 必须变化（门禁触发依据）",
 	);
 });
