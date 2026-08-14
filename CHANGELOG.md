@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.37] - 2026-08-15
+
+v1.0.36 发布后双路 reviewer 复核（前轮 Medium：head 语义与兜底检测前提冲突）+ 本轮 Low-1/Note-1 同源——异步空洞源头补审：
+
+- **收尾前自查（Medium 源头修复）**：signature.head 是签名时刻 HEAD——审计运行期间落库的中间提交 C 已含入 head → 下轮 HEAD==signature.head → 兜底自查（v1.0.34/36）在纯 gap 场景（C 后无后续提交）检测不到 → C 被两轮窗口永久排除。改：L1 收尾协议（L289）加「收尾前自查」——重新执行建立窗口时的 `git log --since=<窗口起点>`（同一命令形式）与首次结果比对，快照后落库的新提交逐个 `git show` **补审后再签名**；head 照常写签名时刻 `git rev-parse HEAD`（已含补审提交，注入新鲜度检查不受影响；否决「head 钉死窗口计算时刻」方案——会让 blocked 签名 head≠当前 HEAD → 新鲜度检查误判陈旧、blockers 不注入）
+- **交叉对照完整列表（Low-1）**：`git log --oneline -5` → 完整 `git log --oneline`（gap 提交深于 5 个时不再漏；L1 L262 + L2 L401 同步）
+- **L1 中间句收敛（Note-1）**：删除「HEAD == signature.head 且窗口为空才走审决策质量分支」中间句（字面可误读为充分条件、漏掉未提交 diff 审查）——以句尾完整条件（无新提交且无未提交 diff）为唯一判定
+- **L2 收尾自查**：交付审查 prompt 同步加「重新执行窗口 git log 与首次结果比对，运行期间落库的新提交补审后再输出」（多实例同 cwd 并发提交场景同源）
+- 跳过：prompt 一致性断言测试（buildIncrementalAuditTask 在扩展工厂内不可单测，抽取到 lib 属过度工程——记录为已知残余）；cwd/runId 未转义（既有模式，注入面低）
+- 测试：57/57 通过，tsc 0 错误
+
 ## [1.0.36] - 2026-08-15
 
 v1.0.35 发布后安全/健壮性 reviewer 复核（无 blocker）+ 目标一致性 reviewer 独立复现同一混合窗口 note——兜底触发条件完备化：
