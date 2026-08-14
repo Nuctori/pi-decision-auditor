@@ -162,8 +162,11 @@ export function appendDecision(
 ): DecisionEntry {
 	const file = ensureChain(cwd);
 	for (let attempt = 0; attempt < 3; attempt++) {
-		const raw = readRaw(cwd);
+		// mtime 先于 read 取（v1.0.28 双审计 LC-07，与 readAuditStateWithMtime 同序）：
+		// 反序（先 read 后 stat）时，写者落在 read→stat 间隙会得到「新 mtime + 陈旧快照」，
+		// 写前校验通过、rename 覆盖他写者条目且双方都成功返回——决策链静默丢条目
 		const expectedMtime = chainMtime(file);
+		const raw = readRaw(cwd);
 		const entries = parseChain(raw);
 		const id = nextId(entries);
 		const supersedes =
@@ -194,8 +197,7 @@ export function appendDecision(
 			`- Decision: ${entry.decision}`,
 			`- Rationale: ${entry.rationale}`,
 		];
-		if (entry.alternatives)
-			lines.push(`- Alternatives: ${entry.alternatives}`);
+		if (entry.alternatives) lines.push(`- Alternatives: ${entry.alternatives}`);
 		if (entry.confidence) lines.push(`- Confidence: ${entry.confidence}`);
 		if (entry.supersedes && entry.supersedes.length > 0)
 			lines.push(`- Supersedes: ${entry.supersedes.join(", ")}`);
@@ -226,12 +228,18 @@ export function appendDecision(
 			}
 			continue;
 		}
-		// 写后验证：内容一致（窗口内他写者未覆盖）且新 id 唯一
+		// 写后验证：内容一致（窗口内他写者未覆盖）且新 id 唯一且为文件末尾条目
+		// （v1.0.28 双审计 LC-07：两写者交错时，后 rename 者 verify 读到的是自身 payload
+		// 会误通过——「我的 id 必须是末尾条目」语义校验兜住他写者条目被覆盖的窗口）
 		let verified = false;
 		try {
+			const onDisk = fs.readFileSync(file, "utf-8");
+			const parsed = parseChain(onDisk);
 			verified =
-				fs.readFileSync(file, "utf-8") === payload &&
-				parseChain(payload).filter((e) => e.id === id).length === 1;
+				onDisk === payload &&
+				parsed.filter((e) => e.id === id).length === 1 &&
+				parsed.length > 0 &&
+				parsed[parsed.length - 1].id === id; // 我是末尾条目：他写者的追加未被覆盖
 		} catch {
 			/* 落到循环尾重试 */
 		}
@@ -422,7 +430,20 @@ export function readAuditState(cwd: string): AuditState {
 					? obj.injectedInterimAt
 					: null,
 		};
-	} catch {
+	} catch (err) {
+		// v1.0.28 双审计 LC-08：区分 ENOENT（首次/缺失，静默——正常路径）与损坏
+		// （JSON.parse 失败/SIGKILL 半程写）——损坏静默返回 DEFAULT 会让审计者与扩展
+		// 在损坏窗口内零告警读到默认值，直到下次写才触发 .corrupt 备份（不可观测）
+		const code = (err as NodeJS.ErrnoException | null)?.code;
+		if (code !== "ENOENT") {
+			try {
+				console.warn(
+					`[pi-pair] readAuditState 读取失败（损坏或不可读），返回默认状态: ${auditStatePath(cwd)} (${err instanceof Error ? err.message : String(err)})`,
+				);
+			} catch {
+				/* noop */
+			}
+		}
 		return { ...DEFAULT_STATE };
 	}
 }
@@ -520,7 +541,8 @@ export function writeAuditState(
 		const cur = auditStateMtime(cwd);
 		if (cur !== expectedMtime) {
 			console.warn(
-				`audit state 冲突，放弃提交（多写者）: ${file} cur=${cur} expected=${expectedMtime}`,
+				// v1.0.28（LC-08）：冲突 warn 带写者 pid——双写者排查时可归因到实例
+				`audit state 冲突，放弃提交（多写者）: ${file} pid=${process.pid} cur=${cur} expected=${expectedMtime}`,
 			);
 			return false;
 		}
@@ -528,10 +550,20 @@ export function writeAuditState(
 	// 字段级合并写：与磁盘最新原文合并，保留未知字段（消毒读只重建已知字段，
 	// 全量覆盖会删掉未来新增字段——gatedHead 丢失事故的机制根因，v1.0.26）。
 	// 损坏/缺失文件 → 备份后按传入 state 重建（防默认值覆盖真实审计进度）。
+	// v1.0.28 双审计 LC-09：损坏重建优先从 .corrupt-* 备份恢复可解析字段——
+	// 此前重建 = DEFAULT+patch（readAuditState 损坏时返回 DEFAULT），进度字段
+	// （lastAuditedId/convExtractedLine/signature/gatedHead/injected*）整体归零 →
+	// 全量重审 + 门禁基线吞掉未审提交 + 去重标记丢失重复注入。备份存在且可解析时
+	// merged = {...备份字段, ...传入 state}（传入 patch 优先，损坏窗口前的进度保留）。
 	// tmp 名按写者唯一（v1.0.26 双审计发现 critical#1）：共享 `${file}.tmp` 时
 	// 双写者交错会互相覆盖 tmp / rename ENOENT / 半成品落盘——加 pid+随机后缀。
 	const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 	let merged: unknown = state;
+	// 损坏重建标志（LC-09）：文件损坏被 rename 备份后，auditStateMtime 返回 null ≠
+	// expectedMtime——rename 前复校验会误判「他写者已改」而放弃，重试时文件已不存在
+	// → 备份恢复逻辑不执行、进度字段整体归零。备份重建 = 本次写入已基于备份完整
+	// 重建（非增量 patch），跳过 mtime 复校验（无并发窗口：我们刚 rename 走了损坏文件）
+	let rebuiltFromCorrupt = false;
 	try {
 		const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<
 			string,
@@ -541,11 +573,73 @@ export function writeAuditState(
 	} catch {
 		// 文件缺失（首次）或损坏：损坏则先备份再重建，防进度被默认值覆盖
 		if (fs.existsSync(file)) {
+			let backup = "";
 			try {
-				fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
+				backup = `${file}.corrupt-${Date.now()}`;
+				fs.renameSync(file, backup);
 				console.warn(`audit state 损坏，已备份为 .corrupt-* 后重建: ${file}`);
 			} catch {
 				/* 备份失败不阻塞写 */
+			}
+			// LC-09：从备份恢复可解析字段（备份损坏/缺失时回退传入快照）。
+			// 注意 merge 顺序：传入 state 是「损坏时 readAuditState 返回的 DEFAULT +
+			// patch 字段」——直接 {...备份, ...state} 会让 DEFAULT 默认值覆盖备份的
+			// 真实进度（lastAuditedId/convExtractedLine/gatedHead/signature 归零）。
+			// 只让 state 中**非默认值**的字段（= 本次 patch 真正设置的）覆盖备份。
+			// 新备份 = 刚 rename 的损坏文件（半程写），大概率不可解析——按 mtime 新→旧
+			// 扫描目录内全部 .corrupt-*，取第一个可解析的（上次损坏/IO 错误场景备份的
+			// 完整旧版可恢复进度；sweepAtomicWrites 保留最新 1 份，旧备份写前未被清）。
+			if (backup) {
+				const candidates = [backup];
+				try {
+					const dirEntries = fs
+						.readdirSync(path.dirname(file), { withFileTypes: true })
+						.filter(
+							(e) =>
+								e.isFile() &&
+								e.name.startsWith(`${path.basename(file)}.corrupt-`),
+						)
+						.map((e) => path.join(path.dirname(file), e.name))
+						.sort((a, b) => {
+							try {
+								return fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs;
+							} catch {
+								return 0;
+							}
+						});
+					candidates.push(...dirEntries.filter((p) => p !== backup));
+				} catch {
+					/* 目录扫描失败：只试新备份 */
+				}
+				for (const b of candidates) {
+					try {
+						const raw = JSON.parse(
+							fs.readFileSync(b, "utf-8"),
+						) as Record<string, unknown>;
+						const nonDefault: Record<string, unknown> = {};
+						for (const k of Object.keys(state)) {
+							const key = k as keyof AuditState;
+							// 进度类字段：仅非默认值覆盖备份（防 DEFAULT 归零备份进度）；
+							// 锁/重置类字段（inFlight/auditFindings/lastError）：总是覆盖
+							// ——它们是操作语义不是进度（复审 Finding 2：failed 释放锁
+							// 补丁 inFlight:false、锁获取的 auditFindings:[] 清零若被过滤，
+							// 损坏重建后锁沿用备份 true → 有界停摆 / 陈旧 findings 被注入）
+							if (
+								key === "inFlight" ||
+								key === "auditFindings" ||
+								key === "lastError" ||
+								state[key] !== DEFAULT_STATE[key]
+							) {
+								nonDefault[k] = state[key];
+							}
+						}
+						merged = { ...raw, ...nonDefault };
+						rebuiltFromCorrupt = true;
+						break;
+					} catch {
+						/* 该备份不可解析：试下一个 */
+					}
+				}
 			}
 		}
 	}
@@ -558,7 +652,13 @@ export function writeAuditState(
 		// rename 紧前 mtime 复校验（v1.0.27 决策审计者 D-028 偏离项）：entry 校验在
 		// tmp 写（含 flush fsync）之前，fsync 期间他写者落盘由 verify-after-write 兜底；
 		// entry 校验通过后、rename 前落盘的写入由本复校验拦截（窗口 µs 级）。
-		if (expectedMtime !== undefined && auditStateMtime(cwd) !== expectedMtime) {
+		// v1.0.28（LC-09）：损坏重建路径跳过复校验（文件已被 rename 备份，mtime 为
+		// null 而非 expectedMtime——误判冲突会让备份恢复逻辑在重试轮失效）
+		if (
+			!rebuiltFromCorrupt &&
+			expectedMtime !== undefined &&
+			auditStateMtime(cwd) !== expectedMtime
+		) {
 			try {
 				fs.unlinkSync(tmp);
 			} catch {
@@ -583,9 +683,7 @@ export function writeAuditState(
 	// 重读最新内容重试——单次重试不覆盖窗口内到达的写入，写后验证才兜住。
 	try {
 		if (fs.readFileSync(file, "utf-8") !== payload) {
-			console.warn(
-				`audit state 写后验证失败（并发覆盖），按冲突放弃: ${file}`,
-			);
+			console.warn(`audit state 写后验证失败（并发覆盖），按冲突放弃: ${file}`);
 			return false;
 		}
 	} catch {
@@ -599,16 +697,24 @@ export function writeAuditState(
  * 任何写点都应走这里——直接 writeAuditState 全量写会覆盖他写者并发推进的字段
  * （L1 锁兑现：spawn 前置写/清残留锁/failed 标记曾忽略返回值，冲突时静默丢更新）。
  * 返回是否写入；两次都冲突（他写者持续写入）→ false，调用方决定跳过本轮。
+ * 函数式重派生（v1.0.28 双审计 F-01）：patch 可为函数 `(latest) => Partial | null`——
+ * 重试轮从 fresh state 重派生 patch 值，杜绝调用方一次性构建的陈旧值覆盖并发写者
+ * （实证窗口：锁获取 patch {inFlight:true, auditStartedAt} 在 attempt 1 用旧 auditStartedAt
+ * 覆盖他方已推进值 → 双实例都认为持锁双 spawn）。函数返回 null = 基于最新 state 放弃
+ * （如最新已持锁）——调用方检查返回值后按放弃处理。
  */
-export function patchAuditState(
-	cwd: string,
-	patch: Partial<AuditState>,
-): boolean {
+export type AuditStatePatch =
+	| Partial<AuditState>
+	| ((latest: AuditState) => Partial<AuditState> | null);
+
+export function patchAuditState(cwd: string, patch: AuditStatePatch): boolean {
 	for (let attempt = 0; attempt < 2; attempt++) {
 		// mtime 与读配对（v1.0.27 D-028 偏离项）：expectedMtime 必须是「读时刻的
 		// mtime」——写时刻再取会漏掉 read→stat 间隙的并发写入（见 readAuditStateWithMtime）
 		const { state, mtime } = readAuditStateWithMtime(cwd);
-		const ok = writeAuditState(cwd, { ...state, ...patch }, mtime);
+		const resolved = typeof patch === "function" ? patch(state) : patch;
+		if (resolved === null) return false; // 函数式放弃（如最新已持锁）
+		const ok = writeAuditState(cwd, { ...state, ...resolved }, mtime);
 		if (ok) return true;
 	}
 	return false;
@@ -675,9 +781,7 @@ export function recordSignature(
 					...sig,
 					at: Date.now(),
 					head:
-						head !== undefined
-							? head
-							: (state.signature?.head ?? gitHead(cwd)),
+						head !== undefined ? head : (state.signature?.head ?? gitHead(cwd)),
 				},
 				signatureConvLine: nextConvLine,
 				blockedStreak,
@@ -824,6 +928,9 @@ export const PURE_CHAT_PLACEHOLDER = "本轮纯咨询，无审计对象";
  *    中间态跨会话交付，边界 3）。
  * 纯咨询轮：inFlight=false + findings=[占位] → 占位过滤后空 → 不注入（零注入承诺，D-006）。
  * 审计正常收尾（signature 已写）：中间态不再注入，价值走 signature 通道（blockers）。
+ * v1.0.28 双审计 F-05：启动占位 '审计开始…' 前缀也过滤（与超时降级路径同规则）——
+ * 审计者首写 auditFindings=['审计开始'] 即 inFlight=true，若不滤此占位，新会话首轮
+ * 会把「在跑审计」误当「被中断审计」注入噪音（超时路径 v1.0.27 已前缀过滤，注入路径漏）。
  */
 export function shouldInjectInterimFindings(
 	state: AuditState,
@@ -832,9 +939,10 @@ export function shouldInjectInterimFindings(
 	if (state.auditFindings.length === 0 || injectedAt === state.auditStartedAt) {
 		return false;
 	}
-	if (!state.auditFindings.some((f) => f !== PURE_CHAT_PLACEHOLDER)) {
-		return false;
-	}
+	const hasReal = state.auditFindings.some(
+		(f) => f !== PURE_CHAT_PLACEHOLDER && !f.startsWith("审计开始"),
+	);
+	if (!hasReal) return false;
 	return state.inFlight === true || state.signature === null;
 }
 
@@ -847,7 +955,10 @@ export function shouldInjectInterimFindings(
  * failed = spawn 失败标记，非审计签名（v1.0.24：多实例下 failed.at 可晚于本轮
  * auditStartedAt，不排除会劫持门禁完成判定）→ 永不视为完成。
  */
-export function isAuditCompleted(state: AuditState, startedAt: number): boolean {
+export function isAuditCompleted(
+	state: AuditState,
+	startedAt: number,
+): boolean {
 	if (!state.signature) return false;
 	const sig = state.signature;
 	if (sig.status === "failed") return false;
@@ -855,14 +966,22 @@ export function isAuditCompleted(state: AuditState, startedAt: number): boolean 
 	// B5 代码兜底：审计者手写 signature 漏 at（消毒为 0）时，用 lastAuditAt 判定——
 	// 收尾写会把 lastAuditAt 置当前，故 lastAuditAt >= startedAt 且 !inFlight = 刚签名完成；
 	// 旧轮签名（无 at）的 lastAuditAt 早于本轮 startedAt，不会被误判。
+	// 时钟容差（v1.0.28 双审计 LC-06）：state 内容时间戳（at/auditStartedAt）由各实例自己
+	// Date.now 写入——网络盘双机共享 state.json 时跨主机时钟偏移破坏 at 序关系（慢钟机签名
+	// at < 快钟机 auditStartedAt → 门禁永不完成 300s 假超时）。加容差吸收偏移 + 同机 NTP 抖动；
+	// runId 身份校验仍独立把关（容差不放行他 run 的签名）。
 	const atOk =
-		sig.at >= startedAt || (sig.at === 0 && state.lastAuditAt >= startedAt);
+		sig.at >= startedAt - CLOCK_SKEW_GRACE_MS ||
+		(sig.at === 0 && state.lastAuditAt >= startedAt);
 	if (!atOk || state.inFlight) return false;
 	if (state.auditRunId && sig.runId && sig.runId !== state.auditRunId) {
 		return false; // 签名属于其他 spawn 的审计者
 	}
 	return true;
 }
+
+/** 跨主机时钟偏移容差（LC-06）：双机经网络盘共享 state.json 时允许的 at 序偏差。 */
+export const CLOCK_SKEW_GRACE_MS = 5 * 60 * 1000;
 
 /**
  * 审计结论注入判据（v1.0.24 行为级测试目标，从 before_agent_start 抽出的纯函数）：
@@ -906,8 +1025,7 @@ export function shouldClearStaleLock(
 	now: number = Date.now(),
 ): boolean {
 	const auditTooRecent =
-		state.auditStartedAt > 0 &&
-		now - state.auditStartedAt < IN_FLIGHT_TTL_MS;
+		state.auditStartedAt > 0 && now - state.auditStartedAt < IN_FLIGHT_TTL_MS;
 	return state.inFlight === true && !hasInMemoryLock && !auditTooRecent;
 }
 
@@ -986,7 +1104,6 @@ export function appendConv(
  * 重写走唯一 tmp + rename 原子落盘（直接 writeFileSync 覆盖是截断写，SIGKILL 落
  * 在写中会截断整个 convlog——原 append-only 最多丢一行）。
  */
-const MAX_CONVLOG_LINES = 1000;
 const MAX_CONVLOG_BYTES = 1024 * 1024;
 /** 截断后目标字节上限（≈ 阈值一半），防 CJK 行宽下震荡。 */
 const TRIM_TARGET_BYTES = MAX_CONVLOG_BYTES / 2;
@@ -1125,13 +1242,39 @@ export function readProcess(cwd: string, maxChars = 8000): string {
 /** convlog 总行数（不含头注释），用于增量提取定位。只统计对话行（## 👤 / ## 🤖）。
  * 进程内缓存（JD 审计 #22）：convlog 永久追加无滚动截断（实测 428KB/天），
  * 每轮 agent_end 调用 3-6 次、每次整读 O(n)——按 (mtime,size) 缓存，文件未变
- * （同轮多次调用）直接返回；其他实例追加 → mtime/size 变 → 重扫。 */
+ * （同轮多次调用）直接返回；其他实例追加 → mtime/size 变 → 重扫。
+ * v1.0.28 双审计 F-09：缓存键追加文件尾 64 字节的弱哈希——粗粒度文件系统（FAT 2s）
+ * 同 tick 追加且追加后 size 恰好不变（append+截断平衡）时 (mtime,size) 不变但内容已变，
+ * 旧缓存行数会让 hasNewConversation 漏判。尾哈希命中即重扫，成本可忽略（append 场景
+ * size 单调增，命中后键自然变化）。 */
 let convLineCache: { key: string; count: number } | null = null;
 export function convLogLineCount(cwd: string): number {
 	try {
 		const file = convlogPath(cwd);
 		const st = fs.statSync(file);
-		const key = `${file}:${st.mtimeMs}:${st.size}`;
+		// 尾哈希：读最后 64 字节（内容不变时与整读一致；文件 <64B 则全读）
+		const tailLen = Math.min(64, st.size);
+		const tailHash = (() => {
+			try {
+				const fd = fs.openSync(file, "r");
+				try {
+					const buf = Buffer.alloc(tailLen);
+					fs.readSync(fd, buf, 0, tailLen, st.size - tailLen);
+					// 轻量弱哈希（FNV-1a 32 位）
+					let h = 0x811c9dc5;
+					for (const b of buf) {
+						h ^= b;
+						h = Math.imul(h, 0x01000193) >>> 0;
+					}
+					return h.toString(36);
+				} finally {
+					fs.closeSync(fd);
+				}
+			} catch {
+				return "";
+			}
+		})();
+		const key = `${file}:${st.mtimeMs}:${st.size}:${tailHash}`;
 		if (convLineCache && convLineCache.key === key) {
 			return convLineCache.count;
 		}
@@ -1183,8 +1326,27 @@ export function convlogForeignRuns(cwd: string, ownRunId: string): number {
 		// 并发 = 不同进程；ownRunId 带 pid 前缀（run-<pid>-…）时按 pid 判定，
 		// 否则（旧格式 run-xxx）回退到 run 标记全等判定
 		const ownPid = /^run-(\d+)-/.exec(ownRunId)?.[1];
+		// v1.0.28 双审计 F-07：时间窗——只统计「距文件末尾最近 FOREIGN_SCAN_WINDOW 条
+		// 对话行」内的外来用户行。convlog 是 append-only，外来行一旦出现永久存在——
+		// 无窗口时守卫命中一次即会话内永久停摆（B 关闭后 A 仍因 B 的历史行恒 >0，
+		// 自动审计/门禁永远短路，直到重启会话；F-07 实证）。窗口内无外来行 = 对方已
+		// 停止（或已退出）→ 守卫自然恢复，无需重启。仍先于 stale 锁清理执行
+		// （多实例在跑时不得清对方锁——位置语义不变）。
+		const WINDOW = 50; // 最近 50 条对话行（约一个活跃会话的量级）
+		let windowStart = firstOwn + 1;
+		let seen = 0;
+		for (let i = lines.length - 1; i > firstOwn; i--) {
+			const t = lines[i].trim();
+			if (t.startsWith("## 👤") || t.startsWith("## 🤖")) {
+				seen++;
+				if (seen > WINDOW) {
+					windowStart = i + 1;
+					break;
+				}
+			}
+		}
 		let n = 0;
-		for (let i = firstOwn + 1; i < lines.length; i++) {
+		for (let i = windowStart; i < lines.length; i++) {
 			const t = lines[i].trim();
 			if (!t.startsWith("## 👤")) continue; // 只看用户行
 			// 真实标记由 appendConv 追加在行尾——锚定行尾取真标记，防用户正文内嵌

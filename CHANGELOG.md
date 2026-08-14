@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.0.28] - 2026-08-14
+
+生命周期审计第三轮（函数式专家 F-01~10 + Jeff Dean 系统设计 LC-01~10 双视角独立审查，独立 reviewer 复审闭环）——并发读写、多会话共享私人数据空间（.pi/decision-auditor/）、跨会话串台：
+
+- **F-01 锁劫持根治（high）**：patchAuditState 重试曾把调用方一次性构建的陈旧 patch 值覆盖并发写者（锁获取 patch {inFlight:true, auditStartedAt} 在 attempt 1 用旧 auditStartedAt 覆盖他方已推进值 → 双实例都认为持锁各自 spawn 双审计）。patch 支持函数式重派生 `(latest) => Partial | null`：重试轮从 fresh state 重派生，最新已持锁返回 null 放弃；agent_end 与 /pair-audit 两个锁获取点改函数式（值固定到 lockStartedAtWall 变量，成功落盘后记入内存条目）
+- **F-02 会话身份守卫（high）**：session_shutdown 的 inFlight:false 补丁此前无条件清锁——await stopRun（≤10s）窗口内他会话重获新锁会被清掉 → 对方审计无锁运行 + 下轮双审计。补丁加身份守卫：仅当磁盘锁仍属于被 stop 的 run（auditRunId 匹配，或 runId 为空时）才清
+- **F-03/LC-05 孤儿 run 闭环（high）**：spawn rpc 900s 客户端超时 ≠ run 终止——catch 立即释放锁 + failed 标记 → 下轮重 spawn 与孤儿 run 并发双审计。改：runId 已知先 stopRun 再释放；runId 未知（rpc 超时，run 可能存活）**保留锁与内存条目**，由 TTL + stale-lock 兜底释放（并发双写转为有界停摆 ≤16min）；failed 写检查返回值——写冲突失败保留内存锁（防 failed 标记丢失 + 锁已释放双缺口）；/pair-audit catch 同策略
+- **LC-03 门禁归属校验（high，串台门禁层根治）**：state.inFlight 可能属于另一会话/另一实例，其审计者签名（runId 匹配 auditRunId 单槽）会满足 isAuditCompleted → **B 会话的门禁用 A 会话的审计结论放行**（B 的提交未审即过 + A 的 blockers 注入 B）。agent_end 门禁等待前校验：state.auditStartedAt === 本会话 spawn 时写入值（内存 auditStartedAtWall）才等待；不匹配或内存无条目（跨进程/切会话）→ 不等待不签名，通知后返回（不推进 gatedHead，锁释放后下轮重审）
+- **LC-06 时钟容差（中）**：state 内容时间戳由各实例 Date.now 写入，网络盘双机共享时跨主机时钟偏移破坏 at 序（慢钟机签名 at < 快钟机 auditStartedAt → 门禁永不完成 300s 假超时）。isAuditCompleted 加 CLOCK_SKEW_GRACE_MS=5min 容差（runId 身份校验仍独立把关）；测试锁定容差内完成/超容差旧签名未完成
+- **LC-07 决策链并发丢条目（high）**：appendDecision 的 expectedMtime 在 readRaw 之后捕获（read→stat 窗口吸收他写者写入）+ verify 无末尾语义（两写者交错 rename 后双方都成功返回、他写者条目被吞）。mtime 先于 readRaw 取；写后验证增加「我的 id 存在且是文件末尾条目」语义校验
+- **F-05 中间态注入串台（中）**：shouldInjectInterimFindings 此前只滤纯咨询占位——审计者首写 auditFindings=['审计开始'] 即 inFlight=true，新会话首轮把「在跑审计」误当「被中断审计」注入噪音（超时降级路径 v1.0.27 已前缀过滤，注入路径漏同一过滤）。启动占位 '审计开始…' 前缀过滤（混合真实 findings 仍注入）
+- **F-06 注入去重前移（中，串台残留窗口）**：注入后 patch 去重标记失败（审计者并发写 mtime 冲突恰是高频场景）→ 去重只在内存 map，新会话从 state 恢复旧值 → 同签名每个新会话重复注入（「新会话还有泄露」残留窗口）。改：**先**持久化去重标记成功才注入/才 followUp；复审补：回退值用 state 持久化值（防仅中间态注入时把已持久化签名去重标记覆写 null）
+- **F-07 多实例守卫时间窗（中）**：convlogForeignRuns 守卫命中一次即会话内永久停摆（外来行永久留在 append-only 文件，无恢复路径，双实例互锁禁用自动审计）。只统计本实例首行之后最近 50 条对话行内的外来行——对方停止后守卫自然恢复，无需重启
+- **F-08 L2 冷却键（低）**：deliveryAuditInFlight 30min 冷却以 cwd 为键 → 同进程新会话在冷却期内的新提交被吞 L2（修复轮最需要深度审查的时刻）。冷却键改 (cwd, head)——同 HEAD 防重复，HEAD 推进 = 新交付允许重新 fanout；setTimeout unref()
+- **F-09 convLineCache 键（低）**：(mtime,size) 键在粗粒度文件系统（FAT 2s）同 tick 追加且 size 不变时返回陈旧行数 → hasNewConversation 漏判。缓存键加文件尾 64B FNV-1a 弱哈希（命中即重扫，append 场景 size 单调增成本可忽略）
+- **LC-08 可观测性（低）**：冲突 warn 带写者 pid（双写者排查可归因）；readAuditState catch 区分 ENOENT（首次静默）与损坏（warn 告警，此前损坏窗口内零告警读到默认值）；agent_end 成功进入审计流程清 lastError（此前只写不清，历史异常永久显示误导诊断）
+- **LC-09 损坏重建丢进度（低-中）**：.corrupt 重建此前用调用方快照（损坏时 readAuditState 返回 DEFAULT）→ 进度字段（lastAuditedId/convExtractedLine/signature/gatedHead/injected*）整体归零 → 全量重审 + 门禁基线吞未审提交 + 去重丢失重复注入。改：按 mtime 新→旧扫描全部 .corrupt-* 取第一个可解析的恢复（merge 顺序防 DEFAULT 覆盖备份进度）；「清零类补丁」（inFlight/auditFindings/lastError）总是覆盖备份（failed 释放锁/JD#23 重置生效）；rebuiltFromCorrupt 跳过 rename 前 mtime 复校验（文件已被本人 rename 走，误判冲突会让恢复在重试轮失效）
+- **LC-10 projectRoot 惰性复核（低）**：首次解析后终身缓存（仅 session_start 重置）——会话内 cwd 切换时 B 目录对话写入 A 根 convlog（A 的 git 状态审 B 的对话 → 跨项目串台）。每次调用与 resolveProjectRoot 复核，变化即更新缓存（纯函数一次祖先链探测，成本可忽略）
+- **F-10 呼吸灯自愈（低）**：setStatus 抛错（会话异常结束/teardown 中断，timer 无 session_shutdown 清理）→ 自清 timer 灭灯，防「审计进行中」永久常亮
+- 测试：56/56 通过（+4：F-01 函数式重派生 3 断言 / LC-09 备份恢复 + 清零补丁 / F-07 时间窗 / F-05 占位前缀 / LC-06 时钟容差），tsc 0 错误
+
 ## [1.0.27] - 2026-08-14
 
 生命周期泄露审计（v1.0.26 泄露修复的残留资源闭环）——子代理 run / 文件 / 内存状态三类资源：

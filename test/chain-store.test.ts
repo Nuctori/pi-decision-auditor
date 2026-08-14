@@ -579,11 +579,14 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	);
 	// v1.0.25：注入去重持久化——injectedSignatureAt/injectedInterimAt 必须落 state.json
 	// （同一签名只注入一次，新会话不再重复弹出审计结论——「新会话还有泄露」根治）
+	// v1.0.28（F-06）：持久化**前移**到注入前（patch 成功才注入）——格式允许换行；
+	// 复审 Finding 4：回退值用 state 持久化值（非 null 清空——防仅中间态注入时
+	// 把已持久化的签名去重标记覆写为 null 导致重复注入）
 	assert.ok(
-		src.includes(
-			"injectedSignatureAt: injectedSignatureAt.get(root) ?? null",
-		) && src.includes("injectedInterimAt: injectedInterimAt.get(root) ?? null"),
-		"注入后必须持久化去重标记到 state.json（跨会话去重，v1.0.25）",
+		src.includes("injectedSignatureAt.get(root) ??") &&
+			src.includes("injectedInterimAt.get(root) ??") &&
+			!src.includes("injectedSignatureAt.get(root) ?? null"),
+		"注入前必须持久化去重标记（跨会话去重 + F-06 先持久化成功才注入 + 回退持久化值不覆写 null）",
 	);
 	// B2：convExtractedLine 单位钳制（审计者写文件行号超界 → 钳制，防对话增量触发断线）
 	assert.ok(
@@ -1074,6 +1077,33 @@ test("shouldInjectInterimFindings：中间态注入判据（B1 行为级 + 边�
 		),
 		false,
 	);
+	// v1.0.28（F-05）：启动占位 '审计开始…'（含变体）→ 不注入——在跑审计不得被
+	// 误当「被中断审计」注入噪音（与超时降级路径同过滤规则）
+	assert.equal(
+		shouldInjectInterimFindings(
+			{ ...base, auditFindings: ["审计开始"] },
+			undefined,
+		),
+		false,
+		"启动占位「审计开始」→ 不注入（F-05：在跑审计 ≠ 被中断）",
+	);
+	assert.equal(
+		shouldInjectInterimFindings(
+			{ ...base, auditFindings: ["审计开始：窗口=…"] },
+			undefined,
+		),
+		false,
+		"启动占位变体「审计开始：…」→ 不注入（前缀匹配）",
+	);
+	// 真实发现 + 启动占位混合 → 有真实 findings 仍注入（只滤纯占位）
+	assert.equal(
+		shouldInjectInterimFindings(
+			{ ...base, auditFindings: ["审计开始", "已确认缺口：X"] },
+			undefined,
+		),
+		true,
+		"启动占位 + 真实发现 → 注入（占位过滤不吞真实发现）",
+	);
 });
 
 test("shouldInjectSignatureFindings：结论注入判据 + 新鲜度校验（v1.0.24 跨会话泄露根治）", () => {
@@ -1310,14 +1340,30 @@ test("v1.0.26：isAuditCompleted 完成判定（at 锚点 + runId 身份 + faile
 		true,
 		"blocked 签名 at>=startedAt → 完成（blocked 也是完成，防覆盖真实 blockers）",
 	);
-	// 旧轮签名（at < startedAt）→ 未完成
+	// 旧轮签名（at 远早于 startedAt，超时钟容差）→ 未完成
+	assert.equal(
+		isAuditCompleted(
+			{
+				...base,
+				signature: {
+					status: "passed",
+					at: 1000 - 10 * 60 * 1000,
+				},
+			},
+			1000,
+		),
+		false,
+		"超时钟容差的旧轮签名（10min 前）→ 未完成",
+	);
+	// v1.0.28（LC-06）：时钟容差内签名（跨主机/网络盘时钟偏移）→ 完成
+	// （at=500、startedAt=1000 差 500ms 在 CLOCK_SKEW_GRACE_MS=5min 容差内）
 	assert.equal(
 		isAuditCompleted(
 			{ ...base, signature: { status: "passed", at: 500 } },
 			1000,
 		),
-		false,
-		"旧轮签名 at < startedAt → 未完成",
+		true,
+		"v1.0.28 时钟容差：at 落后 startedAt 在容差内 → 完成（LC-06 跨主机偏移）",
 	);
 	// inFlight=true → 未完成（审计者还在收尾）
 	assert.equal(
@@ -1602,7 +1648,7 @@ test("v1.0.27：appendDecision 字段消毒（换行单行化 + 截断，防伪�
 	assert.equal(parseChain(readRaw(dir)).length, 1, "伪条目未注入链");
 });
 
-test("v1.0.27：resetForSessionStart 保留锁时覆写 auditRunId（会话边界门禁覆盖）", () => {
+	test("v1.0.27：resetForSessionStart 保留锁时覆写 auditRunId（会话边界门禁覆盖）", () => {
 	const dir = tmpDir();
 	// 审计在跑（未超 TTL）→ 保留锁 + 覆写 auditRunId 为新鲜值
 	writeAuditState(dir, {
@@ -1627,4 +1673,120 @@ test("v1.0.27：resetForSessionStart 保留锁时覆写 auditRunId（会话边�
 	const st2 = readAuditState(dir);
 	assert.equal(st2.inFlight, false, "过期锁清除");
 	assert.equal(st2.auditRunId, "run-old-002", "清锁轮不覆写 auditRunId");
+});
+
+test("v1.0.28：patchAuditState 函数式重派生（F-01 锁劫持根治）", () => {
+	const dir = tmpDir();
+	// ① 函数式 patch：latest 已持锁 → 返回 null 放弃（防劫持他写者锁）
+	const wall = Date.now();
+	// 模拟他写者已持锁
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		inFlight: true,
+		auditStartedAt: wall - 1000,
+	});
+	const got = patchAuditState(dir, (latest) =>
+		latest.inFlight ? null : { inFlight: true, auditStartedAt: wall },
+	);
+	assert.equal(got, false, "latest.inFlight=true → 函数式放弃（不覆盖他写者锁）");
+	const st = readAuditState(dir);
+	assert.equal(st.inFlight, true, "锁保持他写者状态");
+	assert.equal(st.auditStartedAt, wall - 1000, "auditStartedAt 未被覆盖（防锁劫持）");
+	// ② 函数式 patch：latest 未持锁 → 正常写入
+	writeAuditState(dir, { ...readAuditState(dir), inFlight: false });
+	const got2 = patchAuditState(dir, (latest) =>
+		latest.inFlight ? null : { inFlight: true, auditStartedAt: wall },
+	);
+	assert.equal(got2, true, "latest 未持锁 → 写入成功");
+	assert.equal(readAuditState(dir).inFlight, true);
+	// ③ 对象式 patch 兼容（既有调用点）
+	assert.equal(patchAuditState(dir, { convExtractedLine: 42 }), true);
+	assert.equal(readAuditState(dir).convExtractedLine, 42);
+});
+
+test("v1.0.28：writeAuditState 损坏重建从 .corrupt 备份恢复字段（LC-09）", () => {
+	const dir = tmpDir();
+	// 构造完整 state（进度字段有值）→ 损坏 → 下一次写应保留备份中的进度
+	const file = auditStatePath(dir);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		lastAuditedId: "D-007",
+		convExtractedLine: 123,
+		gatedHead: "abc123",
+		signature: { status: "blocked", at: 5000, blockers: ["缺口"] },
+	});
+	// 模拟「磁盘已有可解析的旧 .corrupt-* 备份」（上次损坏/IO 错误场景备份的完整旧版，
+	// sweepAtomicWrites 保留最新 1 份、写前未被清）——本测试把当前完整 state 复制一份
+	// 作为旧备份；真实场景中它是上次损坏时保留的完整旧文件
+	const oldBackup = `${file}.corrupt-${Date.now() - 60000}`;
+	fs.copyFileSync(file, oldBackup);
+	// 损坏 state.json（模拟 SIGKILL 半程写——新备份不可解析）
+	fs.writeFileSync(file, "{corrupt json", "utf-8");
+	// 下一次 patch 写：触发 .corrupt 备份 + 重建（新备份损坏 → 扫描旧备份恢复）
+	const ok = patchAuditState(dir, { inFlight: true });
+	assert.equal(ok, true, "损坏后 patch 成功（备份重建）");
+	const st = readAuditState(dir);
+	// LC-09：进度字段从旧备份恢复（此前 DEFAULT 重建会整体归零）
+	assert.equal(st.lastAuditedId, "D-007", "lastAuditedId 从备份恢复");
+	assert.equal(st.convExtractedLine, 123, "convExtractedLine 从备份恢复");
+	assert.equal(st.gatedHead, "abc123", "gatedHead 从备份恢复");
+	assert.ok(st.signature?.status === "blocked", "signature 从备份恢复");
+	assert.equal(st.inFlight, true, "本次 patch 字段生效（非默认字段覆盖备份）");
+	// .corrupt-* 备份文件存在（新损坏文件已备份）
+	const dirEntries = fs.readdirSync(path.dirname(file));
+	assert.ok(
+		dirEntries.some((e) => e.startsWith("state.json.corrupt-")),
+		"损坏文件已备份为 .corrupt-*",
+	);
+});
+
+test("v1.0.28：损坏重建保留清零类补丁（复审 Finding 2——inFlight:false/auditFindings 覆盖备份）", () => {
+	const dir = tmpDir();
+	const file = auditStatePath(dir);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	// 备份含 inFlight:true + 陈旧 findings（模拟审计在跑时损坏）
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		inFlight: true,
+		auditFindings: ["陈旧结论"],
+		convExtractedLine: 77,
+	});
+	const oldBackup = `${file}.corrupt-${Date.now() - 60000}`;
+	fs.copyFileSync(file, oldBackup);
+	fs.writeFileSync(file, "{corrupt json", "utf-8");
+	// 清零类补丁：spawn 失败释放锁 + 清 findings
+	const ok = patchAuditState(dir, { inFlight: false, auditFindings: [] });
+	assert.equal(ok, true, "损坏重建成功");
+	const st = readAuditState(dir);
+	assert.equal(st.inFlight, false, "清零补丁 inFlight:false 覆盖备份的 true（失败释放锁生效）");
+	assert.deepEqual(st.auditFindings, [], "清零补丁 auditFindings:[] 覆盖备份陈旧 findings（JD#23 重置生效）");
+	assert.equal(st.convExtractedLine, 77, "进度字段仍从备份恢复");
+});
+
+test("v1.0.28：convlogForeignRuns 时间窗（F-07 防会话内永久停摆）", () => {
+	const dir = tmpDir();
+	// 本实例首行之后有外来行，但已远离窗口（>50 条本实例对话行之后）→ 不算并发
+	appendConv(dir, "user", "本实例请求", "run-a");
+	appendConv(dir, "assistant", "本实例回复", "run-a");
+	appendConv(dir, "user", "并发实例的历史行（窗口外）", "run-b");
+	// 追加 60 条本实例对话行，把 run-b 的行推出 50 行窗口
+	for (let i = 0; i < 60; i++) {
+		appendConv(dir, "user", `本实例后续对话 ${i}`, "run-a");
+		appendConv(dir, "assistant", `本实例后续回复 ${i}`, "run-a");
+	}
+	assert.equal(
+		convlogForeignRuns(dir, "run-a"),
+		0,
+		"外来行被推出窗口（60 条本实例行后）→ 守卫恢复，不永久停摆",
+	);
+	// 窗口内仍有外来行 → 检出
+	const dir2 = tmpDir();
+	appendConv(dir2, "user", "本实例请求", "run-a");
+	appendConv(dir2, "user", "并发实例活跃行", "run-b");
+	assert.equal(
+		convlogForeignRuns(dir2, "run-a"),
+		1,
+		"窗口内外来行仍检出（多实例并发检测不失效）",
+	);
 });

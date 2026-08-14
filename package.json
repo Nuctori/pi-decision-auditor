@@ -1,6 +1,6 @@
 {
   "name": "pi-pair",
-  "version": "1.0.27",
+  "version": "1.0.28",
   "description": "Pair decision audit for pi coding agent: fresh-spawn pair auditor, real-artifact gating, delivery gate, decision chain capture (English README + 中文文档)",
   "license": "MIT",
   "author": "Nuctori",
@@ -12,7 +12,13 @@
   "bugs": {
     "url": "https://github.com/Nuctori/pi-pair/issues"
   },
-  "keywords": ["pi-package", "decision-audit", "pair-programming", "audit", "decision-chain"],
+  "keywords": [
+    "pi-package",
+    "decision-audit",
+    "pair-programming",
+    "audit",
+    "decision-chain"
+  ],
   "type": "module",
   "files": [
     "extensions/",
@@ -41,15 +47,25 @@
     "typescript": "^5.5.0"
   },
   "pi": {
-    "extensions": ["./extensions"],
-    "skills": ["./skills"],
-    "prompts": ["./prompts"],
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts"
+    ],
     "subagents": {
-      "agents": ["./agents"]
+      "agents": [
+        "./agents"
+      ]
     },
     "image": "https://raw.githubusercontent.com/Nuctori/pi-pair/master/assets/pi-pair.png"
   },
   "pi-subagents": {
-    "agents": ["./agents"]
+    "agents": [
+      "./agents"
+    ]
   }
 }
