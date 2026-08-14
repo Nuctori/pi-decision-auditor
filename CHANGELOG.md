@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.31] - 2026-08-14
+
+L2 交付审查成本收敛（用户要求）：3 个独立 reviewer 并行 fanout → 1 个独立 reviewer 全维度单任务：
+
+- **L2 收敛（成本优化）**：交付轮并行 spawn 3 个 fresh reviewer（正确性 / 目标一致性 / 安全健壮性）改为 1 个 fresh reviewer 一次任务覆盖全部维度（任务内按三节逐项审查）——独立性与审查深度不变，算力成本约降 2/3（3 run → 1 run），孤儿 run 登记/TTL 回收、30min (cwd, head) 冷却防重复等机制原样保留（循环结构未动，仅角度表收敛为单条目）
+- 文档：README / README.zh-CN / docs/architecture.md 同步「1 个 fresh reviewer 全维度」
+- 测试：57/57 通过，tsc 0 错误
+
 ## [1.0.30] - 2026-08-14
 
 v1.0.29 发布后审计者 blocked 回归修复（M4）+ 复审 M1/L1/L2/L4 补齐——v1.0.29 生命周期修复的闭环收尾：

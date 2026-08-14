@@ -389,45 +389,24 @@ function buildAuditTask(
 	return lines.join("\n");
 }
 
-/** L2 交付审查：并行 fanout 多个 fresh reviewer 做产物级深度审查（交付前一次）。 */
+/** L2 交付审查：spawn 1 个 fresh reviewer 做产物级全维度深度审查（交付前一次；v1.0.31 成本收敛：原 3 角度并行 → 单审查者一次任务覆盖全部维度）。 */
 const DELIVERY_ANGLES: Array<{
 	name: string;
 	prompt: (cwd: string, runId: string) => string;
 }> = [
 	{
-		name: "正确性",
+		name: "全维度",
 		prompt: (cwd, runId) =>
-			`你是交付前独立审查者（角度：正确性/回归）。项目: ${cwd}。\n` +
+			`你是交付前独立审查者（全维度：正确性/回归 + 目标一致性/漂移 + 安全/健壮性）。项目: ${cwd}。\n` +
 			`审自上次审计（.pi/decision-auditor/state.json 的 signature.at——上次审计完成时间；无 signature 时用 lastAuditAt÷1000，首次审计用最近 20 个提交兜底，勿用 --since=0——git approxidate 怪癖会得空窗口）之后**已提交**的改动（git log --since + git show 逐个提交，13 位毫秒必须 ÷1000 转秒）与当前未提交 diff（git diff），以及 ${chainPath(cwd)}（默认 .pi/decision-auditor/chain.md，PI_PAIR_CHAIN_PUBLIC=1 时在 docs/decisions/chain.md）：\n` +
-			`1. 改动是否有 bug、边界错误、回归风险；\n` +
-			`2. 实现是否忠实执行了决策链中的每条决策（产物 vs 决策对照）；\n` +
-			`3. 决策链有无矛盾/悬空 supersede。\n` +
+			`1. 正确性/回归：改动是否有 bug、边界错误、回归风险；实现是否忠实执行了决策链中的每条决策（产物 vs 决策对照）；决策链有无矛盾/悬空 supersede。\n` +
+			`2. 目标一致性/漂移：读 .pi/decision-auditor/convlog.md（用户提示记录）推导任务目标。注意 convlog 由同一 cwd 下多个 pi 实例共享追加——本会话行 = 带 \`<!--run:${runId}-->\` 标记的行，推导目标只依据它们；无标记行（升级前历史/无法归属）仅作上下文、不得据此推导；其他 run 标记行（其他实例/审计者输出）忽略。当前改动是否服务于推导出的用户目标？有无目标外扩张？决策链条目是否与用户实际要求一致？主 agent 自述不可信，以 convlog 用户原话为准。\n` +
+			`3. 安全/健壮性：注入/越界/未处理错误/竞态等安全问题；状态损坏路径（如审计状态文件、并发写）；不变量破坏（append-only、supersede 语义等）。\n` +
 			`输出：按严重度排序的问题清单（文件:行号 + 建议）。只读，不改文件。`,
-	},
-	{
-		name: "目标一致性",
-		prompt: (cwd, runId) =>
-			`你是交付前独立审查者（角度：目标一致性/漂移）。项目: ${cwd}。\n` +
-			`读 .pi/decision-auditor/convlog.md（用户提示记录）推导任务目标，对照**自上次审计（state.json 的 signature.at；无签名用 lastAuditAt÷1000；首次用最近 20 个提交）之后已提交的改动（git log --since + git show）+ 当前未提交 diff（git diff）**与决策链：\n` +
-			`注意 convlog 由同一 cwd 下多个 pi 实例共享追加——本会话行 = 带 \`<!--run:${runId}-->\` 标记的行，推导目标只依据它们；无标记行（升级前历史/无法归属）仅作上下文、不得据此推导；其他 run 标记行（其他实例/审计者输出）忽略：\n` +
-			`1. 当前改动是否服务于推导出的用户目标？有无目标外扩张？\n` +
-			`2. 决策链条目是否与用户实际要求一致？\n` +
-			`3. 主 agent 自述不可信，以 convlog 用户原话为准。\n` +
-			`输出：漂移/偏离清单。只读，不改文件。`,
-	},
-	{
-		name: "安全与健壮性",
-		prompt: (cwd, runId) =>
-			`你是交付前独立审查者（角度：安全/健壮性）。项目: ${cwd}。\n` +
-			`审**自上次审计（state.json 的 signature.at；无签名用 lastAuditAt÷1000；首次用最近 20 个提交）之后已提交的改动（git log --since + git show，13 位毫秒 ÷1000 转秒）+ 当前未提交 diff（git diff）**与相关文件：\n` +
-			`1. 注入/越界/未处理错误/竞态等安全问题；\n` +
-			`2. 状态损坏路径（如审计状态文件、并发写）；\n` +
-			`3. 不变量破坏（append-only、supersede 语义等）。\n` +
-			`输出：按严重度排序的问题清单。只读，不改文件。`,
 	},
 ];
 
-/** 触发 L2 交付审查：并行 spawn 多个 fresh reviewer。
+/** 触发 L2 交付审查：spawn 1 个 fresh reviewer（全维度单任务）。
  *  v1.0.28 双审计 F-08：防重复键从 cwd 改为 (cwd, head)——30min 冷却曾以 cwd 为键，
  * 同进程同 cwd 新会话在冷却期内的新提交被吞 L2（修复轮最需要深度审查的时刻）；
  * 冷却只针对同 HEAD（同一次交付），HEAD 已推进（新提交）视为新交付允许重新 fanout。 */

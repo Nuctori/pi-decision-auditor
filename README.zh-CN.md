@@ -50,7 +50,7 @@ pi install npm:pi-pair
 
 1. 有真实产物的每轮被**审计**（目标推导 → 对抗式五维度进攻 → 签名）：常规轮异步不阻塞，交付轮同步门禁。发现缺口立即交付修复、再审直到干净。
 2. 你的**决策自动入链** `.pi/decision-auditor/chain.md`（append-only、自动编号）——从对话日志提取，不靠你自觉记录。
-3. **交付时**（"提交/发布/merge/部署"）3 个 fresh reviewer 并行深度交叉审查。
+3. **交付时**（"提交/发布/merge/部署"）1 个 fresh reviewer 全维度独立深度审查（正确性 / 目标一致性 / 安全健壮性）。
 
 依赖 **pi-subagents**（spawn 审计者）。见[安装](#安装)。
 
@@ -92,7 +92,7 @@ pi install npm:pi-pair
 
 L2 — 交付审查（用户说"提交/发布/merge/部署"等）
   └─ 仅当有真实交付物时（门禁：无 git diff 且无决策 → 跳过，不空审）
-  └─ 并行 fanout 3 个 fresh reviewer（正确性 / 目标一致性 / 安全健壮性）深度审查
+  └─ 1 个 fresh reviewer 全维度深度审查（正确性 / 目标一致性 / 安全健壮性）
 ```
 
 **fresh spawn 结对**：每次审计新起一个审计者 run（`context:"fork"`——继承本会话的对话上下文，理解"本会话"在做什么，无需常驻 run）。审计结束 run 即结束——无常驻进程、无生命周期登记、无残留。常规轮异步（不阻塞，findings 注入不打扰用户）；仅交付轮等签名。任何阶段发现任何 blocker 立即交付主 agent 处理、再审直到干净——用户看到的是修好的结果，不是审计的流程。**价值点可观察**：blockers / 中间态 auditFindings 以 `display:true` 注入（用户感知价值）；仅内部提示保持隐藏。

@@ -50,7 +50,7 @@ That's it. Start working normally — pi-pair hooks in automatically:
 
 1. Each round with real artifacts is **audited** (goal derivation → adversarial 5-dimension attack → signature): async in normal rounds (no blocking), sync gate on delivery rounds. Blockers are delivered immediately for fixing, re-audited until clean.
 2. Your **decisions are captured** into `.pi/decision-auditor/chain.md` (append-only, auto-numbered) — extracted from the conversation log, not from your initiative.
-3. On **delivery** ("submit / publish / merge / deploy"), 3 fresh reviewers fan out for a deep cross-check.
+3. On **delivery** ("submit / publish / merge / deploy"), 1 fresh reviewer does a full-dimension deep cross-check (correctness / goal-alignment / security-robustness).
 
 Requires **pi-subagents** (spawns the auditor). See [Installation](#installation).
 
@@ -93,7 +93,7 @@ each agent_end (when real work exists)
 
 L2 — delivery review (on "submit/publish/merge/deploy")
   └─ only when real deliverables exist (gate: no git diff & no decisions → skip, no empty review)
-  └─ parallel fanout 3 fresh reviewers (correctness / goal-alignment / security-robustness)
+  └─ 1 fresh reviewer, full-dimension deep review (correctness / goal-alignment / security-robustness)
 ```
 
 **Fresh-spawn pairing**: every audit spawns a fresh auditor run (`context:"fork"` — it inherits this session's conversation context, so it understands what "this session" is doing without a persistent run). The run ends when the audit ends — no resident process, no lifecycle bookkeeping, no residue. Normal rounds are async (no blocking, findings injected without user-visible noise); only delivery rounds await the signature. Any blocker found at any stage is delivered to the main agent immediately for fixing, re-audited until clean — the user sees the fixed result, not the audit process. Findings are value points: blockers / interim auditFindings are injected user-visible (`display:true`); only internal hints stay hidden.
