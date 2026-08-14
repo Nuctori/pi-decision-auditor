@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.30] - 2026-08-14
+
+v1.0.29 发布后审计者 blocked 回归修复（M4）+ 复审 M1/L1/L2/L4 补齐——v1.0.29 生命周期修复的闭环收尾：
+
+- **M4 stale 锁清理回归（high，审计者 blocked）**：F7 的 `deadStopped &&` 前置在无内存条目（agent_end 中断/崩溃/热重载 → 内存清空但 state.inFlight 残留）时恒 false → shouldClearStaleLock 永不执行 → v1.0.21 修过的 2.5h 假挂起回潮（会话内审计停摆到下次 session_start）。改 `(deadAuditor ? deadStopped : true) && shouldClearStaleLock(...)`——无条目时不受 stop 约束照常清锁（shouldClearStaleLock 自身 auditTooRecent 年龄条件把关，真在跑的审计不会误清）；有条目且 stop 失败（run 可能存活）才不清（保留 F7 防并发双写意图）。接线守卫补断言锁定
+- **M1 孤儿定时器 stop 后不清文件锁（中，复审）**：scheduleOrphanStop 定时器到点 stop 成功但 state.inFlight 无人清 → 会话内后续轮 spawn 跳过 + 门禁 LC-03 每轮误报刷屏。改：登记带 cwd，stop 成功后按 F-02 身份守卫（auditRunId 匹配）清文件锁
+- **L1 F7 stop 失败会话内无恢复路径（低-中，复审）**：deadAuditor stop 失败（rpc 忙/死）→ 条目已删无法重评估，会话内停摆到下次 session_start。改：stop 失败时孤儿登记重达（rpc 恢复后 TTL 到点重试 stop + M1 清锁复用，有界自愈）
+- **L2 async-complete TTL 兜底丢 runId（低，复审）**：fire-and-forget stop 失败即丢 runId（F4/B-2 封堵的泄漏类未覆盖此路径）。改：改用孤儿登记（stop 成功自动清文件锁）
+- **L4 B-1 守卫死代码（低）**：`orphanRunId === "" ||` 在外层 if 下恒 false，删除
+- 测试：57/57 通过（+M4 接线守卫断言），tsc 0 错误；审计者 blocked 闭环复核（四分支推演验证）
+
 ## [1.0.29] - 2026-08-14
 
 生命周期关系修复（v1.0.28 发布后双路独立审查 F1-F13/B-1~B-10 的剩余发现 + 用户架构原则 D-036）——审计生命周期与主会话生命周期的关系错误：

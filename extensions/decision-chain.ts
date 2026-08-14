@@ -498,7 +498,6 @@ const deliveryReviewerRuns = new Set<string>();
  */
 const orphanRunTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-
 // ---- 审计状态呼吸灯（TUI footer 常驻指示）：spawn 亮、完成/失败/超时灭 ----
 // setStatus(key, text) 是 footer 持久状态（传 undefined 清除）；无 i18n 框架，
 // 最小双语：PI_PAIR_LANG=en 切英文，默认中文（与现有 notify 文案一致）。
@@ -594,13 +593,39 @@ export default function (pi: ExtensionAPI): void {
 		}
 	};
 
-	/** 登记孤儿 run（v1.0.29 F4/B-2）：TTL 剩余时间后 best-effort stopRun。重复登记幂等。 */
-	function scheduleOrphanStop(runId: string, remainingMs: number): void {
+	/**
+	 * 登记孤儿 run（v1.0.29 F4/B-2）：TTL 剩余时间后 best-effort stopRun。重复登记幂等。
+	 * cwd 必传：stop 成功后按 F-02 身份守卫清文件锁（M1 集成缺口修复，v1.0.30 审计者
+	 * blocked）——定时器到点 run 已死但 state.inFlight 无人清 → 会话内后续轮 spawn
+	 * 跳过 + 门禁 LC-03 误报「属于其他会话」每轮刷屏，停摆到下次 session_start。
+	 */
+	function scheduleOrphanStop(
+		cwd: string,
+		runId: string,
+		remainingMs: number,
+	): void {
 		if (!runId || orphanRunTimers.has(runId)) return;
-		const timer = setTimeout(() => {
-			orphanRunTimers.delete(runId);
-			void stopRun(runId); // TTL 到期：run 判定已死，stop 防迟到写竞争
-		}, Math.max(remainingMs, 1000));
+		const timer = setTimeout(
+			() => {
+				orphanRunTimers.delete(runId);
+				void (async () => {
+					const stopped = await stopRun(runId); // TTL 到期：run 判定已死，stop 防迟到写竞争
+					if (!stopped) return;
+					try {
+						const st = readAuditState(cwd);
+						if (
+							st.inFlight &&
+							(runId === "" || st.auditRunId === runId)
+						) {
+							patchAuditState(cwd, { inFlight: false });
+						}
+					} catch {
+						/* noop */
+					}
+				})();
+			},
+			Math.max(remainingMs, 1000),
+		);
 		timer.unref?.();
 		orphanRunTimers.set(runId, timer);
 	}
@@ -699,7 +724,11 @@ export default function (pi: ExtensionAPI): void {
 				// 孤儿表——条目随后清空，runId 不随之丢失；TTL 剩余时间到点单发 stop，
 				// 挂起 run 不再无界消耗算力（此前 runId 随条目清除永久丢失 = 泄漏）
 				if (!stopped && rec.runId) {
-					scheduleOrphanStop(rec.runId, IN_FLIGHT_TTL_MS - (now - rec.startedAt));
+					scheduleOrphanStop(
+						cwd,
+						rec.runId,
+						IN_FLIGHT_TTL_MS - (now - rec.startedAt),
+					);
 				}
 				inFlightAudits.delete(cwd);
 				if (stopped) {
@@ -1103,7 +1132,10 @@ export default function (pi: ExtensionAPI): void {
 							"",
 							"## 结论与发现",
 							"",
-							...valueMsgs.join("\n\n").split("\n").map((l) => `> ${l}`),
+							...valueMsgs
+								.join("\n\n")
+								.split("\n")
+								.map((l) => `> ${l}`),
 							"",
 						].join("\n");
 						if (!writeAuditReport(root, report)) {
@@ -1130,8 +1162,7 @@ export default function (pi: ExtensionAPI): void {
 										state.injectedSignatureAt),
 								injectedInterimAt: interimTriggered
 									? (state.auditStartedAt ?? Date.now())
-									: (injectedInterimAt.get(root) ??
-										state.injectedInterimAt),
+									: (injectedInterimAt.get(root) ?? state.injectedInterimAt),
 							})
 						) {
 							return;
@@ -1156,12 +1187,10 @@ export default function (pi: ExtensionAPI): void {
 							// 跨会话去重失效重注入。回退到 state 持久化值（非 null 清空）
 							injectedSignatureAt: sigTriggered
 								? (state.signature!.at ?? Date.now())
-								: (injectedSignatureAt.get(root) ??
-									state.injectedSignatureAt),
+								: (injectedSignatureAt.get(root) ?? state.injectedSignatureAt),
 							injectedInterimAt: interimTriggered
 								? (state.auditStartedAt ?? Date.now())
-								: (injectedInterimAt.get(root) ??
-									state.injectedInterimAt),
+								: (injectedInterimAt.get(root) ?? state.injectedInterimAt),
 						})
 					) {
 						return; // 去重标记持久化冲突 → 本轮不注入，下轮重试（防重复注入）
@@ -1278,8 +1307,27 @@ export default function (pi: ExtensionAPI): void {
 				// 时文件锁已清 → 下轮新 spawn 与旧 run 并发写 state（F-01 根治的同类双审计
 				// 在 stale 路径回潮）。stop 成功（run 已死不会再写）才允许 shouldClearStaleLock。
 				deadStopped = await stopRun(deadAuditor.runId);
+				// L1（v1.0.30 复审）：stop 失败（rpc 忙/死）→ 孤儿登记重达——条目已删后
+				// deadAuditor=undefined 无法重评估，会话内停摆到下次 session_start；
+				// 登记后 rpc 恢复时 TTL 到点重试 stop + M1 清锁逻辑复用（有界自愈）
+				if (!deadStopped && deadAuditor.runId) {
+					scheduleOrphanStop(
+						root,
+						deadAuditor.runId,
+						Math.max(IN_FLIGHT_TTL_MS - (performance.now() - deadAuditor.startedAt), 1000),
+					);
+				}
 			}
-			if (deadStopped && shouldClearStaleLock(state, hasInFlight(root))) {
+			// M4 回归修正（v1.0.30 审计者 blocked）：**无内存条目时不得短路**——
+			// deadAuditor 为 undefined（agent_end 中断后条目丢失、文件锁残留的 M4 场景）
+			// 时 deadStopped 恒 false → `deadStopped &&` 会让 stale 锁同会话内永不清
+			// （v1.0.21 修过的 2.5h 假挂起回潮）。有条目 → 要求 stop 成功；
+			// 无条目 → 直接走 shouldClearStaleLock（其 auditTooRecent 年龄判据独立把关：
+			// 真在跑的审计 auditStartedAt 新近 → 不清锁，安全）。
+			if (
+				(deadAuditor ? deadStopped : true) &&
+				shouldClearStaleLock(state, hasInFlight(root))
+			) {
 				// v1.0.26（L1）：清锁写也检查返回值——失败（他写者并发）→ 不动 state、不灭灯，
 				// 下轮 agent_end 自愈；成功才重读快照并灭灯
 				if (
@@ -1322,8 +1370,7 @@ export default function (pi: ExtensionAPI): void {
 			// 含它会让短路恒 false（复审风险 1：行为等价 no-op）。判据只认
 			// 「无未提交产物」：已提交内容在审计窗口内（git log --since）仍会被审。
 			const failedRetry =
-				state.signature?.status === "failed" &&
-				!hasUncommittedChanges(root);
+				state.signature?.status === "failed" && !hasUncommittedChanges(root);
 			if (!hasWork) return;
 
 			// 非 git 根守卫（跨项目串台源头，v1.0.24）：自动解析退化为非 git 目录（典型：
@@ -1687,7 +1734,7 @@ export default function (pi: ExtensionAPI): void {
 						const st = readAuditState(root);
 						if (
 							st.inFlight &&
-							(orphanRunId === "" || st.auditRunId === orphanRunId)
+							st.auditRunId === orphanRunId
 						) {
 							patchAuditState(root, { inFlight: false });
 						}
@@ -1783,7 +1830,9 @@ export default function (pi: ExtensionAPI): void {
 				stopAuditBreath(cwd);
 				// T1：TTL 判定 run 已死（TTL 16min > spawn 超时 15min）→ stop 挂起 run
 				// 防算力泄漏 + 迟到写 state 双写竞争（v1.0.27）
-				void stopRun(rec.runId);
+				// L2（v1.0.30 复审）：fire-and-forget stop 失败即丢 runId（正是 F4/B-2
+				// 封堵的泄漏类）——改用孤儿登记（stop 成功自动清文件锁，M1 修复复用）
+				void scheduleOrphanStop(cwd, rec.runId, 0);
 			}
 		}
 	});

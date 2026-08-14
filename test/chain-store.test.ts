@@ -494,8 +494,7 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		"交付门禁必须用 git HEAD 变化（客观提交信号）——不用词表/模式匹配判定完工（v1.0.17 先例）",
 	);
 	assert.ok(
-		(src.includes("gatedHead") &&
-			src.includes("if (!hasNewCommit) return;")) ||
+		(src.includes("gatedHead") && src.includes("if (!hasNewCommit) return;")) ||
 			src.includes("if (!hasNewCommit || failedRetry) return;"),
 		"常规轮必须异步（agent_end 不阻塞等签名）——findings 下轮注入；门禁只在新提交（产物落库）时收紧（F5 起 failedRetry 同步短路）",
 	);
@@ -569,6 +568,14 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 			hasWorkReturn !== -1 &&
 			staleLockCall < hasWorkReturn,
 		"残留锁兜底必须先于 hasWork 判断（纯咨询轮 return 前也清锁）——且必须走 shouldClearStaleLock 纯函数（行为级测试在 lib 单测）",
+	);
+	// M4 回归锁定（v1.0.30）：deadAuditor 缺失（agent_end 中断/崩溃 → 内存条目清空但
+	// state.inFlight 残留）时 stale 锁仍须清除——F7 的 stop 结果门控不得短路该场景
+	// （`deadStopped &&` 会让 v1.0.21 修过的 2.5h 假挂起回潮）。断言源码含
+	// `(deadAuditor ? deadStopped : true)` 等价形态（无内存条目 → 不受 stop 约束）
+	assert.ok(
+		src.includes("deadAuditor ? deadStopped : true"),
+		"M4 兜底：无内存条目（deadAuditor undefined）时 stale 锁清理不得被 stop 结果短路",
 	);
 	// 完成即停：审计者 prompt 必须含明确停止边界
 	assert.ok(
@@ -1830,11 +1837,7 @@ test("v1.0.29：writeAuditReport 跨会话交付落盘（D-036 项目文件）",
 	// 覆盖写（新报告替换旧）
 	const report2 = "# 更新\n\n- 新发现\n";
 	assert.equal(writeAuditReport(dir, report2), true, "二次写入成功");
-	assert.equal(
-		fs.readFileSync(file, "utf-8"),
-		report2,
-		"二次报告覆盖旧报告",
-	);
+	assert.equal(fs.readFileSync(file, "utf-8"), report2, "二次报告覆盖旧报告");
 	// 无 .tmp 残留（唯一 tmp 名 + rename）
 	const leftovers = fs
 		.readdirSync(path.dirname(file))
