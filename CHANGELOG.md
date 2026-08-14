@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.40] - 2026-08-15
+
+v1.0.39 审计者 blocker（机制完整性维度）：门禁轮询 timer 生命周期缺口——跨会话轮询泄漏：
+
+- **session_shutdown 清理 gatePollTimers（根因）**：会话 A 门禁轮询中退出 → timerA 残留常驻进程；新会话 B 门禁轮 `set` 覆盖句柄但 timerA 仍 tick → 双轮询并发：timerA 读到 B 审计者签名 → gateComplete 把 gatedHead 回退旧 head（下轮 hasNewCommit 恒真 → 门禁风暴）；或 timerA 超时 → recordSignature 覆盖 B 审计者真实签名。改：session_shutdown 对本实例 root 的 timer clearInterval + 从 Map 删除（与 inFlightAudits 同域清理）
+- **agent_end 启动前防御 clear**：即使泄漏路径（shutdown 未执行/异常退出）残留旧 timer，新门禁轮启动前清旧句柄（幂等，双保险）
+- 测试：57/57 通过，tsc 0 错误
+
 ## [1.0.39] - 2026-08-15
 
 用户报障（v1.0.38 审计轮同窗口）：门禁同步等待 300s 期间「没法交互，也没法取消审计」——agent_end 事件内 await 轮询，TUI 保持 Working、用户输入排队：

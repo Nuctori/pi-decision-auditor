@@ -294,8 +294,6 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 	return lines.join("\n");
 }
 
-
-
 /** A2 门禁：连续 blocked 达到该次数后降级放行（end 就是 end，不再触发修复轮）。 */
 const MAX_BLOCKED_STREAK = 3;
 /** F-12（v1.0.39）：门禁等待超时上限（同步等待 300s 语义保留，改后台轮询）。 */
@@ -677,6 +675,14 @@ export default function (pi: ExtensionAPI): void {
 		const entries = [...inFlightAudits.entries()].filter(
 			([cwd]) => cwd === cachedProjectRoot,
 		);
+		// F-13（v1.0.40，v1.0.39 审计者 blocker）：门禁轮询 timer 随会话清理——
+		// 残留 timer（本实例 root）在常驻进程跨会话存活，新会话门禁轮 set 覆盖句柄
+		// 后旧 timer 仍 tick → 双轮询并发竞态（旧轮询回退 gatedHead / 覆盖新签名）。
+		const staleGateTimer = gatePollTimers.get(cachedProjectRoot ?? "");
+		if (staleGateTimer) {
+			clearInterval(staleGateTimer);
+			gatePollTimers.delete(cachedProjectRoot ?? "");
+		}
 		// L2 reviewer run（T1 补漏）：只读无 state 写，会话结束直接全部 stop（挂起 = 纯泄漏）
 		await Promise.allSettled([
 			...entries.map(async ([cwd, rec]) => {
@@ -1674,6 +1680,12 @@ export default function (pi: ExtensionAPI): void {
 					/* noop：单 tick 异常不阻塞后续轮询 */
 				}
 			}, 2000);
+			// F-13（v1.0.40，v1.0.39 审计者 blocker）：防御 clear——跨会话泄漏的旧轮询
+			// timer（session_shutdown 前泄漏路径）会与新轮询并发 tick：旧 timer 读到
+			// 新审计者签名 → gateComplete 把 gatedHead 回退旧 head（下轮 hasNewCommit
+			// 恒真 → 门禁风暴）或超时 recordSignature 覆盖新审计者签名。启动前清旧句柄。
+			const staleGate = gatePollTimers.get(root);
+			if (staleGate) clearInterval(staleGate);
 			gateTimer.unref?.();
 			gatePollTimers.set(root, gateTimer);
 		} catch (err) {
