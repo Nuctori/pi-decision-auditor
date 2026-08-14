@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.35] - 2026-08-15
+
+v1.0.34 发布后独立 reviewer 复核（无 blocker；Medium-1 at≤0 边界 + Low-2 措辞已由 v1.0.34 闭合 + Low-3 既有行为接受）：
+
+- **`at ≤ 0` 空窗口（Medium-1，reviewer 实证）**：readAuditState 把缺失/非法 at 清洗为 0（lib/chain-store.ts L406-414），B5 测试（chain-store.test.ts L1451）显式建模 `{status:"passed", at:0}`——审计者漏写 at 在实践发生过。真实 status（passed/blocked）+ at=0 时旧规则窗口起点 = signature.at → `git log --since=0` 空窗口；且空窗口是「预期正常」分支（审决策质量），审计者无怀疑动机，收尾推进 lastAuditAt 后未审产物永久落在未来窗口外。改：回退条件从 `status ∈ {passed-with-warning, failed}` 扩展为 **`at ≤ 0 || status ∈ {passed-with-warning, failed}`**（两处 prompt：L1 L262 + L2 L401；at=0 且 lastAuditAt>0 → 回退 lastAuditAt；双 0 → 首次审计语义最近 20 提交，自洽）
+- **Low-2（L2 措辞不对称）**：v1.0.34 已闭合（「无 signature 或回退值 ≤0 → 首次审计语义」两处一致），本版本复核确认无残留
+- **Low-3（failed 写覆盖旧 signature，prevBlockers 死数据）**：既有行为（v1.0.24 起），触发面窄（blocked 未注入 + spawn 失败），注入通道只认 blocked/passed-with-warning——不改，记录为已知限制
+- 测试：57/57 通过，tsc 0 错误
+
 ## [1.0.34] - 2026-08-15
 
 v1.0.33 发布后第四路独立 reviewer 复核（无 blocker；Low Note 1 同类覆盖空洞相邻边界 + Note 4 措辞不对称 + Note 5 日期）：
