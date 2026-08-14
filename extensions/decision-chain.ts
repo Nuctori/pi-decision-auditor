@@ -169,7 +169,6 @@ const AUDITOR_AGENT = "pi-pair.decision-auditor";
 // TTL 对齐 spawn 超时（900s），避免审计运行中锁过期导致并发双审计
 const IN_FLIGHT_TTL_MS = 16 * 60 * 1000; // 16 分钟 > spawn timeout 15 分钟
 
-
 /** cwd 是否有进行中的审计（含 TTL 过期清理）。 */
 function hasInFlight(cwd: string): boolean {
 	const rec = inFlightAudits.get(cwd);
@@ -346,7 +345,11 @@ function sleep(ms: number): Promise<void> {
 /** A2 门禁：连续 blocked 达到该次数后降级放行（end 就是 end，不再触发修复轮）。 */
 const MAX_BLOCKED_STREAK = 3;
 
-function buildAuditTask(cwd: string, opts: AuditOptions, runId: string): string {
+function buildAuditTask(
+	cwd: string,
+	opts: AuditOptions,
+	runId: string,
+): string {
 	const lines: string[] = [];
 	lines.push("你是本会话的结对决策审计者（只读）。");
 	lines.push(`项目目录: ${cwd}`);
