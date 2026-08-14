@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.32] - 2026-08-14
+
+审计窗口起点修复（v1.0.31 发布后审计者实证发现，非 blocker 建议 → 根因修复）——降级签名 at 前移导致审计空窗口：
+
+- **审计窗口起点回退（审计覆盖空洞修复）**：signature.status==="passed-with-warning"（交付轮超时降级/连续 blocked 放行，非真实审计完成）时 signature.at 是**降级写入时间**而非审计完成时间——降级晚于产物提交 → 下轮 `git log --since=signature.at` 空窗口、未审产物被跳过（v1.0.31 实证：审计者死于 deepseek 流错误，4c3d997 实为未审产物，靠审计者自觉 git show HEAD 兜底才过审）。改：L1 增量审计任务 + L2 交付审查两处 prompt 的窗口规则——passed-with-warning 时窗口起点回退 lastAuditAt÷1000（上次真实审计边界；正常收尾时 lastAuditAt 与 signature.at 同步，回退无副作用；连续 blocked 放行时 lastAuditAt 即最后真实审计，覆盖正确）
+- 测试：57/57 通过，tsc 0 错误
+
 ## [1.0.31] - 2026-08-14
 
 L2 交付审查成本收敛（用户要求）：3 个独立 reviewer 并行 fanout → 1 个独立 reviewer 全维度单任务：
