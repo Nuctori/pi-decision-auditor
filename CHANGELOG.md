@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.33] - 2026-08-14
+
+v1.0.32 发布后 L2 双路独立 reviewer 复核（两个 reviewer 结论收敛）——failed 路径同类空窗口 + 回退边界 `--since=0`：
+
+- **failed 签名同类空窗口（Medium，双 reviewer 独立发现）**：spawn 失败路径（agent_end 写 `signature={status:"failed", at:Date.now()}`，不碰 lastAuditAt）——失败写入晚于本轮提交，下轮 failed 重试审计按 signature.at 起窗 → `git log --since` 空窗口、触发失败的提交被跳过（L1350 注释「已提交内容在审计窗口内仍会被审」对该路径不成立）。改：窗口回退条件从 passed-with-warning 扩展为 **passed-with-warning || failed**（两处 prompt：L1 增量审计 L262 + L2 交付审查 L401）；failed 的 at 不参与注入去重/isAuditCompleted（注入只认 blocked/passed-with-warning），无副作用
+- **回退边界 `--since=0`（Low）**：从未审计过的新仓库首次交付轮超时降级 → passed-with-warning + lastAuditAt=0 → 回退 `git log --since=0` 恰中 approxidate 空窗口怪癖。改：无 signature 或回退值 ≤0（从未真实审计过）→ 首次审计语义（最近 20 个提交兜底）
+- 保留：decision_signoff 路径不更新 lastAuditAt 的 Note（过度审计而非覆盖空洞，无害，不改）；回归测试 Note（prompt 文本无机械锚点，属既有残余风险）
+- 测试：57/57 通过，tsc 0 错误
+
 ## [1.0.32] - 2026-08-14
 
 审计窗口起点修复（v1.0.31 发布后审计者实证发现，非 blocker 建议 → 根因修复）——降级签名 at 前移导致审计空窗口：
