@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.39] - 2026-08-15
+
+用户报障（v1.0.38 审计轮同窗口）：门禁同步等待 300s 期间「没法交互，也没法取消审计」——agent_end 事件内 await 轮询，TUI 保持 Working、用户输入排队：
+
+- **门禁等待异步化（根因，D-044）**：agent_end 不再同步等签名——spawn 后立即返回（turn 结束、UI 解锁）。签名经 2s 间隔后台轮询（setInterval + gatePollTimers Map）检测：完成 → 推进 gatedHead + streak 维护 + F3 删条目 + 灭灯；300s 超时 → 原降级放行逻辑（recheck 盲窗 JD #19 + findings 过滤 D-021 + stopRun FP #13 + recordSignature passed-with-warning）。门禁把关语义（提交=交付必审、blocked 交付、超时降级）全部保留
+- **用户消息中断等待（取消入口）**：message_start（仅 user role——assistant/toolResult 也触发该事件）→ clear 轮询 + 推进 gatedHead 放行 + notify；不碰 signature、不 stopRun——审计者结论经 async-complete 交付（blocked 即时 followUp，注入路径兜底），用户主动继续即自担风险
+- **waitForAuditCompletion/sleep 删除**：唯一调用点（门禁同步等待）移除后无引用；接线守卫测试同步更新（断言新轮询两处 isAuditCompleted 调用形态）
+- **session_start 残留灯自愈加固（v1.0.38 reviewer Low）**：reload 后模块级 cachedAuditUi 重置为 null，stopAuditBreath 的 setStatus(undefined) 是 no-op——直接用 handler 的 ctx.ui.setStatus(AUDIT_STATUS_KEY, undefined) 清除，reload 场景同样生效
+- 顺手：session_shutdown 两处 async map 回调补显式 return（eslint 强制）
+- 跳过：中断后审计者 run 的算力回收依赖 async-complete/TTL stale 清理（≤16min 有界）；显式 /pair-audit-cancel 命令（解锁后非刚需）
+- 测试：57/57 通过，tsc 0 错误
+
 ## [1.0.38] - 2026-08-15
 
 用户实证报障：footer 常驻「结对审计进行中（17006s）」，但 state.json inFlight=false、签名 passed、审计早已结束——呼吸灯未灭（F-10 同类的多实例短路变体）：

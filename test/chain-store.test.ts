@@ -536,7 +536,8 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	// H2：waitForAuditCompletion 完成判定 = 本轮新签名（blocked 也算完成，防覆盖真实 blockers）
 	// v1.0.26：完成判定抽成 isAuditCompleted 纯函数（lib 单测锁定行为：at 判定 + runId 身份校验 + failed 排除）
 	assert.ok(
-		src.includes("isAuditCompleted(state, startedAt)"),
+		src.includes("isAuditCompleted(st, gateStartedAt)") &&
+			src.includes("isAuditCompleted(recheck, recheck.auditStartedAt || 0)"),
 		"完成判定必须走 isAuditCompleted 纯函数（lib 行为级测试锁定：at 判定 + runId 身份校验 + failed 排除）",
 	);
 	// 门禁基线：会话起始 HEAD 初始化 + 持久化（非 git 仓库无门禁）

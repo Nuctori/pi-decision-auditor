@@ -294,41 +294,14 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 	return lines.join("\n");
 }
 
-/**
- * 等待审计完成：轮询 state.json 直到 signatureConvLine 覆盖到 convlog 当前行（审计者已签名）。
- * 返回审计结论（signature）或 null（超时）。
- * timeoutMs = 300s 阻塞上限：到点降级放行 + findings 下轮注入（无协商黑洞）。
- */
-async function waitForAuditCompletion(
-	cwd: string,
-	timeoutMs = 300_000,
-	pollMs = 2000,
-): Promise<{ status: string; blockers?: string[] } | null> {
-	const deadline = Date.now() + timeoutMs;
-	const state0 = readAuditState(cwd);
-	const startedAt = state0.auditStartedAt || 0;
-	while (Date.now() < deadline) {
-		const state = readAuditState(cwd);
-		// 完成判定 = isAuditCompleted 纯函数（lib，行为级测试锁定）：
-		// 本轮 spawn 的审计者写入了新签名（at ≥ 本轮 auditStartedAt）且锁已释放、
-		// runId 身份匹配（防遗留/并发审计者劫持门禁，v1.0.26 JD #14）。
-		if (isAuditCompleted(state, startedAt)) {
-			return {
-				status: state.signature!.status,
-				blockers: state.signature!.blockers,
-			};
-		}
-		await sleep(pollMs);
-	}
-	return null;
-}
 
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 /** A2 门禁：连续 blocked 达到该次数后降级放行（end 就是 end，不再触发修复轮）。 */
 const MAX_BLOCKED_STREAK = 3;
+/** F-12（v1.0.39）：门禁等待超时上限（同步等待 300s 语义保留，改后台轮询）。 */
+const GATE_TIMEOUT_MS = 300_000;
+/** F-12：门禁后台轮询 timer（root → interval）——message_start 用户消息中断等待用。 */
+const gatePollTimers = new Map<string, ReturnType<typeof setInterval>>();
 
 function buildAuditTask(
 	cwd: string,
@@ -664,6 +637,14 @@ export default function (pi: ExtensionAPI): void {
 			// （cwd 校验：同进程其他 cwd 实例的亮灯不受影响）。审计由本会话 spawn 时
 			// startAuditBreath 会重新亮灯，顺序自洽。
 			stopAuditBreath(root);
+			// F-12（v1.0.39，reviewer Low）：reload 后模块级 cachedAuditUi 重置为 null，
+			// stopAuditBreath 的 setStatus(undefined) 成 no-op（清不到 footer 残留）——
+			// 直接用当前 handler 的 ctx.ui 清除，reload 场景同样生效。
+			try {
+				ctx.ui.setStatus(AUDIT_STATUS_KEY, undefined);
+			} catch {
+				/* print/无 UI 模式降级 */
+			}
 			// 决策信号清零（FP 审计 #3：print 模式 agent_end 可能不执行，防跨会话残留误触发）
 			roundDecisionMade = false;
 			// 交付门禁基线：会话起始 HEAD（非 git 仓库 → 无门禁）；持久化——
@@ -730,6 +711,7 @@ export default function (pi: ExtensionAPI): void {
 						/* noop */
 					}
 				}
+				return;
 			}),
 			(async () => {
 				const ids = [...deliveryReviewerRuns];
@@ -739,6 +721,7 @@ export default function (pi: ExtensionAPI): void {
 					ids.map(async (rid) => {
 						await stopRun(rid);
 						cancelOrphanStop(rid);
+						return;
 					}),
 				);
 			})(),
@@ -1580,116 +1563,119 @@ export default function (pi: ExtensionAPI): void {
 				return; // 不推进 gatedHead：下轮重试，防 B 的提交被 A 的签名放行
 			}
 
-			// 门禁等待告知（用户可感知：提交轮同步等审计 ≤300s——避免「卡住但不知道在审计」）
+			// 门禁等待告知（F-12：后台轮询不阻塞——用户可继续对话，也可发消息解除等待）
 			try {
 				ctx.ui.notify(
-					"本轮有提交，结对审计同步进行中（等待审计签名，≤300s；结论到达后放行）",
+					"本轮有提交，结对审计进行中（≤300s；等待期间可继续对话，结论到达后放行；发新消息可解除门禁等待）",
 					"info",
 				);
 			} catch {
 				/* print/无 UI 模式降级 */
 			}
 
-			// 交付轮：同步门禁（阻塞等签名，300s 上限）
-			const sig = await waitForAuditCompletion(root);
-			recordAuditDuration(root, t0);
-			if (sig === null) {
-				// 超时降级前重读（JD #19）：轮询 2s 间隔的 deadline 盲窗内审计者可能
-				// 恰好完成（t=299s 写入真实签名）——直接降级会整体覆盖真实结论、
-				// blockers 永久丢失。用同完成判定再查一次，成立走正常完成分支。
-				const recheck = readAuditState(root);
-				if (isAuditCompleted(recheck, recheck.auditStartedAt || 0)) {
-					gatedHead.set(root, head);
-					persistGatedHead(root, head);
-					// F3（v1.0.29 双审计）：recheck 分支此前不删内存条目——审计者已签名、
-					// run 已收尾，条目残留会让 async-complete 延迟/丢失窗口内新提交被旧
-					// 签名放行（isAuditCompleted 对旧 auditStartedAt 即时成立）+ spawn 跳过
-					inFlightAudits.delete(root);
-					stopAuditBreath(); // 门禁轮同步完成：灯灭
-					return;
-				}
-				// 终止仍挂着的审计者 run（FP #13）：门禁超时只降级不终止 run =
-				// 资源泄露 + 迟到写竞争；stop 失败不影响降级放行
-				const rec = inFlightAudits.get(root);
-				if (rec?.runId) {
-					try {
-						await rpc("stop", { runId: rec.runId }, 10_000);
-					} catch {
-						/* noop：stop 失败不阻塞降级 */
-					}
-				}
-				inFlightAudits.delete(root);
-				// 超时：不再 600s 协商黑洞——降级放行；blockers 用审计者已确认的 findings（价值点），
-				// 无 findings 才给流程提示（实证：8 条真实 findings 曾被超时文案替换——价值被流程噪音覆盖）
-				const timeoutState = readAuditState(root);
-				// 过滤启动占位（'审计开始'）与纯咨询占位——被杀在占位阶段时降级注入不得给噪音（reviewer Low）
-				// v1.0.26（L4）：扩展记账文本已改走 signature.reason；过滤历史残留的
-				// FAILED_FINDING 文本（旧版本写入 auditFindings 的），防降级时当价值点注入
-				const realFindings = timeoutState.auditFindings.filter(
-					(f) =>
-						// 启动占位：审计者可能写成「审计开始：窗口=…」（精确匹配漏网，
-						// v1.0.27 决策审计者实证：降级 blockers 吃到该占位并注入用户）——
-						// 前缀匹配覆盖全部变体
-						!f.startsWith("审计开始") &&
-						f !== PURE_CHAT_PLACEHOLDER &&
-						// 历史残留两种措辞都滤（v1.0.26 L4 前曾写入 auditFindings）
-						f !== "审计未触发：spawn 失败，下轮重试" &&
-						f !== "审计触发失败：spawn 失败，下轮重试",
-				);
-				recordSignature(
-					root,
-					{
-						status: "passed-with-warning",
-						blockers:
-							realFindings.length > 0
-								? realFindings
-								: [
-										"审计超时（300s），已降级放行；上轮审计未完成，缺口将在下轮注入",
-									],
-					},
-					head,
-				);
+			// F-12（v1.0.39）：门禁同步等待改后台轮询——agent_end 不再阻塞（此前
+			// 300s 内 TUI 保持 Working、用户无法输入/取消，实证报障）。spawn 后立即
+			// 返回；签名经 2s 间隔轮询检测：完成→放行（streak 维护 + F3 删条目）；
+			// 300s 超时→降级放行（原逻辑）；用户发新消息（message_start）→中断等待
+			// 放行，结论仍经 async-complete 交付（blocked 即时 followUp，注入兜底）。
+			const gateStartedAt = readAuditState(root).auditStartedAt || 0;
+			const gateDeadline = Date.now() + GATE_TIMEOUT_MS;
+			/** 门禁完成（签名到达）：推进基线 + F3 删条目 + 灭灯 + streak 维护。 */
+			const gateComplete = (st: ReturnType<typeof readAuditState>): void => {
+				recordAuditDuration(root, t0);
+				const sig = st.signature!;
 				gatedHead.set(root, head);
 				persistGatedHead(root, head);
-				stopAuditBreath(); // 超时降级：灯灭
-				return;
-			}
-			// 门禁完成（passed/blocked/降级）——本次提交已覆盖；下次提交重新门禁
-			gatedHead.set(root, head);
-			persistGatedHead(root, head);
-			// F3（v1.0.29 双审计）：完成分支与 recheck/超时分支一致删内存条目——
-			// 签名已写、run 已收尾，保留条目会让 async-complete 延迟窗口内新提交被
-			// 旧签名即时放行 + 后续轮 spawn 跳过（≤16min 审计空窗）
-			inFlightAudits.delete(root);
-			stopAuditBreath(); // 门禁轮同步完成：灯灭
-			// 审计者已签名（passed/blocked）；v1.0.27（FP#5c 核实）：审计者按协议直写
-			// signature（不走 decision_signoff/recordSignature）→ streak 不自动维护——
-			// 门禁完成点按签名状态补齐（passed 清零 / blocked 递增）
-			if (sig.status === "passed" || sig.status === "passed-with-warning") {
-				const s0 = readAuditState(root);
-				if (s0.blockedStreak !== 0) {
-					patchAuditState(root, { blockedStreak: 0 });
+				// F3（v1.0.29）：签名已写、run 已收尾——删条目防 async-complete 延迟窗口内
+				// 新提交被旧签名即时放行 + 后续轮 spawn 跳过（≤16min 审计空窗）；blocked
+				// 交付若随条目删除丢失，由 before_agent_start 注入路径兜底（去重未落盘）
+				inFlightAudits.delete(root);
+				stopAuditBreath(); // 门禁轮完成：灯灭
+				// streak 维护（原同步完成分支语义）：passed 清零 / blocked 递增 / 超限降级
+				if (sig.status === "passed" || sig.status === "passed-with-warning") {
+					const s0 = readAuditState(root);
+					if (s0.blockedStreak !== 0) {
+						patchAuditState(root, { blockedStreak: 0 });
+					}
+					return;
 				}
-				return; // 门禁通过，end 就是 end
-			}
-			// blocked：A2 连续超限降级放行；未超限保留 blocked，缺口已注入（下轮开工主 agent 收到）
-			const s = readAuditState(root);
-			// streak 递增 cap 在 MAX：主 agent 门禁等待中 signoff（recordSignature 已
-			// 递增）的混合路径最多提前一轮触发降级，可接受。
-			if (sig.status === "blocked" && s.blockedStreak < MAX_BLOCKED_STREAK) {
-				patchAuditState(root, { blockedStreak: s.blockedStreak + 1 });
-			}
-			const s2 = readAuditState(root);
-			if (s2.blockedStreak >= MAX_BLOCKED_STREAK) {
-				recordSignature(
-					root,
-					{
-						status: "passed-with-warning",
-						blockers: s2.signature?.blockers,
-					},
-					head,
-				);
-			}
+				const s = readAuditState(root);
+				if (sig.status === "blocked" && s.blockedStreak < MAX_BLOCKED_STREAK) {
+					patchAuditState(root, { blockedStreak: s.blockedStreak + 1 });
+				}
+				const s2 = readAuditState(root);
+				if (s2.blockedStreak >= MAX_BLOCKED_STREAK) {
+					recordSignature(
+						root,
+						{
+							status: "passed-with-warning",
+							blockers: s2.signature?.blockers,
+						},
+						head,
+					);
+				}
+			};
+			const gateTimer = setInterval(() => {
+				try {
+					const st = readAuditState(root);
+					if (isAuditCompleted(st, gateStartedAt)) {
+						clearInterval(gateTimer);
+						gatePollTimers.delete(root);
+						gateComplete(st);
+						return;
+					}
+					if (Date.now() >= gateDeadline) {
+						clearInterval(gateTimer);
+						gatePollTimers.delete(root);
+						// 超时降级前重读（JD #19）：deadline 盲窗内审计者可能恰好完成——
+						// 直接降级会整体覆盖真实结论、blockers 永久丢失（同完成判定再查一次）
+						const recheck = readAuditState(root);
+						if (isAuditCompleted(recheck, recheck.auditStartedAt || 0)) {
+							gateComplete(recheck);
+							return;
+						}
+						// 终止仍挂着的审计者 run（FP #13）：超时只降级不终止 run =
+						// 资源泄露 + 迟到写竞争；stop 失败不影响降级放行
+						const rec = inFlightAudits.get(root);
+						if (rec?.runId) {
+							void stopRun(rec.runId);
+						}
+						inFlightAudits.delete(root);
+						recordAuditDuration(root, t0);
+						// 超时：不再 600s 协商黑洞——降级放行；blockers 用审计者已确认的
+						// findings（价值点），无 findings 才给流程提示（D-021）
+						const timeoutState = readAuditState(root);
+						const realFindings = timeoutState.auditFindings.filter(
+							(f) =>
+								!f.startsWith("审计开始") &&
+								f !== PURE_CHAT_PLACEHOLDER &&
+								f !== "审计未触发：spawn 失败，下轮重试" &&
+								f !== "审计触发失败：spawn 失败，下轮重试",
+						);
+						recordSignature(
+							root,
+							{
+								status: "passed-with-warning",
+								blockers:
+									realFindings.length > 0
+										? realFindings
+										: [
+												"审计超时（300s），已降级放行；上轮审计未完成，缺口将在下轮注入",
+											],
+							},
+							head,
+						);
+						gatedHead.set(root, head);
+						persistGatedHead(root, head);
+						stopAuditBreath(); // 超时降级：灯灭
+						return;
+					}
+				} catch {
+					/* noop：单 tick 异常不阻塞后续轮询 */
+				}
+			}, 2000);
+			gateTimer.unref?.();
+			gatePollTimers.set(root, gateTimer);
 		} catch (err) {
 			// 不崩溃，但不得静默吞错（JD #17）：核心路径异常整轮无痕 = 状态停摆不可观测
 			// （实证：prevBlockers ReferenceError 被吞 → inFlight 残留、门禁不推进、零通知）
@@ -1822,6 +1808,37 @@ export default function (pi: ExtensionAPI): void {
 				// 封堵的泄漏类）——改用孤儿登记（stop 成功自动清文件锁，M1 修复复用）
 				void scheduleOrphanStop(cwd, rec.runId, 0);
 			}
+		}
+	});
+
+	// ---- 门禁等待中断（F-12，v1.0.39）：用户发新消息 = 主动继续，解除门禁等待 ----
+	// 不碰 signature、不 stopRun——审计者结论经 async-complete 交付（blocked 即时
+	// followUp，注入路径兜底）；gatedHead 推进使下轮不重复门禁（用户已主动继续）。
+	// message_start 对 user/assistant/toolResult 消息都触发，只处理 user 消息。
+	pi.on("message_start", (event, ctx) => {
+		try {
+			const msg = event.message as { role?: string } | null;
+			if (!msg || msg.role !== "user") return;
+			const root = projectRoot(ctx.cwd);
+			const timer = gatePollTimers.get(root);
+			if (!timer) return;
+			clearInterval(timer);
+			gatePollTimers.delete(root);
+			const head = gitHead(root);
+			if (head !== null) {
+				gatedHead.set(root, head);
+				persistGatedHead(root, head);
+			}
+			try {
+				ctx.ui.notify(
+					"门禁等待已解除（检测到新消息，按你的节奏继续）；审计结论到达后仍会通知你。",
+					"info",
+				);
+			} catch {
+				/* print/无 UI 模式降级 */
+			}
+		} catch {
+			/* noop */
 		}
 	});
 
