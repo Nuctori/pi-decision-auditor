@@ -38,6 +38,8 @@ import {
 	shouldInjectInterimFindings,
 	shouldInjectSignatureFindings,
 	patchAuditState,
+	writeAuditReport,
+	auditReportPath,
 } from "../lib/chain-store.js";
 // ---- pi-subagents RPC 通道（进程内事件总线）----
 const RPC_READY = "subagents:rpc:v1:ready";
@@ -459,7 +461,23 @@ async function triggerDeliveryAudit(
 				// 挂起 = 算力泄漏（reviewer 只读无 state 写，无双写风险）。登记后：
 				// async-complete 完成即移除；session_shutdown 对剩余挂起 run stop。
 				const rid = result?.runId ?? result?.asyncId ?? "";
-				if (rid) deliveryReviewerRuns.add(rid);
+				if (rid) {
+					deliveryReviewerRuns.add(rid);
+					// F9（v1.0.29 双审计）：reviewer 挂起此前只在 async-complete 移除或
+					// session_shutdown stop——整场会话无界泄漏。登记时挂 TTL 定时器：
+					// 超 TTL 未完成即 stop（async-complete 到达时 cancelOrphanStop 取消）。
+					// 本函数为模块级（工厂内 stopRun 不可见）——定时器回调直接用 rpc 参数。
+					if (!orphanRunTimers.has(rid)) {
+						const timer = setTimeout(() => {
+							orphanRunTimers.delete(rid);
+							void rpc("stop", { runId: rid }, 10_000).catch(() => {
+								/* noop */
+							});
+						}, IN_FLIGHT_TTL_MS);
+						timer.unref?.();
+						orphanRunTimers.set(rid, timer);
+					}
+				}
 			} catch {
 				/* 单个角度失败不阻塞其他 */
 			}
@@ -472,6 +490,14 @@ async function triggerDeliveryAudit(
 const deliveryAuditInFlight = new Set<string>();
 /** 在跑（未完成）的 L2 交付 reviewer runId（T1 补漏）：async-complete 移除，session_shutdown 终止。 */
 const deliveryReviewerRuns = new Set<string>();
+/**
+ * 孤儿 run 回收定时器表（v1.0.29 双审计 F4/B-2）：session_shutdown 时未 stop 的
+ * 审计者 run（未超 TTL 让其收尾 / stop 失败）在此登记，TTL 到期单发 stop——
+ * 会话结束 ≠ run 结束，条目清空后 runId 不能随之丢失（挂起 run 永不可回收 =
+ * 无界算力泄漏）。unref：不阻止进程退出（扩展宿主在线时到期触发）。
+ */
+const orphanRunTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
 
 // ---- 审计状态呼吸灯（TUI footer 常驻指示）：spawn 亮、完成/失败/超时灭 ----
 // setStatus(key, text) 是 footer 持久状态（传 undefined 清除）；无 i18n 框架，
@@ -567,11 +593,35 @@ export default function (pi: ExtensionAPI): void {
 			return false;
 		}
 	};
+
+	/** 登记孤儿 run（v1.0.29 F4/B-2）：TTL 剩余时间后 best-effort stopRun。重复登记幂等。 */
+	function scheduleOrphanStop(runId: string, remainingMs: number): void {
+		if (!runId || orphanRunTimers.has(runId)) return;
+		const timer = setTimeout(() => {
+			orphanRunTimers.delete(runId);
+			void stopRun(runId); // TTL 到期：run 判定已死，stop 防迟到写竞争
+		}, Math.max(remainingMs, 1000));
+		timer.unref?.();
+		orphanRunTimers.set(runId, timer);
+	}
+
+	/** 取消孤儿回收（run 已自然完成/被 stop）：async-complete 匹配到 runId 时调用。 */
+	function cancelOrphanStop(runId: string): void {
+		const t = orphanRunTimers.get(runId);
+		if (t) {
+			clearTimeout(t);
+			orphanRunTimers.delete(runId);
+		}
+	}
 	// 本会话唯一标识（进程 + 随机）：convlog 按 cwd 多实例共享追加的隔离键。
 	// 会话级（非模块级——loader 对同 cwd 缓存扩展工厂，模块顶层只执行一次，模块级
 	// RUN_ID 会让同进程切会话时两个会话行混标，A 会话的审计把 B 会话的对话当自己的）。
 	// 审计者凭 `<!--run:${RUN_ID}-->` 过滤出本会话的对话行，排除同 cwd 下其他实例。
 	const RUN_ID = `run-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+	// D-036（v1.0.29）：本会话开始时刻（墙钟）——before_agent_start 用它区分
+	// 「本会话 spawn 的审计结论」（auditStartedAt ≥ 此值 → 同会话交付，注入对话）
+	// 与「上会话遗留结论」（auditStartedAt < 此值 → 跨会话交付，写项目文件不注入）
+	let sessionStartAtWall = 0;
 
 	// ---- 会话级单一项目根（单一权威 state 的关键）：惰性复核 + 缓存 ----
 	// v1.0.28 双审计 LC-10：不再「首次解析后终身固定」——每次调用与 resolveProjectRoot
@@ -589,6 +639,7 @@ export default function (pi: ExtensionAPI): void {
 	// 目标架构：fresh spawn（无常驻 run、无生命周期登记）——session_shutdown 只清内存锁
 	pi.on("session_start", (event, ctx) => {
 		try {
+			sessionStartAtWall = Date.now(); // D-036：跨会话交付判定的会话边界
 			cachedProjectRoot = null; // 新会话重新解析（或读 PI_PAIR_PROJECT_ROOT）
 			const root = projectRoot(ctx.cwd);
 			// T5：会话级 Map 只保留当前 root 条目——常驻进程长期切换项目防无界增长
@@ -632,12 +683,24 @@ export default function (pi: ExtensionAPI): void {
 		// 还在收尾 → 保留锁让遗留审计者先写，resetForSessionStart 的 TTL 条件兜底）
 		// 未超 TTL 的 run 不杀：刚 spawn 的正常审计者让其继续收尾（JD#15 语义）
 		const now = performance.now();
-		const entries = [...inFlightAudits.entries()];
+		// F10（v1.0.29 双审计）：只处理本实例 root 的条目——inFlightAudits 是模块级
+		// map，同进程多 cwd 实例共享；全量遍历会把其他实例（B）的 in-flight 条目
+		// stop/清空，B 的挂起 run 失去追踪（runId 丢失 + 归属校验跳过）。cachedProjectRoot
+		// 是本实例最后解析的 root（shutdown 时未清，最后才置 null）。
+		const entries = [...inFlightAudits.entries()].filter(
+			([cwd]) => cwd === cachedProjectRoot,
+		);
 		// L2 reviewer run（T1 补漏）：只读无 state 写，会话结束直接全部 stop（挂起 = 纯泄漏）
 		await Promise.allSettled([
 			...entries.map(async ([cwd, rec]) => {
 				const expired = now - rec.startedAt > IN_FLIGHT_TTL_MS;
 				const stopped = expired ? await stopRun(rec.runId) : false;
+				// F4/B-2（v1.0.29）：未 stop 的 run（未超 TTL 让收尾 / stop 失败）登记
+				// 孤儿表——条目随后清空，runId 不随之丢失；TTL 剩余时间到点单发 stop，
+				// 挂起 run 不再无界消耗算力（此前 runId 随条目清除永久丢失 = 泄漏）
+				if (!stopped && rec.runId) {
+					scheduleOrphanStop(rec.runId, IN_FLIGHT_TTL_MS - (now - rec.startedAt));
+				}
 				inFlightAudits.delete(cwd);
 				if (stopped) {
 					try {
@@ -661,10 +724,22 @@ export default function (pi: ExtensionAPI): void {
 			(async () => {
 				const ids = [...deliveryReviewerRuns];
 				deliveryReviewerRuns.clear();
-				await Promise.allSettled(ids.map(async (rid) => stopRun(rid)));
+				// F9（v1.0.29）：stop 后取消孤儿定时器（幂等，timer 已在回调中删除）
+				await Promise.allSettled(
+					ids.map(async (rid) => {
+						await stopRun(rid);
+						cancelOrphanStop(rid);
+					}),
+				);
 			})(),
 		]);
-		inFlightAudits.clear();
+		// F10（v1.0.29 复审风险 2）：只删本实例 root 的条目，**不 clear() 全表**——
+		// 模块级 map 含同进程其他 cwd 实例的 in-flight 条目，全清会让对方 runId
+		// 丢失（无终止路径 + stale 锁不可经 deadAuditor 清理）。非本 root 条目保留
+		// 由对方实例自己的 shutdown / TTL 兜底处理。
+		if (cachedProjectRoot) {
+			inFlightAudits.delete(cachedProjectRoot);
+		}
 		cachedProjectRoot = null;
 		stopAuditBreath(); // 呼吸灯灭（会话结束）
 	});
@@ -848,11 +923,18 @@ export default function (pi: ExtensionAPI): void {
 					auditStartedAtWall: lockStartedAtWall,
 				});
 				// 锁获取点兑现返回值：写失败（他写者并发）→ 跳过 spawn，防并发双审计（L1）
+				// F12（v1.0.29 双审计）：锁 patch 同步清空 auditFindings（与 agent_end
+				// JD#23 对齐）——/pair-audit 触发且审计者首写延迟时，旧轮已签名结论 +
+				// inFlight=true 会被 shouldInjectInterimFindings 误判「被中断审计」注入
 				if (
 					!patchAuditState(root, (latest) =>
 						latest.inFlight
 							? null // 他写者已持锁 → 放弃（防劫持，F-01）
-							: { inFlight: true, auditStartedAt: lockStartedAtWall },
+							: {
+									inFlight: true,
+									auditStartedAt: lockStartedAtWall,
+									auditFindings: [],
+								},
 					)
 				) {
 					inFlightAudits.delete(root);
@@ -962,6 +1044,12 @@ export default function (pi: ExtensionAPI): void {
 			// 价值点注入（用户可观察）：blockers 结论与中间态发现——审计抓出的
 			// 具体缺口是价值，必须让用户看到（可感知），而非流程噪音（等待/计数/协商才隐藏）
 			const valueMsgs: string[] = [];
+			// F8（v1.0.29 双审计）：触发标志——内存去重标记移到 patch 成功之后才 set；
+			// 此前 set 在 push 时（patch 前），patch 失败（审计者并发写 mtime 冲突——
+			// F-06 针对的高频场景）→ return 不注入但内存已设 → 同会话下轮判据 false
+			// → 价值点压制到进程重启（注释声称的「下轮重试」不成立）
+			let sigTriggered = false;
+			let interimTriggered = false;
 			// 审计结论注入（价值点，用户可观察）：判据 = shouldInjectSignatureFindings 纯函数
 			// （行为级测试锁定）：blocked/passed-with-warning + blockers + 同签名未注入过 + 新鲜度
 			// （v1.0.24：签名带审计时 HEAD，当前 HEAD 已推进 = 签名可能过时 → 不注入陈旧 blockers）
@@ -977,7 +1065,7 @@ export default function (pi: ExtensionAPI): void {
 						? `结对审计未完成（超时降级），已确认的部分发现（价值点）：\n${state.signature!.blockers!.map((b) => `- ${b}`).join("\n")}\n\n供参考，可据此继续处理。`
 						: `结对审计发现 ${state.signature!.blockers!.length} 个缺口（价值点）：\n${state.signature!.blockers!.map((b) => `- ${b}`).join("\n")}\n\n请修复这些缺口（修复后下轮自动再审）；若无法修复请说明。`,
 				);
-				injectedSignatureAt.set(root, state.signature!.at ?? Date.now());
+				sigTriggered = true;
 			}
 			// 审计中间态注入（价值点，用户可观察）：审计进行中被杀/超时时留下的部分结果 → 交付价值而非丢弃；
 			// 判据 = shouldInjectInterimFindings 纯函数（行为级测试锁定）：inFlight===true（审计仍在跑 = 中断；
@@ -986,7 +1074,7 @@ export default function (pi: ExtensionAPI): void {
 				valueMsgs.push(
 					`结对审计被中断/未完成（可能来自上次会话），已确认的部分发现（价值点）：\n${state.auditFindings.map((f) => `- ${f}`).join("\n")}\n\n供参考，可据此继续处理。`,
 				);
-				injectedInterimAt.set(root, state.auditStartedAt ?? Date.now());
+				interimTriggered = true;
 			}
 			// 价值点 → display:true（用户可观察）；**先**持久化去重标记成功才注入
 			// （v1.0.28 双审计 F-06）：此前「注入后再 patch 去重」失败（审计者并发写
@@ -995,24 +1083,98 @@ export default function (pi: ExtensionAPI): void {
 			// 前移后：patch 失败 → 本轮不注入（内存 map 值已设，同会话不再重复；
 			// 跨会话下轮重试时 state 仍未持久化 → 继续判定 → 直到某次 patch 成功才注入）。
 			if (valueMsgs.length > 0) {
+				// D-036（v1.0.29 用户原则）：**跨会话交付写项目文件，不注入新会话对话**——
+				// 判据：审计启动早于本会话开始（auditStartedAt < sessionStartAtWall）=
+				// 结论来自上一会话的审计（用户实证：run-31044 中间态注入无关新会话干扰
+				// 新任务）。跨会话 → 落盘 .pi/decision-auditor/latest-audit.md + 轻 notify
+				// （用户可随时读文件，价值保留、零干扰）；同会话（本会话 spawn 的审计
+				// 完成、下轮开工注入闭环反馈）→ 照旧 display:true 注入对话。
+				const crossSession =
+					sessionStartAtWall > 0 &&
+					state.auditStartedAt !== 0 &&
+					state.auditStartedAt < sessionStartAtWall;
+				if (crossSession) {
+					try {
+						const report = [
+							"# 结对审计报告（跨会话交付）",
+							"",
+							`- 审计启动：${new Date(state.auditStartedAt).toISOString()}`,
+							`- 生成会话：${RUN_ID}`,
+							"",
+							"## 结论与发现",
+							"",
+							...valueMsgs.join("\n\n").split("\n").map((l) => `> ${l}`),
+							"",
+						].join("\n");
+						if (!writeAuditReport(root, report)) {
+							return; // 报告写失败：不注入（下轮重试），防价值双通道
+						}
+					} catch {
+						return;
+					}
+					try {
+						ctx.ui.notify(
+							`审计结论（来自上次会话）已写入 ${auditReportPath(root)}，供随时查阅。`,
+							"info",
+						);
+					} catch {
+						/* print/无 UI 模式降级 */
+					}
+					// 跨会话交付完成：仍持久化去重标记（防重复写文件/重复 notify）
+					try {
+						if (
+							!patchAuditState(root, {
+								injectedSignatureAt: sigTriggered
+									? (state.signature!.at ?? Date.now())
+									: (injectedSignatureAt.get(root) ??
+										state.injectedSignatureAt),
+								injectedInterimAt: interimTriggered
+									? (state.auditStartedAt ?? Date.now())
+									: (injectedInterimAt.get(root) ??
+										state.injectedInterimAt),
+							})
+						) {
+							return;
+						}
+					} catch {
+						return;
+					}
+					// F8：patch 成功后才 set 内存（失败则保持未置位，同会话下轮可重试）
+					if (sigTriggered) {
+						injectedSignatureAt.set(root, state.signature!.at ?? Date.now());
+					}
+					if (interimTriggered) {
+						injectedInterimAt.set(root, state.auditStartedAt ?? Date.now());
+					}
+					return; // 跨会话：不注入对话（D-036）
+				}
 				try {
 					if (
 						!patchAuditState(root, {
 							// 复审 Finding 4（既有问题）：仅中间态注入触发而签名注入未触发时，
 							// `?? null` 会把已持久化的 injectedSignatureAt 覆写为 null →
 							// 跨会话去重失效重注入。回退到 state 持久化值（非 null 清空）
-							injectedSignatureAt:
-								injectedSignatureAt.get(root) ??
-								state.injectedSignatureAt,
-							injectedInterimAt:
-								injectedInterimAt.get(root) ??
-								state.injectedInterimAt,
+							injectedSignatureAt: sigTriggered
+								? (state.signature!.at ?? Date.now())
+								: (injectedSignatureAt.get(root) ??
+									state.injectedSignatureAt),
+							injectedInterimAt: interimTriggered
+								? (state.auditStartedAt ?? Date.now())
+								: (injectedInterimAt.get(root) ??
+									state.injectedInterimAt),
 						})
 					) {
 						return; // 去重标记持久化冲突 → 本轮不注入，下轮重试（防重复注入）
 					}
 				} catch {
 					return; // patch 抛错同样不注入（防重复注入优先于注入及时性）
+				}
+				// F8：patch 成功后才 set 内存（失败则保持未置位，同会话下轮可重试）
+				if (sigTriggered) {
+					injectedSignatureAt.set(root, state.signature!.at ?? Date.now());
+				}
+				if (interimTriggered) {
+					injectedInterimAt.set(root, state.auditStartedAt ?? Date.now());
 				}
 				return {
 					message: {
@@ -1105,14 +1267,19 @@ export default function (pi: ExtensionAPI): void {
 			// T1：TTL 过期判定为死的挂起审计者 run → best-effort stop（防 run 算力泄漏 + 迟到写
 			// 双写竞争）。必须在 hasInFlight() 之前取记录：hasInFlight 惰性清理会删条目丢 runId
 			const deadAuditor = inFlightAudits.get(root);
+			let deadStopped = false;
 			if (
 				deadAuditor &&
 				performance.now() - deadAuditor.startedAt > IN_FLIGHT_TTL_MS
 			) {
 				inFlightAudits.delete(root);
-				void stopRun(deadAuditor.runId);
+				// F7（v1.0.29 双审计，与 F-02 同策略）：await stopRun 按结果决定清文件锁——
+				// 此前 fire-and-forget + 无条件清锁：stop 失败（rpc 通道忙/死）且 run 仍存活
+				// 时文件锁已清 → 下轮新 spawn 与旧 run 并发写 state（F-01 根治的同类双审计
+				// 在 stale 路径回潮）。stop 成功（run 已死不会再写）才允许 shouldClearStaleLock。
+				deadStopped = await stopRun(deadAuditor.runId);
 			}
-			if (shouldClearStaleLock(state, hasInFlight(root))) {
+			if (deadStopped && shouldClearStaleLock(state, hasInFlight(root))) {
 				// v1.0.26（L1）：清锁写也检查返回值——失败（他写者并发）→ 不动 state、不灭灯，
 				// 下轮 agent_end 自愈；成功才重读快照并灭灯
 				if (
@@ -1145,6 +1312,18 @@ export default function (pi: ExtensionAPI): void {
 				state.signature?.status === "failed" ||
 				(hasNewConversation(root, clampConvExtractedLine(root)) &&
 					decisionThisRound);
+			// F5（v1.0.29 双审计）：failed 重试轮（上次 spawn 失败、本轮无未提交产物）
+			// 是「补审」不是「交付」——不得升级为 300s 同步门禁轮（failed 不推进
+			// gatedHead → hasNewCommit 持续为真 → 纯聊天轮也 spawn + 同步等 300s，
+			// 主会话每轮被阻塞 + 错误 notify 刷屏）。异步 spawn 后即 return，
+			// 结论经 async-complete / 下轮注入通道交付。
+			// 注意：**不能**含 !hasNewCommit——有未覆盖提交的 failed 重试轮
+			// hasNewCommit 恰为 true（门禁轮 spawn 失败后 gatedHead 不推进），
+			// 含它会让短路恒 false（复审风险 1：行为等价 no-op）。判据只认
+			// 「无未提交产物」：已提交内容在审计窗口内（git log --since）仍会被审。
+			const failedRetry =
+				state.signature?.status === "failed" &&
+				!hasUncommittedChanges(root);
 			if (!hasWork) return;
 
 			// 非 git 根守卫（跨项目串台源头，v1.0.24）：自动解析退化为非 git 目录（典型：
@@ -1331,7 +1510,9 @@ export default function (pi: ExtensionAPI): void {
 
 			// 常规轮：异步审计不阻塞——end 就是 end，审计者完成签名后下轮注入 findings；
 			// 交付门禁：本轮有新提交（产物落库 = 交付）→ 同步等签名
-			if (!hasNewCommit) return;
+			// F5（v1.0.29）：failed 重试轮（无本轮新提交/无未提交产物）同步短路——
+			// 已异步 spawn，审计结论经 async-complete / 下轮注入交付，不阻塞主会话
+			if (!hasNewCommit || failedRetry) return;
 
 			// 门禁归属校验（v1.0.28 双审计 LC-03）：交付轮等待前确认「在跑审计是本会话
 			// spawn 的」——state.inFlight 可能属于另一会话/另一实例（多窗口同项目、
@@ -1382,6 +1563,10 @@ export default function (pi: ExtensionAPI): void {
 				if (isAuditCompleted(recheck, recheck.auditStartedAt || 0)) {
 					gatedHead.set(root, head);
 					persistGatedHead(root, head);
+					// F3（v1.0.29 双审计）：recheck 分支此前不删内存条目——审计者已签名、
+					// run 已收尾，条目残留会让 async-complete 延迟/丢失窗口内新提交被旧
+					// 签名放行（isAuditCompleted 对旧 auditStartedAt 即时成立）+ spawn 跳过
+					inFlightAudits.delete(root);
 					stopAuditBreath(); // 门禁轮同步完成：灯灭
 					return;
 				}
@@ -1434,6 +1619,10 @@ export default function (pi: ExtensionAPI): void {
 			// 门禁完成（passed/blocked/降级）——本次提交已覆盖；下次提交重新门禁
 			gatedHead.set(root, head);
 			persistGatedHead(root, head);
+			// F3（v1.0.29 双审计）：完成分支与 recheck/超时分支一致删内存条目——
+			// 签名已写、run 已收尾，保留条目会让 async-complete 延迟窗口内新提交被
+			// 旧签名即时放行 + 后续轮 spawn 跳过（≤16min 审计空窗）
+			inFlightAudits.delete(root);
 			stopAuditBreath(); // 门禁轮同步完成：灯灭
 			// 审计者已签名（passed/blocked）；v1.0.27（FP#5c 核实）：审计者按协议直写
 			// signature（不走 decision_signoff/recordSignature）→ streak 不自动维护——
@@ -1475,6 +1664,37 @@ export default function (pi: ExtensionAPI): void {
 				// T4：异常路径也清内存锁+灭灯（防 16min 停摆不可观测 + 呼吸灯常亮）。
 				// 文件锁不盲清——审计者可能实际在跑（异常发生在 spawn 之后），盲清会并发
 				// 双写；文件锁留给 stale-lock TTL 兜底（shouldClearStaleLock 年龄条件）
+				// B-1（v1.0.29 双审计）：删条目前先 best-effort stopRun——否则 runId
+				// 随条目丢失，挂起审计者失去全部终止路径（deadAuditor/async-complete/
+				// shutdown 均依赖条目取 runId）= 孤儿 run 算力泄漏 + 16min 后新 spawn
+				// 与仍活的旧 run 并发写 state（F-03 防的双审计在 catch 路径回潮）
+				const orphan = inFlightAudits.get(root);
+				let orphanStopped = false;
+				if (orphan?.runId) {
+					try {
+						orphanStopped = await stopRun(orphan.runId);
+					} catch {
+						/* noop：stop 失败不阻塞清理 */
+					}
+				}
+				// B-1 复审风险 4：stop 成功后按 F-02 身份守卫补清文件锁——否则被 catch
+				// 停掉的 run 的文件锁（inFlight=true）在会话内无任何路径清理（stale-lock
+				// 的 deadAuditor 路径依赖内存条目，此处已删）→ 会话内审计停摆到跨会话
+				// resetForSessionStart。守卫：磁盘锁仍属被 stop 的 run 才清（防误清新锁）。
+				const orphanRunId = orphan?.runId ?? "";
+				if (orphanStopped && orphanRunId) {
+					try {
+						const st = readAuditState(root);
+						if (
+							st.inFlight &&
+							(orphanRunId === "" || st.auditRunId === orphanRunId)
+						) {
+							patchAuditState(root, { inFlight: false });
+						}
+					} catch {
+						/* noop */
+					}
+				}
 				inFlightAudits.delete(root);
 				stopAuditBreath(root);
 			} catch {
@@ -1491,7 +1711,10 @@ export default function (pi: ExtensionAPI): void {
 		const env = data as { asyncId?: string; runId?: string } | null;
 		const completedId = env?.runId ?? env?.asyncId ?? "";
 		// L2 reviewer run 完成即移除（T1 补漏）：Set 只保留挂起 run，session_shutdown 有界
-		if (completedId) deliveryReviewerRuns.delete(completedId);
+		if (completedId) {
+			deliveryReviewerRuns.delete(completedId);
+			cancelOrphanStop(completedId); // F4/B-2：run 已自然完成，取消孤儿定时器
+		}
 		let completedCwd: string | null = null;
 		for (const [cwd, rec] of inFlightAudits) {
 			if (completedId && rec.runId === completedId) {
@@ -1509,33 +1732,45 @@ export default function (pi: ExtensionAPI): void {
 					st.signature.blockers &&
 					st.signature.blockers.length > 0
 				) {
-					// v1.0.28（F-06，与 before_agent_start 同规则）：先持久化去重标记
-					// 成功才 followUp 交付——patch 失败（审计者并发写 mtime 冲突）时
-					// 本轮不交付，留给 before_agent_start 注入路径（该路径同样先持久化
-					// 成功才注入）——防同一签名既 followUp 又重复注入
-					const dedupOk = (() => {
-						try {
-							return patchAuditState(completedCwd, {
-								injectedSignatureAt:
-									injectedSignatureAt.get(completedCwd) ??
-									st.signature.at ??
-									null,
-							});
-						} catch {
-							return false;
-						}
-					})();
-					if (!dedupOk) return;
-					pi.sendUserMessage(
-						`结对审计发现缺口（请处理，处理后下轮自动再审）：\n${st.signature.blockers.map((b) => `- ${b}`).join("\n")}`,
-						{ deliverAs: "followUp" },
-					);
+					// F6（v1.0.29 双审计）：**先交付、后持久化去重**——v1.0.28 的「先持久化
+					// 成功才交付」在 sendUserMessage 失败（print 模式/会话已关闭/无活动
+					// 会话）时，去重标记已落盘 → 此后所有会话 injectedSignatureAt ==
+					// sig.at → before_agent_start 永不注入 → blockers 永久不可见（价值
+					// 丢失）。改序后：交付失败 → 不落盘 → 注入路径接管（下轮/下会话
+					// before_agent_start 仍判定未注入，价值经 display 通道交付）。
+					// patch 失败（并发写）→ 不交付，留给注入路径——防同一签名
+					// followUp + 注入双通道重复。
+					let delivered = false;
+					try {
+						pi.sendUserMessage(
+							`结对审计发现缺口（请处理，处理后下轮自动再审）：\n${st.signature.blockers.map((b) => `- ${b}`).join("\n")}`,
+							{ deliverAs: "followUp" },
+						);
+						delivered = true;
+					} catch {
+						/* 交付失败：不落盘去重，注入路径接管 */
+					}
+					// 复审风险 3（已知限制）：pi.sendUserMessage 运行时为 fire-and-forget
+					// （loader.js 包装 .catch 吞异步失败），try/catch 仅捕获 assertActive
+					// 抛错（会话已失效）。静默失败（print 模式 no-op）时 delivered 恒 true
+					// 去重照常落盘——但该场景无 UI 也无注入通道，价值本不可见；跨会话
+					// 场景由 D-036 项目文件通道兜底（shutdown 删条目 → async-complete
+					// 找不到 completedCwd → 不对话交付，统一走 latest-audit.md）。
+					if (!delivered) return;
+					try {
+						const dedupOk = patchAuditState(completedCwd, {
+							injectedSignatureAt:
+								injectedSignatureAt.get(completedCwd) ??
+								st.signature.at ??
+								null,
+						});
+						if (!dedupOk) return; // 去重持久化冲突：下轮注入路径接管
+					} catch {
+						return;
+					}
 					// followUp 已交付 → 记录跨会话去重（v1.0.25：避免新会话 before_agent_start
-					// 再次注入同一签名——「新会话还有泄露」根治；v1.0.28：持久化已前置）
-					injectedSignatureAt.set(
-						completedCwd,
-						st.signature.at ?? Date.now(),
-					);
+					// 再次注入同一签名——「新会话还有泄露」根治；v1.0.28：持久化已前置；v1.0.29：交付成功后才落盘）
+					injectedSignatureAt.set(completedCwd, st.signature.at ?? Date.now());
 				}
 			} catch {
 				/* noop */

@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.0.29] - 2026-08-14
+
+生命周期关系修复（v1.0.28 发布后双路独立审查 F1-F13/B-1~B-10 的剩余发现 + 用户架构原则 D-036）——审计生命周期与主会话生命周期的关系错误：
+
+- **D-036 跨会话交付改走项目文件（high，用户原则）**：审计结论/中间态此前经 before_agent_start 注入**新会话对话**（上会话遗留结论串扰无关新任务——用户实证：run-31044 中间态注入规划 pi-follow-me 的新会话）。改：判 auditStartedAt < sessionStartAtWall = 上会话遗留 → 写 `.pi/decision-auditor/latest-audit.md`（原子写，lib writeAuditReport）+ 轻 notify，不注入对话；同会话（本会话 spawn 的审计完成、下轮闭环反馈）照旧 display:true 注入
+- **F3 门禁完成分支条目残留（high）**：门禁完成/recheck 分支只推进 gatedHead 不删 inFlightAudits 条目（超时分支删、这两分支漏）→ async-complete 延迟/丢失窗口内新提交被旧签名即时放行（isAuditCompleted 对旧 auditStartedAt 即时成立）+ spawn 跳过 ≤16min 审计空窗。三分支一致删条目
+- **F4/B-2 孤儿 run 回收（high）**：session_shutdown 未超 TTL 的 run 只删条目不 stop → runId 随条目丢失、挂起 run 永不可回收（无界算力泄漏）。改：未 stop 的 run 登记孤儿表（scheduleOrphanStop，TTL 剩余到点单发 stop，unref 不阻进程退出）；async-complete 匹配 runId 取消定时器；F9 L2 reviewer 登记时同步挂 TTL 定时器（挂起 reviewer 会话内回收）
+- **B-1 agent_end catch 孤儿 run（中）**：catch 删条目前不 stopRun → runId 永久丢失（deadAuditor/async-complete/shutdown 全依赖条目取 runId）。改：先 await stopRun 再删；stop 成功后按 F-02 身份守卫补清文件锁（防会话内审计停摆）
+- **F5 failed 重试升级同步门禁（中）**：failed 不推进 gatedHead → hasNewCommit 恒真 → 纯聊天轮也 spawn + 同步等 300s（主会话每轮阻塞 + 错误 notify 刷屏）。改：failed 重试轮（无本轮未提交产物）异步短路；判据**不含** !hasNewCommit（有未覆盖提交时 hasNewCommit 恰为 true，含之则短路恒 false）
+- **F6 async-complete 先持久化后交付（中）**：去重标记落盘后 sendUserMessage 失败（print/会话关闭）→ blockers 永久不可见。改：**先交付**，成功才落盘去重；失败由注入路径接管（sendUserMessage 运行时 fire-and-forget，assertActive 抛错可捕获，静默路径由 D-036 文件通道兜底）
+- **F7 stale-lock 清理按 stop 结果（中）**：agent_end deadAuditor 分支 fire-and-forget stop + 无条件清文件锁 → stop 失败且 run 存活时锁已清 → 新 spawn 并发双写。改：await stopRun 成功才允许 shouldClearStaleLock（与 F-02 同策略）
+- **F8 注入去重内存 set 后置（低-中）**：内存去重标记在 patch 前 set → patch 失败（并发写高频）同会话下轮判据 false → 价值压制到进程重启。改：patch 成功后才 set（sigTriggered/interimTriggered 标志），失败保持未置位可重试
+- **F10 session_shutdown 多实例隔离（低）**：shutdown 清空模块级 inFlightAudits 全表 → 同进程其他 cwd 实例条目丢失（runId 无终止路径）。改：只处理本实例 root 条目（entries 过滤 + delete 本 root，不 clear 全表）
+- **F12 /pair-audit 锁重置 findings（低）**：/pair-audit 锁 patch 不含 auditFindings:[] → 旧签名结论 + inFlight=true 被误判「被中断审计」注入。与 agent_end JD#23 对齐
+- 文档：docs/audit-state-machine.md 同步 v1.0.28 漂移（T5 stopRun 语义/LC-03 归属/failed 拆 spawn 超时保留锁/不变量 6 时钟容差 5min/T4 F-06 顺序/F-07 窗口等）+ v1.0.29 全量
+- 测试：57/57 通过（+1：writeAuditReport 跨会话落盘原子写），tsc 0 错误；独立 reviewer 两轮复审闭环（一轮 11 点逐项 + 二轮 3 修正验证）
+
 ## [1.0.28] - 2026-08-14
 
 生命周期审计第三轮（函数式专家 F-01~10 + Jeff Dean 系统设计 LC-01~10 双视角独立审查，独立 reviewer 复审闭环）——并发读写、多会话共享私人数据空间（.pi/decision-auditor/）、跨会话串台：

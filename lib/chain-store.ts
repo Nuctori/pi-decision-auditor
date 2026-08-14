@@ -365,6 +365,27 @@ export function auditStatePath(cwd: string): string {
 	return path.join(cwd, ".pi", "decision-auditor", "state.json");
 }
 
+/** 审计报告（跨会话交付物）路径：<cwd>/.pi/decision-auditor/latest-audit.md。
+ *  v1.0.29（D-036）：跨会话的审计结论/中间态写项目文件，不注入新会话对话。 */
+export function auditReportPath(cwd: string): string {
+	return path.join(cwd, ".pi", "decision-auditor", "latest-audit.md");
+}
+
+/** 写审计报告（原子写：唯一 tmp + rename，复用写者唯一 tmp 命名防交错覆盖）。
+ *  返回 false = 写入失败（不抛错——报告是辅助交付物，失败不阻塞主流程）。 */
+export function writeAuditReport(cwd: string, content: string): boolean {
+	try {
+		const file = auditReportPath(cwd);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+		fs.writeFileSync(tmp, content, "utf-8");
+		fs.renameSync(tmp, file);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /** 读审计状态；缺失视为从未审计。 */
 export function readAuditState(cwd: string): AuditState {
 	try {
@@ -613,9 +634,10 @@ export function writeAuditState(
 				}
 				for (const b of candidates) {
 					try {
-						const raw = JSON.parse(
-							fs.readFileSync(b, "utf-8"),
-						) as Record<string, unknown>;
+						const raw = JSON.parse(fs.readFileSync(b, "utf-8")) as Record<
+							string,
+							unknown
+						>;
 						const nonDefault: Record<string, unknown> = {};
 						for (const k of Object.keys(state)) {
 							const key = k as keyof AuditState;

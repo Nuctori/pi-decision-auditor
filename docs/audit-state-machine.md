@@ -28,6 +28,7 @@
 **触发**：spawn 审计者失败（rpc spawn 抛错/超时）——审计**未触发**。
 
 **语义**：不是产物质量问题（产物没被审，不等于产物有问题）。因此：
+
 - 不递增 `blockedStreak`（A2 门禁不计数）；
 - 不推进 `signatureConvLine`（审计未覆盖产物，下轮 `hasWork`/`needsSignoff` 仍判定有增量 → 自动重新 spawn）；
 - 不注入 blockers（不走修复轮，不产生“审计触发失败，产物未过审”假缺口）；
@@ -69,26 +70,36 @@
 
 ```
 审计者完成（async-complete）且 signature.blocked
-  → sendUserMessage 立即交付主 agent（"结对审计发现 N 个缺口…"）
+  → sendUserMessage 立即交付主 agent（"结对审计发现 N 个缺口…"）——**先交付后持久化去重**
+    （v1.0.29 F6：交付失败不落盘，注入路径接管，防 blockers 永久不可见）
   → 主 agent 处理 → 下轮 agent_end 自动再审 → 直到干净
 ```
 
-### T4. findings 注入（before_agent_start，每条独立 display）
+### T4. findings 注入（before_agent_start）
 
 ```
 signature.blocked / passed-with-warning 且未注入过（injectedSignatureAt≠signature.at）
-  → 价值点注入 display:true（用户可观察：审计抓出的缺口）
+  → 同会话（auditStartedAt ≥ sessionStartAtWall = 本会话 spawn 的审计）→ display:true 注入
+  → 跨会话（auditStartedAt < sessionStartAtWall = 上会话遗留结论）
+    → **写项目文件 .pi/decision-auditor/latest-audit.md + 轻 notify，不注入对话**（v1.0.29 D-036：
+      跨会话交付到项目，不是会话——防上会话审计串扰无关新任务，用户实证 run-31044）
 auditFindings 非空（过滤纯咨询占位后）且（inFlight===true 或 signature===null）且未注入过（injectedInterimAt≠auditStartedAt）
-  → 中间态注入 display:true（审计被杀/超时的部分发现；纯咨询轮占位过滤后不注入——零注入承诺；
-    signature===null 分支覆盖会话早结被杀后新会话 reset 清 inFlight 的跨会话交付）
+  → 同规则分流：同会话注入 display:true / 跨会话写项目文件
+  （中间态 = 审计被杀/超时的部分发现；纯咨询轮占位过滤后不注入——零注入承诺）
+去重标记内存 set 在 patch 成功之后（v1.0.29 F8：patch 失败同会话下轮可重试，不压制价值）
 
-### T5. 生命周期（fresh spawn，无常驻 run）
+### T5. 生命周期（fresh spawn + 孤儿 run 回收）
 
 ```
 
 agent_end（有真实产物）→ fresh spawn 审计者（context:"fork" 继承主会话上下文）
 审计完成            → run 自然结束（无跨轮复用、无生命周期登记）
-session_shutdown    → 清内存锁（inFlightAudits）+ 根缓存——无残留 run 可停
+session_shutdown    → 只处理本实例 root 的 in-flight 条目（v1.0.29 F10：不清其他 cwd 实例）；
+                      超 TTL run best-effort stop（成功才清文件锁，F-02 身份守卫）；
+                      未 stop 的 run 登记孤儿表（scheduleOrphanStop，v1.0.29 F4/B-2）——
+                      TTL 剩余时间到点单发 stop（runId 不随条目清空丢失，挂起 run 不再无界泄漏）
+agent_end catch     → 删条目前先 stopRun（v1.0.29 B-1：孤儿 run runId 不丢失）
+L2 reviewer         → 登记时挂 TTL 定时器（v1.0.29 F9：挂起 reviewer 会话内回收）
 
 ```
 
@@ -125,6 +136,33 @@ passed-with-warning → blockedStreak=0（降级放行即退出门禁循环）
 - **会话级状态**：roundDecisionMade append 成功后置位 + session_start 清零（print 模式
   agent_end 不执行时防残留误触发，FP #3）；内存锁 TTL 用 performance.now() 单调钟
   （墙钟跳变不早/晚过期，FP low）。
+- **v1.0.28 双审计批次（F-01~F-10 / LC-03~LC-10）**：
+  - F-01 锁劫持根治：patchAuditState 函数式重派生（latest）=> 值 | null，锁获取点持锁放弃；
+  - F-02 session_shutdown 清锁身份守卫（auditRunId 匹配才清，不杀他会话新锁）；
+  - F-03/LC-05 孤儿 run 闭环：spawn 超时保留锁由 TTL 兜底 + runId 已知先 stopRun + failed 写检查返回值；
+  - LC-03 门禁归属校验：交付轮等待前验证在跑审计是本会话 spawn（auditStartedAtWall 匹配 +
+    内存条目存在；ownAudit 缺失同样拦截——跨进程/切会话残留锁不劫持门禁）；
+  - LC-06 完成判定时钟容差 5min（跨主机/网络盘偏移不假超时，runId 身份校验独立把关）；
+  - LC-07 appendDecision mtime 先于 read + rename 紧前复校验 + 写后验证末尾条目；
+  - F-05 中间态注入滤'审计开始'占位（在跑审计 ≠ 被中断）；F-06 注入去重持久化前移
+    （patch 成功才注入）；F-07 convlogForeignRuns 50 行时间窗（防会话内永久停摆）；
+  - F-08 L2 冷却键 (cwd,head) + unref；F-09 convLineCache 键加尾哈希；
+  - LC-08 warn 带 pid + 损坏读告警 + lastError 成功路径清理；LC-09 .corrupt 备份扫描恢复。
+- **v1.0.29 生命周期关系修复（D-036 + 双审计 F3~F12/B-1/B-2）**：
+  - D-036 跨会话交付改走项目文件：before_agent_start 判 auditStartedAt < sessionStartAtWall
+    = 上会话遗留结论 → 写 .pi/decision-auditor/latest-audit.md + 轻 notify，不注入对话
+    （用户实证：上会话审计中间态注入无关新会话干扰新任务）；
+  - F3 门禁完成/recheck/超时三分支一致删内存条目（防条目残留期间新提交被旧签名放行）；
+  - F4/B-2 孤儿 run 登记表 + TTL 到点单发 stop（session_shutdown 未 stop 的 run 不再永久泄漏）；
+  - B-1 agent_end catch 删条目前先 stopRun；F9 L2 reviewer 登记时挂 TTL 定时器；
+  - F6 async-complete 先交付后持久化去重（交付失败不落盘，注入路径接管）；
+  - F8 注入去重内存 set 移到 patch 成功之后（patch 失败同会话下轮可重试）；
+  - F5 failed 重试轮（无本轮未提交产物）同步短路（不升级 300s 门禁阻塞主会话；
+    判据不含 !hasNewCommit——有未覆盖提交时 hasNewCommit 恰为 true，复审风险 1 修复）；
+  - F7 agent_end stale-lock 清理 await stopRun 按结果清文件锁（与 F-02 同策略）；
+  - F10 session_shutdown 只处理本实例 root 条目（不 stop/不清其他 cwd 实例的条目——
+    全清会让对方 runId 丢失无终止路径，复审风险 2 修复）；
+  - F12 /pair-audit 锁 patch 同步清空 auditFindings（与 agent_end JD#23 对齐）。
 
 ## 不变量
 
@@ -133,11 +171,14 @@ passed-with-warning → blockedStreak=0（降级放行即退出门禁循环）
    签名即释放 inFlight（recordSignature 置 false）；agent_end 对"文件锁残留但内存锁无"兜底释放。
 3. **价值点可观察 / 流程隐藏**：审计抓出的缺口（blockers / auditFindings）display:true；
    等待/计数/协商等流程信息不呈现给用户；纯咨询轮零注入（inFlight=false 不触发中间态注入）。
-4. **生命周期 = fresh spawn**：每次审计新起 run（context:"fork" 继承主会话上下文），审计完即死；
-   session_shutdown 只清内存锁——无跨会话残留，纯咨询轮 spawn 后快速退出（零后台停留）。
+4. **生命周期 = fresh spawn + 孤儿回收**：每次审计新起 run（context:"fork" 继承主会话上下文），
+   审计完即死；session_shutdown 只处理本实例条目 + 未 stop 的 run 登记孤儿表（TTL 到点 stop）；
+   纯咨询轮 spawn 后快速退出（零后台停留）。挂起 run 恒有终止路径（agent_end deadAuditor /
+   async-complete TTL 循环 / shutdown 孤儿表 / L2 reviewer 定时器）。
 5. **中间态优先**：审计者宁可多写 auditFindings（每步核实即追加），不可最后一起写（被杀即丢）。
-6. **blocked 也是完成**：本轮新签名（signature.at ≥ auditStartedAt 且 !inFlight）即完成判定——
-   blocked 仍推进 signatureConvLine，完成判定只看 at，交付轮不得误判为超时（防覆盖真实 blockers）。
+6. **blocked 也是完成**：本轮新签名（signature.at ≥ auditStartedAt - 5min 容差 且 !inFlight）即完成判定——
+   blocked 仍推进 signatureConvLine，完成判定只看 at（LC-06：5min 时钟容差吸收跨主机偏移），
+   交付轮不得误判为超时（防覆盖真实 blockers）。
    完成判定抽为 `isAuditCompleted` 纯函数（v1.0.26）：failed 永不视为完成（spawn 失败标记，
    非审计签名）；`state.auditRunId` 与签名 `runId` 同时存在时必须匹配——遗留/并发审计者的
    签名不得劫持本会话门禁结论（JD #14）。
