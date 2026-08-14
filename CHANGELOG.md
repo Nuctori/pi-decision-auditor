@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.38] - 2026-08-15
+
+用户实证报障：footer 常驻「结对审计进行中（17006s）」，但 state.json inFlight=false、签名 passed、审计早已结束——呼吸灯未灭（F-10 同类的多实例短路变体）：
+
+- **多实例短路路径灭灯（根因）**：多实例检测（convlogForeignRuns > 0）的短路 return 位于 stale 锁清理之前——本实例早前 spawn 的审计结束后，灭灯三条路径（async-complete 归属会话过滤 / stale 清理被短路 / session_shutdown 未触发）在此场景全部失效，灯永久常亮且秒数持续增长。改：短路 return 前 `stopAuditBreath(root)` 灭自己的灯（cwd 校验隔离多实例，不误灭他人灯）；不动 state（L4 防护不变——多实例下 state 可能属另一实例的真实审计）
+- **残留灯自愈（session_start）**：热重载/异常退出（session_shutdown 未执行）后 timer 与 footer 状态残留，新会话无条件灭本 root 的灯（带 cwd 校验；本会话 spawn 审计时 startAuditBreath 重新亮灯，顺序自洽）
+- 跳过：挂起审计者 run 的算力回收在多实例下仍依赖其他实例的 stale 路径（不在本版范围）；async-complete 的 ownsSession 归属过滤为 pi-subagents 行为（事件只通知发起会话）
+- 测试：57/57 通过，tsc 0 错误
+
 ## [1.0.37] - 2026-08-15
 
 v1.0.36 发布后双路 reviewer 复核（前轮 Medium：head 语义与兜底检测前提冲突）+ 本轮 Low-1/Note-1 同源——异步空洞源头补审：

@@ -659,6 +659,11 @@ export default function (pi: ExtensionAPI): void {
 				if (k !== root) nonGitRootWarned.delete(k);
 			}
 			resetForSessionStart(root);
+			// F-11（v1.0.38）残留灯自愈：热重载/异常退出后 timer 与 footer 状态可能残留
+			// （session_shutdown 未执行路径），新会话无 spawn 语义——无条件灭本 root 的灯
+			// （cwd 校验：同进程其他 cwd 实例的亮灯不受影响）。审计由本会话 spawn 时
+			// startAuditBreath 会重新亮灯，顺序自洽。
+			stopAuditBreath(root);
 			// 决策信号清零（FP 审计 #3：print 模式 agent_end 可能不执行，防跨会话残留误触发）
 			roundDecisionMade = false;
 			// 交付门禁基线：会话起始 HEAD（非 git 仓库 → 无门禁）；持久化——
@@ -1255,6 +1260,13 @@ export default function (pi: ExtensionAPI): void {
 			// 可能属于另一实例的真实审计，非属主实例清锁会让对方审计者收尾写冲突放弃、
 			// 签名丢失（实证审计缺口 L4）；守卫命中直接 return，不动 state）
 			if (convlogForeignRuns(root, RUN_ID) > 0) {
+				// F-11（v1.0.38，实证 F-10 同类）：短路 return 先于 stale 清理（L1268）——
+				// 本实例早前 spawn 的审计结束后，灭灯三条路径（async-complete 归属会话过滤 /
+				// stale 清理短路 / session_shutdown 未触发）在此场景全部失效，呼吸灯永久常亮
+				// （实证：state.inFlight=false 且签名 passed，footer 仍显示「结对审计进行中
+				// 17006s」≈4.7h）。return 前灭自己的灯（cwd 校验隔离多实例，不误灭他人灯）；
+				// 不动 state——多实例下 state 可能属另一实例的真实审计（L4 防护不变）。
+				stopAuditBreath(root);
 				try {
 					ctx.ui.notify(
 						"⚠ 检测到同一 cwd 下多个 pi 实例共享 convlog（存在其他实例的真实对话），本轮自动审计已跳过——多实例场景下审计会错审。在不同目录运行或设 PI_PAIR_PROJECT_ROOT 指向单一项目根后恢复。",
