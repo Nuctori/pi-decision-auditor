@@ -15,6 +15,8 @@
 | `blockedStreak` | `0..3` | 连续 blocked 次数（A2 门禁） |
 | `signatureConvLine` | `number` | 签名覆盖到的 convlog 对话行数（每次签名都推进到当前行，needsSignoff 用） |
 | `auditFindings` | `string[]` | 审计中间态（审计者边审边追加，被杀/超时也可交付）；纯咨询占位（`"本轮纯咨询，无审计对象"`）不算真实中间态 |
+| `auditRunId` | `string` | 本轮 spawn 的审计者 runId（扩展 spawn 成功后写；完成判定与签名 runId 比对——防遗留/并发审计者劫持门禁，v1.0.26 JD #14） |
+| `lastError` | `null \| string` | 最近一次扩展逻辑异常摘要（agent_end catch 落盘，防静默吞错不可观测，v1.0.26 JD #17） |
 | `gatedHead` | `null \| 全哈希` | 交付门禁基线（上次门禁覆盖的 HEAD，gitHead() 全哈希；v1.0.23 持久化——扩展热重载后惰性初始化从 state 恢复，不把热重载后刚提交的修复吞成基线） |
 
 > **已移除状态/字段**：`timeout`（v1.0.15 前存在）——超时直接降级为
@@ -98,8 +100,31 @@ blocked          → blockedStreak+1（A2 计数）
 passed           → blockedStreak=0
 passed-with-warning → blockedStreak=0（降级放行即退出门禁循环）
 每次签名         → inFlight=false（释放锁，防 decision_signoff 路径泄漏）+ signatureConvLine = 当前行
+幂等（v1.0.26 JD #20）：已有签名且 status/blockers 相同且 at ≥ auditStartedAt → no-op
+  （重复 signoff 不重写 at——去重键失效 → blockers 重复注入；不增 streak——A2 早触发降级）
 
 ```
+
+## 并发与异常防护（v1.0.26 双审计修复汇总）
+
+- **写路径**：state.json 原子写 tmp 名按写者唯一（`${file}.tmp-<pid>-<随机>`——共享固定
+  `.tmp` 名双写者交错会互相覆盖/ENOENT/半成品落盘，JD #14 双审计 critical#1）；rename 失败
+  按冲突返回 false；**写后验证**（rename 后重读磁盘内容 ≠ 本次写入 → 冲突，JD #16）——
+  单次重试不覆盖检查-写入窗口内到达的写入。
+- **chain.md append**：appendDecision 加 mtime 乐观锁 + 冲突重试（最多 3 次），防并发写者
+  重复 D-NNN（JD #14 双审计 high#2）。
+- **残留锁清理**：shouldClearStaleLock / resetForSessionStart 均加 auditStartedAt 年龄条件
+  （仅当审计启动已超 TTL 才清锁）——热重载后内存锁清空但审计者仍在跑时不得并发双审计
+  （JD #15 + FP #6）；resetForSessionStart 保留 inFlight 让遗留审计者先收尾。
+- **超时降级**：waitForAuditCompletion 返回 null 后先重读 state 用 isAuditCompleted 再查一次
+  （≤2s 盲窗内审计者真实签名不得被 passed-with-warning 覆盖，JD #19），并 rpc stop 终止
+  仍挂着的审计者 run（FP #13，资源泄露 + 迟到写竞争；stop 失败不影响降级放行）。
+- **异常可观测**：agent_end 外层 catch console.error + lastError 落盘（JD #17，防整轮无痕）。
+- **公共链自触发**：PI_PAIR_CHAIN_PUBLIC=1 时 hasUncommittedChanges pathspec 排除
+  docs/decisions（链自身写入不触发审计循环，JD #18）。
+- **会话级状态**：roundDecisionMade append 成功后置位 + session_start 清零（print 模式
+  agent_end 不执行时防残留误触发，FP #3）；内存锁 TTL 用 performance.now() 单调钟
+  （墙钟跳变不早/晚过期，FP low）。
 
 ## 不变量
 
@@ -113,6 +138,9 @@ passed-with-warning → blockedStreak=0（降级放行即退出门禁循环）
 5. **中间态优先**：审计者宁可多写 auditFindings（每步核实即追加），不可最后一起写（被杀即丢）。
 6. **blocked 也是完成**：本轮新签名（signature.at ≥ auditStartedAt 且 !inFlight）即完成判定——
    blocked 仍推进 signatureConvLine，完成判定只看 at，交付轮不得误判为超时（防覆盖真实 blockers）。
+   完成判定抽为 `isAuditCompleted` 纯函数（v1.0.26）：failed 永不视为完成（spawn 失败标记，
+   非审计签名）；`state.auditRunId` 与签名 `runId` 同时存在时必须匹配——遗留/并发审计者的
+   签名不得劫持本会话门禁结论（JD #14）。
 7. **游标单位一致**：convExtractedLine / signatureConvLine 一律为对话行计数（## 👤/## 🤖 行数）；
    扩展在 agent_end 用 clampConvExtractedLine 钳制（审计者写文件行号超界 → 视为已读完，防触发断线）。
 

@@ -150,41 +150,85 @@ export function nextId(entries: DecisionEntry[]): string {
 	return `D-${String(max + 1).padStart(3, "0")}`;
 }
 
-/** 追加一条决策（append-only；返回新条目）。 */
+/** 追加一条决策（append-only；返回新条目）。
+ *  乐观锁（v1.0.26 双审计发现 high#2）：read→parse→nextId→append 是 read-modify-write，
+ *  并发写者（双实例 / 审计者按纪律 append）可得重复 D-NNN——写前校验 chain.md mtime，
+ *  冲突重读重试（最多 3 次），仍冲突抛错（调用方决策_add 可见，不静默追加重复编号）。 */
 export function appendDecision(
 	cwd: string,
 	fields: DecisionFields,
 	now: Date = new Date(),
 ): DecisionEntry {
 	const file = ensureChain(cwd);
-	const raw = readRaw(cwd);
-	const entries = parseChain(raw);
-	const id = nextId(entries);
-	const supersedes =
-		fields.supersedes && fields.supersedes.length > 0
-			? fields.supersedes
-			: undefined;
-	const entry: DecisionEntry = {
-		...fields,
-		id,
-		status: "Accepted",
-		date: now.toISOString(),
-		supersedes,
-	};
-	const lines = [
-		`## ${id}: ${entry.summary} [${entry.status}]`,
-		`- Context: ${entry.context}`,
-		`- Decision: ${entry.decision}`,
-		`- Rationale: ${entry.rationale}`,
-	];
-	if (entry.alternatives) lines.push(`- Alternatives: ${entry.alternatives}`);
-	if (entry.confidence) lines.push(`- Confidence: ${entry.confidence}`);
-	if (entry.supersedes && entry.supersedes.length > 0)
-		lines.push(`- Supersedes: ${entry.supersedes.join(", ")}`);
-	lines.push(`- Date: ${entry.date}`);
-	lines.push("");
-	fs.appendFileSync(file, `\n${lines.join("\n")}`, "utf-8");
-	return entry;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const raw = readRaw(cwd);
+		const expectedMtime = chainMtime(file);
+		const entries = parseChain(raw);
+		const id = nextId(entries);
+		const supersedes =
+			fields.supersedes && fields.supersedes.length > 0
+				? fields.supersedes
+				: undefined;
+		const entry: DecisionEntry = {
+			...fields,
+			id,
+			status: "Accepted",
+			date: now.toISOString(),
+			supersedes,
+		};
+		const lines = [
+			`## ${id}: ${entry.summary} [${entry.status}]`,
+			`- Context: ${entry.context}`,
+			`- Decision: ${entry.decision}`,
+			`- Rationale: ${entry.rationale}`,
+		];
+		if (entry.alternatives)
+			lines.push(`- Alternatives: ${entry.alternatives}`);
+		if (entry.confidence) lines.push(`- Confidence: ${entry.confidence}`);
+		if (entry.supersedes && entry.supersedes.length > 0)
+			lines.push(`- Supersedes: ${entry.supersedes.join(", ")}`);
+		lines.push(`- Date: ${entry.date}`);
+		lines.push("");
+		const payload = `${raw.replace(/\r?\n$/, "")}\n\n${lines.join("\n")}`;
+		if (expectedMtime !== null && chainMtime(file) !== expectedMtime) {
+			continue; // 他写者已改 → 重读重试
+		}
+		// 原子写：唯一 tmp + rename（与 writeAuditState 同模式）
+		const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+		try {
+			fs.writeFileSync(tmp, payload, "utf-8");
+			fs.renameSync(tmp, file);
+		} catch {
+			try {
+				fs.unlinkSync(tmp);
+			} catch {
+				/* noop */
+			}
+			continue;
+		}
+		// 写后验证：内容一致（窗口内他写者未覆盖）且新 id 唯一
+		let verified = false;
+		try {
+			verified =
+				fs.readFileSync(file, "utf-8") === payload &&
+				parseChain(payload).filter((e) => e.id === id).length === 1;
+		} catch {
+			/* 落到循环尾重试 */
+		}
+		if (verified) return entry;
+	}
+	throw new Error(
+		`appendDecision 并发冲突（3 次重试仍失败）: ${file} — 请稍后重试 decision_add`,
+	);
+}
+
+/** chain.md 当前 mtime（epoch ms）；不存在返回 null。append 乐观锁用。 */
+function chainMtime(file: string): number | null {
+	try {
+		return fs.statSync(file).mtimeMs;
+	} catch {
+		return null;
+	}
 }
 
 /** 列出条目，可选 onlyFromId（含该 id 起的新条目）。 */
@@ -258,6 +302,10 @@ export interface AuditState {
 	lastAuditDurationMs: number;
 	/** 最近一次审计的启动时间戳（扩展 spawn 时写；审计者收尾算 duration）。 */
 	auditStartedAt: number;
+	/** 本轮 spawn 的审计者 runId（扩展写；完成判定与签名 runId 比对——防遗留/并发审计者劫持门禁，v1.0.26）。 */
+	auditRunId: string;
+	/** 最近一次扩展逻辑异常（agent_end 等 catch 落盘，防静默吞错不可观测，v1.0.26）。 */
+	lastError: string | null;
 	/** 交付门禁基线（上次门禁覆盖的 HEAD 短哈希；持久化——扩展热重载后恢复，防吞修复提交）。 */
 	gatedHead: string | null;
 	/** 已注入过的签名时间戳（跨会话去重：同一签名只注入一次——审计结论不每个新会话重复弹出，v1.0.25）。 */
@@ -277,6 +325,8 @@ const DEFAULT_STATE: AuditState = {
 	auditFindings: [],
 	lastAuditDurationMs: 0,
 	auditStartedAt: 0,
+	auditRunId: "",
+	lastError: null,
 	gatedHead: null,
 	injectedSignatureAt: null,
 	injectedInterimAt: null,
@@ -340,6 +390,8 @@ export function readAuditState(cwd: string): AuditState {
 					: 0,
 			auditStartedAt:
 				typeof obj.auditStartedAt === "number" ? obj.auditStartedAt : 0,
+			auditRunId: typeof obj.auditRunId === "string" ? obj.auditRunId : "",
+			lastError: typeof obj.lastError === "string" ? obj.lastError : null,
 			gatedHead: typeof obj.gatedHead === "string" ? obj.gatedHead : null,
 			injectedSignatureAt:
 				typeof obj.injectedSignatureAt === "number"
@@ -389,7 +441,9 @@ export function writeAuditState(
 	// 字段级合并写：与磁盘最新原文合并，保留未知字段（消毒读只重建已知字段，
 	// 全量覆盖会删掉未来新增字段——gatedHead 丢失事故的机制根因，v1.0.26）。
 	// 损坏/缺失文件 → 备份后按传入 state 重建（防默认值覆盖真实审计进度）。
-	const tmp = `${file}.tmp`;
+	// tmp 名按写者唯一（v1.0.26 双审计发现 critical#1）：共享 `${file}.tmp` 时
+	// 双写者交错会互相覆盖 tmp / rename ENOENT / 半成品落盘——加 pid+随机后缀。
+	const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 	let merged: unknown = state;
 	try {
 		const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<
@@ -408,11 +462,36 @@ export function writeAuditState(
 			}
 		}
 	}
-	fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), {
+	const payload = JSON.stringify(merged, null, 2);
+	fs.writeFileSync(tmp, payload, {
 		encoding: "utf-8",
 		flush: true,
 	});
-	fs.renameSync(tmp, file);
+	try {
+		fs.renameSync(tmp, file);
+	} catch {
+		// rename 失败（极端：tmp 被并发写者移走/权限）→ 按冲突处理，不落半成品
+		try {
+			fs.unlinkSync(tmp);
+		} catch {
+			/* noop */
+		}
+		console.warn(`audit state rename 失败，按冲突放弃: ${file}`);
+		return false;
+	}
+	// verify-after-write（JD #16）：rename 后重读磁盘内容，与本次写入不一致 =
+	// 检查-写入窗口内他写者已覆盖 → 按冲突返回 false，调用方（patchAuditState）
+	// 重读最新内容重试——单次重试不覆盖窗口内到达的写入，写后验证才兜住。
+	try {
+		if (fs.readFileSync(file, "utf-8") !== payload) {
+			console.warn(
+				`audit state 写后验证失败（并发覆盖），按冲突放弃: ${file}`,
+			);
+			return false;
+		}
+	} catch {
+		return false;
+	}
 	return true;
 }
 
@@ -454,13 +533,28 @@ export function needsSignoff(cwd: string): boolean {
 }
 
 /** 记录本轮审计签名（agent 完成审计阶段后调用）。签名即审计结束：释放 inFlight 锁。
- * 多写者防护：读后写前校验 mtime，冲突（他写者已改）→ 重读最新重试一次。 */
+ * 多写者防护：读后写前校验 mtime，冲突（他写者已改）→ 重读最新重试一次。
+ * head：调用方传入（spawn 时已算过 gitHead 可复用）；缺省回退上一签名 head——
+ * 不在状态转移内嵌 git exec（FP 审计 #8：git 瞬态失败 → head:null → 兼容注入
+ * 削弱跨会话新鲜度守卫）。
+ * 幂等（JD 审计 #20）：已有签名且 status/blockers 相同 且 at ≥ auditStartedAt（本轮
+ * 结论）→ no-op——重复 signoff（手滑/审计者与扩展双写）不重写 at、不增 blockedStreak。 */
 export function recordSignature(
 	cwd: string,
 	sig: Omit<AuditSignature, "at">,
+	head?: string | null,
 ): void {
 	for (let attempt = 0; attempt < 2; attempt++) {
 		const state = readAuditState(cwd);
+		const prev = state.signature;
+		if (
+			prev &&
+			prev.status === sig.status &&
+			prev.at >= state.auditStartedAt &&
+			sameBlockers(prev.blockers, sig.blockers)
+		) {
+			return; // 幂等：同轮同结论已签名
+		}
 		const mtime = auditStateMtime(cwd);
 		const totalLines = convLogLineCount(cwd);
 		// A2 门禁：连续 blocked 递增；passed / 降级放行后清零。（timeout 态已移除，见 docs/audit-state-machine.md）
@@ -480,7 +574,14 @@ export function recordSignature(
 				...state,
 				// 签名 = 审计结束：释放文件锁（防 decision_signoff 路径泄漏 inFlight → 后续审计永久停摆）
 				inFlight: false,
-				signature: { ...sig, at: Date.now(), head: gitHead(cwd) },
+				signature: {
+					...sig,
+					at: Date.now(),
+					head:
+						head !== undefined
+							? head
+							: (state.signature?.head ?? gitHead(cwd)),
+				},
 				signatureConvLine: nextConvLine,
 				blockedStreak,
 			},
@@ -490,24 +591,42 @@ export function recordSignature(
 	}
 }
 
-/**
- * 会话边界重置（session_start 调用）：新会话开始时清掉跨会话的待签名状态。
+/** blockers 数组内容相等（幂等判定用）。 */
+function sameBlockers(
+	a: string[] | undefined,
+	b: string[] | undefined,
+): boolean {
+	if (!a || !b) return a === b;
+	if (a.length !== b.length) return false;
+	return a.every((x, i) => x === b[i]);
+}
+
+/** 会话边界重置（session_start 调用）：新会话开始时清掉跨会话的待签名状态。
  * 保留：决策链审计进度（lastAuditedId / convExtractedLine）——跨会话延续。
  * 清零：signatureConvLine 推进到当前 convlog 行数（旧会话未签名工作不强制新会话开头就审）。
- */
+ * inFlight 条件清（JD 审计 #15）：遗留审计者 run 不随会话结束取消，新会话无条件清锁
+ * → 遗留审计者与新手并发双写。仅当审计启动已超 TTL（审计不可能还活着）才清；
+ * 否则保留锁让遗留审计者先收尾。 */
 export function resetForSessionStart(cwd: string): void {
 	try {
+		const state = readAuditState(cwd);
 		const totalLines = convLogLineCount(cwd);
+		const auditDead =
+			state.auditStartedAt === 0 ||
+			Date.now() - state.auditStartedAt >= IN_FLIGHT_TTL_MS;
 		patchAuditState(cwd, {
 			// 推进到当前行数 = 视为已覆盖旧会话的对话（不触发 needsSignoff）
 			signatureConvLine: totalLines,
 			// 保留上次签名状态作参考，但不再触发待签名
-			inFlight: false,
+			...(auditDead ? { inFlight: false } : {}),
 		});
 	} catch {
 		/* noop */
 	}
 }
+
+/** 审计 run 最长存活时间（对齐 spawn 超时 900s；锁年龄判定用，扩展与 lib 共用）。 */
+export const IN_FLIGHT_TTL_MS = 16 * 60 * 1000; // 16 分钟 > spawn timeout 15 分钟
 
 /** 自 lastAuditedId 之后的新条目（含 lastAuditedId 自身若从未确认）；从未审计则返回全部。 */
 export function entriesSinceLastAudit(cwd: string): DecisionEntry[] {
@@ -527,6 +646,13 @@ export function entriesSinceLastAudit(cwd: string): DecisionEntry[] {
  */
 export function hasUncommittedChanges(cwd: string): boolean {
 	try {
+		// 公共链模式（PI_PAIR_CHAIN_PUBLIC=1）：chain.md 位于 docs/decisions/，
+		// 每次 decision_add 追加即令仓库变脏 → 每轮 agent_end 自触发审计循环（JD #18）——
+		// 追加排除该目录；私聊模式链在 .pi/ 已被排除，不额外排除 docs/decisions
+		// （用户可能在 docs/decisions 有真实产物，误排会漏审）。
+		const isPublicChain =
+			process.env.PI_PAIR_CHAIN_PUBLIC === "1" ||
+			process.env.PI_PAIR_CHAIN_PUBLIC === "true";
 		const out = execFileSync(
 			"git",
 			[
@@ -536,6 +662,7 @@ export function hasUncommittedChanges(cwd: string): boolean {
 				"--",
 				":(exclude).pi",
 				":(exclude).pi-subagents",
+				...(isPublicChain ? [":(exclude)docs/decisions"] : []),
 			],
 			{
 				cwd,
@@ -606,6 +733,32 @@ export function shouldInjectInterimFindings(
 }
 
 /**
+ * 审计完成判定（v1.0.26 抽出的纯函数，waitForAuditCompletion 与超时降级前重读共用）：
+ * 本轮 spawn 的审计者写入了新签名（signature.at ≥ auditStartedAt）且锁已释放。
+ * run 身份校验（JD 审计 #14）：state.auditRunId（扩展 spawn 后写入）与签名 runId
+ * 必须匹配——遗留/并发审计者（另一会话/另一 spawn）的签名不得劫持本会话门禁结论；
+ * 两者任一缺失（旧版本 state / 审计者漏写 runId）→ 兼容放行（不破坏既有流程）。
+ * failed = spawn 失败标记，非审计签名（v1.0.24：多实例下 failed.at 可晚于本轮
+ * auditStartedAt，不排除会劫持门禁完成判定）→ 永不视为完成。
+ */
+export function isAuditCompleted(state: AuditState, startedAt: number): boolean {
+	if (!state.signature) return false;
+	const sig = state.signature;
+	if (sig.status === "failed") return false;
+	// blocked 也是完成（签名即推进 convLine，但完成判定只看 at），交付轮不得误判为超时（High-1）
+	// B5 代码兜底：审计者手写 signature 漏 at（消毒为 0）时，用 lastAuditAt 判定——
+	// 收尾写会把 lastAuditAt 置当前，故 lastAuditAt >= startedAt 且 !inFlight = 刚签名完成；
+	// 旧轮签名（无 at）的 lastAuditAt 早于本轮 startedAt，不会被误判。
+	const atOk =
+		sig.at >= startedAt || (sig.at === 0 && state.lastAuditAt >= startedAt);
+	if (!atOk || state.inFlight) return false;
+	if (state.auditRunId && sig.runId && sig.runId !== state.auditRunId) {
+		return false; // 签名属于其他 spawn 的审计者
+	}
+	return true;
+}
+
+/**
  * 审计结论注入判据（v1.0.24 行为级测试目标，从 before_agent_start 抽出的纯函数）：
  * 注入 ⇔ blocked/passed-with-warning 且 blockers 非空 且 同签名未注入过 且 签名新鲜。
  * 新鲜度（跨会话审计泄露根治）：签名带审计时的产物基线 HEAD——当前 HEAD 已推进
@@ -635,14 +788,21 @@ export function shouldInjectSignatureFindings(
 /**
  * 残留锁兜底判据（v1.0.21 行为级测试目标，从 agent_end 抽出的纯函数）：
  * 文件锁 inFlight=true 但内存锁已无（审计者被强杀未写收尾）→ 应释放文件锁。
+ * 年龄条件（v1.0.26 双审计发现：热重载后内存 map 全新 → hasInMemoryLock=false 无条件清锁，
+ * 即使审计者仍在跑（auditStartedAt 新近）→ 并发双审计）——仅当审计启动已超 TTL
+ * （审计不可能还活着）才清。
  * 位置语义（先于 hasWork 判断执行——纯咨询轮也清锁）由接线守卫的 indexOf 顺序断言锁定，
  * 这里只锁定判据本身：清锁**不依赖** hasWork 信号（清锁≠spawn，不违反零噪音承诺）。
  */
 export function shouldClearStaleLock(
 	state: AuditState,
 	hasInMemoryLock: boolean,
+	now: number = Date.now(),
 ): boolean {
-	return state.inFlight === true && !hasInMemoryLock;
+	const auditTooRecent =
+		state.auditStartedAt > 0 &&
+		now - state.auditStartedAt < IN_FLIGHT_TTL_MS;
+	return state.inFlight === true && !hasInMemoryLock && !auditTooRecent;
 }
 
 /**
@@ -797,10 +957,20 @@ export function readProcess(cwd: string, maxChars = 8000): string {
 	}
 }
 
-/** convlog 总行数（不含头注释），用于增量提取定位。只统计对话行（## 👤 / ## 🤖）。 */
+/** convlog 总行数（不含头注释），用于增量提取定位。只统计对话行（## 👤 / ## 🤖）。
+ * 进程内缓存（JD 审计 #22）：convlog 永久追加无滚动截断（实测 428KB/天），
+ * 每轮 agent_end 调用 3-6 次、每次整读 O(n)——按 (mtime,size) 缓存，文件未变
+ * （同轮多次调用）直接返回；其他实例追加 → mtime/size 变 → 重扫。 */
+let convLineCache: { key: string; count: number } | null = null;
 export function convLogLineCount(cwd: string): number {
 	try {
-		const raw = fs.readFileSync(convlogPath(cwd), "utf-8");
+		const file = convlogPath(cwd);
+		const st = fs.statSync(file);
+		const key = `${file}:${st.mtimeMs}:${st.size}`;
+		if (convLineCache && convLineCache.key === key) {
+			return convLineCache.count;
+		}
+		const raw = fs.readFileSync(file, "utf-8");
 		const lines = raw.split(/\r?\n/);
 		let count = 0;
 		for (const line of lines) {
@@ -809,6 +979,7 @@ export function convLogLineCount(cwd: string): number {
 				count++;
 			}
 		}
+		convLineCache = { key, count };
 		return count;
 	} catch {
 		return 0;

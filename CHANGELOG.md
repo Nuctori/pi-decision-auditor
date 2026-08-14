@@ -9,7 +9,26 @@
 - **L2 消毒丢字段 + 损坏覆盖机制修复**——writeAuditState 读磁盘原文合并保留未知字段（新增字段不再被任意写者消毒删除——gatedHead 丢失事故的机制根因）；损坏 state.json 先备份 `state.json.corrupt-<ts>` 再重建，防默认值覆盖真实审计进度
 - **L4 auditFindings 双写者分离**——spawn 失败记账文本从审计者拥有的 `auditFindings` 改走扩展属主字段 `signature.reason`（防超时降级把它当价值点注入用户）；降级过滤补历史残留文本
 - **minor**：waitForAuditCompletion 双 sleep → 单 sleep（300s 门禁内轮询次数翻倍）；清残留锁点返回值检查；死导入清理
-- 测试：42/42 通过（+3 回归：L3 全哈希 / L2 合并写+损坏备份 / L1 patchAuditState）、tsc 0 错误
+- **双审计（FP 专家 + Jeff Dean）泄露清单全量修复**：
+  - **critical#1 共享 tmp 名**：`state.json.tmp` 被所有写者共用 → 双写者交错互相覆盖/rename ENOENT/半成品落盘。tmp 名按写者唯一（`${file}.tmp-<pid>-<时间戳36>-<随机>`），rename 失败按冲突返回 false
+  - **high#2 chain.md 无锁编号**：appendDecision read→parse→nextId→append 无乐观锁 → 并发写者重复 D-NNN。加 mtime 校验 + 冲突重试（3 次）+ 写后验证（内容一致 + id 唯一），仍冲突抛错不静默追加
+  - **JD#14 门禁完成判定无 run 身份**：完成判定只比 `at ≥ startedAt` → 遗留/并发审计者签名可劫持新会话门禁结论。抽为 `isAuditCompleted` 纯函数：`state.auditRunId`（spawn 后写入）与签名 `runId` 同时存在时必须匹配；failed 永不视为完成；审计者 prompt/agents 收尾协议要求签名带 runId
+  - **JD#15/FP#6 锁年龄条件**：resetForSessionStart 与 shouldClearStaleLock 无条件清 inFlight → 热重载后真审计运行中被释放 → 并发双审计。均加 auditStartedAt 年龄条件（仅超 TTL 才清）；IN_FLIGHT_TTL_MS 常量移到 lib 共用
+  - **JD#16 mtime 乐观锁写后验证**：rename 后重读磁盘内容 ≠ 本次写入 → 冲突返回 false（patchAuditState 重读最新重试）——单次重试不覆盖检查-写入窗口内到达的写入
+  - **JD#17 静默吞错**：agent_end 外层 catch noop → 错误整轮无痕（实证 prevBlockers ReferenceError 被吞）。改 console.error + state 新增 `lastError` 字段落盘
+  - **JD#18 公共链自触发循环**：PI_PAIR_CHAIN_PUBLIC=1 时 chain.md 在 docs/decisions/ 未排除 → 每次 append 变脏 → 每轮 spawn。hasUncommittedChanges pathspec 追加 `:(exclude)docs/decisions`（仅公共链模式）
+  - **JD#19 超时降级盲写**：300s deadline 与审计者签名间 ≤2s 盲窗 → 真实签名被 passed-with-warning 覆盖、blockers 永久丢失。降级前用 isAuditCompleted 重读再查一次，成立走正常完成分支
+  - **JD#20 signoff 幂等**：recordSignature 无条件重写 at + blockedStreak+1 → 重复 signoff 去重键失效 + streak 双计。同轮同结论（status/blockers 相同且 at ≥ auditStartedAt）→ no-op
+  - **JD#21 session_start 覆盖门禁基线**：新会话无条件以当前 HEAD 为基线 → 上会话门禁前终止的提交永不过审。保留持久化基线（`st.gatedHead ?? head`）
+  - **JD#22 convlog O(n) 扫描**：convLogLineCount 每轮整读 3-6 次（实测 428KB/天）。按 (mtime,size) 进程内缓存，文件未变直接返回
+  - **JD#23 中间态注入窗口**：新 spawn 后、审计者写占位前 auditFindings 仍是上轮结论 → 误标「被中断审计」注入。spawn 前置写清空 auditFindings
+  - **FP#3 roundDecisionMade 泄漏**：append 前置位 + agent_end 不执行（print 模式/异常）→ 残留误触发。置位移到 append 成功后 + session_start 清零
+  - **FP#8 recordSignature 内嵌 git IO**：状态转移内 exec git rev-parse，瞬态失败 → head:null → 兼容注入削弱新鲜度守卫。head 改调用方传入（缺省回退上一签名 head）
+  - **FP#10 锁与 spawn 间异常**：patchAuditState 抛错残留内存锁。置锁→spawn 块 try/catch，失败释放双锁
+  - **FP#13 门禁超时不终止 run**：超时降级后 rpc("stop") 终止仍挂着的审计者 run（stop 失败不影响降级放行）
+  - **FP#7 跨会话 plan 决策丢失**：runId 过滤 vs 共享游标矛盾——其他 run 行中的明显决策仍提取入链（标注来源 run），推导目标仍只用本会话行
+  - **FP low 组**：签名消毒重建字段保留（runId/reason/head 已全量）；waitForAuditCompletion 去循环内重复 duration 写；内存锁 TTL 换 performance.now() 单调钟（墙钟跳变不早/晚过期）
+- 测试：45/45 通过（+3：isAuditCompleted 完成判定 9 态 / recordSignature 幂等 / appendDecision 无重复编号；接线守卫改断 isAuditCompleted 调用）、tsc 0 错误
 
 ## [1.0.25] - 2026-08-14
 

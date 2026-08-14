@@ -24,6 +24,7 @@ import {
 	gitHead,
 	hasNewConversation,
 	hasUncommittedChanges,
+	isAuditCompleted,
 	listEntries,
 	needsSignoff,
 	parseChain,
@@ -523,9 +524,10 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		"审计完成事件必须把 blockers 立即交付主 agent（持续交付，不等下轮）",
 	);
 	// H2：waitForAuditCompletion 完成判定 = 本轮新签名（blocked 也算完成，防覆盖真实 blockers）
+	// v1.0.26：完成判定抽成 isAuditCompleted 纯函数（lib 单测锁定行为：at 判定 + runId 身份校验 + failed 排除）
 	assert.ok(
-		src.includes("state.signature.at >= startedAt"),
-		"完成判定必须用 signature.at >= auditStartedAt（blocked 也是完成，完成判定只看 at）",
+		src.includes("isAuditCompleted(state, startedAt)"),
+		"完成判定必须走 isAuditCompleted 纯函数（lib 行为级测试锁定：at 判定 + runId 身份校验 + failed 排除）",
 	);
 	// 门禁基线：会话起始 HEAD 初始化 + 持久化（非 git 仓库无门禁）
 	assert.ok(
@@ -1275,4 +1277,166 @@ test("L1：patchAuditState 字段级写（乐观锁冲突重试一次）", () =>
 	assert.equal(st.gatedHead, "abc", "patch 只改指定字段，其他字段保留");
 	// 冲突拒绝路径由既有测试 "writeAuditState mtime 乐观锁：匹配写、冲突放弃" 覆盖；
 	// patchAuditState 重试（读最新 → 重写）在同步单测中无法注入 read-write 窗口竞态，不做伪测试
+});
+
+test("v1.0.26：isAuditCompleted 完成判定（at 锚点 + runId 身份 + failed 排除）", () => {
+	const base: AuditState = {
+		lastAuditedId: null,
+		inFlight: false,
+		convExtractedLine: 0,
+		lastAuditAt: 0,
+		signature: null,
+		signatureConvLine: 0,
+		blockedStreak: 0,
+		auditFindings: [],
+		lastAuditDurationMs: 0,
+		auditStartedAt: 1000,
+		auditRunId: "",
+		lastError: null,
+		gatedHead: null,
+		injectedSignatureAt: null,
+		injectedInterimAt: null,
+	};
+	// 无签名 → 未完成
+	assert.equal(isAuditCompleted({ ...base }, 1000), false);
+	// 本轮新签名（at >= startedAt）且锁已释放 → 完成（blocked 也是完成）
+	assert.equal(
+		isAuditCompleted(
+			{ ...base, signature: { status: "blocked", at: 2000, blockers: ["x"] } },
+			1000,
+		),
+		true,
+		"blocked 签名 at>=startedAt → 完成（blocked 也是完成，防覆盖真实 blockers）",
+	);
+	// 旧轮签名（at < startedAt）→ 未完成
+	assert.equal(
+		isAuditCompleted(
+			{ ...base, signature: { status: "passed", at: 500 } },
+			1000,
+		),
+		false,
+		"旧轮签名 at < startedAt → 未完成",
+	);
+	// inFlight=true → 未完成（审计者还在收尾）
+	assert.equal(
+		isAuditCompleted(
+			{
+				...base,
+				inFlight: true,
+				signature: { status: "passed", at: 2000 },
+			},
+			1000,
+		),
+		false,
+		"inFlight=true → 未完成",
+	);
+	// failed = spawn 失败标记，非审计签名 → 永不视为完成（结对审计注意项 + v1.0.24 语义）
+	assert.equal(
+		isAuditCompleted(
+			{
+				...base,
+				signature: { status: "failed", at: 5000 },
+			},
+			1000,
+		),
+		false,
+		"failed 签名（spawn 失败标记）永不视为完成——failed.at 可晚于 auditStartedAt，不得劫持门禁",
+	);
+	// runId 身份校验（JD #14）：签名属于其他 spawn 的审计者 → 未完成
+	assert.equal(
+		isAuditCompleted(
+			{
+				...base,
+				auditRunId: "run-A",
+				signature: { status: "passed", at: 2000, runId: "run-B" },
+			},
+			1000,
+		),
+		false,
+		"签名 runId ≠ state.auditRunId（遗留/并发审计者）→ 不得劫持本会话门禁",
+	);
+	// runId 匹配 → 完成
+	assert.equal(
+		isAuditCompleted(
+			{
+				...base,
+				auditRunId: "run-A",
+				signature: { status: "passed", at: 2000, runId: "run-A" },
+			},
+			1000,
+		),
+		true,
+		"签名 runId = state.auditRunId → 完成",
+	);
+	// 兼容：审计者漏写 runId（旧 prompt 行为）→ 放行（不破坏既有流程）
+	assert.equal(
+		isAuditCompleted(
+			{
+				...base,
+				auditRunId: "run-A",
+				signature: { status: "passed", at: 2000 },
+			},
+			1000,
+		),
+		true,
+		"签名缺 runId（旧版本）→ 兼容放行",
+	);
+	// B5 兜底：签名缺 at（消毒为 0）但 lastAuditAt >= startedAt → 完成
+	assert.equal(
+		isAuditCompleted(
+			{ ...base, lastAuditAt: 2000, signature: { status: "passed", at: 0 } },
+			1000,
+		),
+		true,
+		"签名缺 at 时用 lastAuditAt 判定（B5 代码兜底）",
+	);
+});
+
+test("v1.0.26：recordSignature 幂等（同轮同结论重复 signoff 不重写不增 streak）", () => {
+	const dir = tmpDir();
+	const write = (sig: AuditSignature | null): void => {
+		writeAuditState(dir, { ...readAuditState(dir), signature: sig });
+	};
+	// 先写一次 blocked 签名（at=1000，审计窗口 500 起）
+	write({ status: "blocked", at: 1000, blockers: ["缺口A", "缺口B"] });
+	writeAuditState(dir, { ...readAuditState(dir), auditStartedAt: 500 });
+	// 同轮同结论重复 signoff → no-op（at 不变、blockedStreak 不双计）
+	const before = readAuditState(dir);
+	recordSignature(dir, {
+		status: "blocked",
+		blockers: ["缺口A", "缺口B"],
+	});
+	const after = readAuditState(dir);
+	assert.equal(after.signature?.at, before.signature?.at, "幂等：at 不得重写（去重键失效 → blockers 重复注入）");
+	assert.equal(after.blockedStreak, 0, "幂等：blockedStreak 不得双计（A2 早触发降级）");
+	// 不同 blockers（新结论）→ 正常重签
+	recordSignature(dir, {
+		status: "blocked",
+		blockers: ["新缺口"],
+	});
+	const updated = readAuditState(dir);
+	assert.equal(updated.signature?.blockers?.length, 1, "不同 blockers → 正常重签");
+	assert.equal(updated.blockedStreak, 1, "重签递增 streak");
+});
+
+test("v1.0.26：appendDecision 并发写不产生重复 D-NNN（乐观锁回归）", () => {
+	const dir = tmpDir();
+	// 顺序 append 两次 → D-001、D-002，无重复
+	const e1 = appendDecision(dir, {
+		summary: "决策一",
+		context: "ctx1",
+		decision: "dec1",
+		rationale: "r1",
+	});
+	const e2 = appendDecision(dir, {
+		summary: "决策二",
+		context: "ctx2",
+		decision: "dec2",
+		rationale: "r2",
+	});
+	assert.equal(e1.id, "D-001");
+	assert.equal(e2.id, "D-002");
+	const ids = parseChain(readRaw(dir)).map((e) => e.id);
+	assert.equal(new Set(ids).size, ids.length, "链中不允许重复编号");
+	assert.equal(ids.length, 2);
 });
