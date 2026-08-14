@@ -10,11 +10,12 @@
 | `inFlight` | `false \| true` | 是否有审计 run 在跑（防重入） |
 | `signature.status` | `null \| "passed" \| "blocked" \| "passed-with-warning" \| "failed"` | 最近一次审计结论（failed = 审计未触发/spawn 失败，非产物问题） |
 | `signature.blockers` | `string[]` | blocked / passed-with-warning 时的具体缺口（价值点） |
+| `signature.reason` | `string` | failed 时的扩展记账原因（v1.0.26 L4：扩展属主字段，审计者不写） |
 | `signature.at` | `epoch ms` | 签名时间（注入去重键 + 完成判定键） |
 | `blockedStreak` | `0..3` | 连续 blocked 次数（A2 门禁） |
 | `signatureConvLine` | `number` | 签名覆盖到的 convlog 对话行数（每次签名都推进到当前行，needsSignoff 用） |
 | `auditFindings` | `string[]` | 审计中间态（审计者边审边追加，被杀/超时也可交付）；纯咨询占位（`"本轮纯咨询，无审计对象"`）不算真实中间态 |
-| `gatedHead` | `null \| 短哈希` | 交付门禁基线（上次门禁覆盖的 HEAD；v1.0.23 持久化——扩展热重载后惰性初始化从 state 恢复，不把热重载后刚提交的修复吞成基线） |
+| `gatedHead` | `null \| 全哈希` | 交付门禁基线（上次门禁覆盖的 HEAD，gitHead() 全哈希；v1.0.23 持久化——扩展热重载后惰性初始化从 state 恢复，不把热重载后刚提交的修复吞成基线） |
 
 > **已移除状态/字段**：`timeout`（v1.0.15 前存在）——超时直接降级为
 > `passed-with-warning` + blockers（无 600s 协商黑洞）。`chainFindings` / `auditorRunId` /
@@ -28,7 +29,7 @@
 - 不递增 `blockedStreak`（A2 门禁不计数）；
 - 不推进 `signatureConvLine`（审计未覆盖产物，下轮 `hasWork`/`needsSignoff` 仍判定有增量 → 自动重新 spawn）；
 - 不注入 blockers（不走修复轮，不产生“审计触发失败，产物未过审”假缺口）；
-- `auditFindings` 追加真实原因（如“审计未触发：spawn 失败，下轮重试”）供追溯；
+- `signature.reason` 记录真实原因（如“审计触发失败：spawn 失败，下轮重试”）；**不再写 `auditFindings`**（v1.0.26 L4：扩展记账文本与审计者发现字段分离，防超时降级把它当价值点注入）；
 - 完成判定（`signature.at ≥ auditStartedAt`）与降级跳过逻辑对 failed **不适用**——failed 不会到达门禁等待路径（spawn 失败即 return）。
 
 **恢复**：下轮 agent_end `hasWork` 为真（产物仍在）时自动重新 spawn——无需人工干预。

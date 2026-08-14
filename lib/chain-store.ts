@@ -319,7 +319,8 @@ export function readAuditState(cwd: string): AuditState {
 							...(typeof (obj.signature as AuditSignature).reason === "string"
 								? { reason: (obj.signature as AuditSignature).reason }
 								: {}),
-							...((obj.signature as AuditSignature).head !== undefined
+							...((obj.signature as AuditSignature).head !== undefined &&
+							typeof (obj.signature as AuditSignature).head === "string"
 								? {
 										head: (obj.signature as AuditSignature).head,
 									}
@@ -341,9 +342,13 @@ export function readAuditState(cwd: string): AuditState {
 				typeof obj.auditStartedAt === "number" ? obj.auditStartedAt : 0,
 			gatedHead: typeof obj.gatedHead === "string" ? obj.gatedHead : null,
 			injectedSignatureAt:
-				typeof obj.injectedSignatureAt === "number" ? obj.injectedSignatureAt : null,
+				typeof obj.injectedSignatureAt === "number"
+					? obj.injectedSignatureAt
+					: null,
 			injectedInterimAt:
-				typeof obj.injectedInterimAt === "number" ? obj.injectedInterimAt : null,
+				typeof obj.injectedInterimAt === "number"
+					? obj.injectedInterimAt
+					: null,
 		};
 	} catch {
 		return { ...DEFAULT_STATE };
@@ -381,10 +386,56 @@ export function writeAuditState(
 			return false;
 		}
 	}
+	// 字段级合并写：与磁盘最新原文合并，保留未知字段（消毒读只重建已知字段，
+	// 全量覆盖会删掉未来新增字段——gatedHead 丢失事故的机制根因，v1.0.26）。
+	// 损坏/缺失文件 → 备份后按传入 state 重建（防默认值覆盖真实审计进度）。
 	const tmp = `${file}.tmp`;
-	fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf-8");
+	let merged: unknown = state;
+	try {
+		const raw = JSON.parse(fs.readFileSync(file, "utf-8")) as Record<
+			string,
+			unknown
+		>;
+		merged = { ...raw, ...state };
+	} catch {
+		// 文件缺失（首次）或损坏：损坏则先备份再重建，防进度被默认值覆盖
+		if (fs.existsSync(file)) {
+			try {
+				fs.renameSync(file, `${file}.corrupt-${Date.now()}`);
+				console.warn(`audit state 损坏，已备份为 .corrupt-* 后重建: ${file}`);
+			} catch {
+				/* 备份失败不阻塞写 */
+			}
+		}
+	}
+	fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), {
+		encoding: "utf-8",
+		flush: true,
+	});
 	fs.renameSync(tmp, file);
 	return true;
+}
+
+/**
+ * 字段级 patch 写（乐观锁 + 冲突重试一次）：重读最新 state → 应用 patch → 写回。
+ * 任何写点都应走这里——直接 writeAuditState 全量写会覆盖他写者并发推进的字段
+ * （L1 锁兑现：spawn 前置写/清残留锁/failed 标记曾忽略返回值，冲突时静默丢更新）。
+ * 返回是否写入；两次都冲突（他写者持续写入）→ false，调用方决定跳过本轮。
+ */
+export function patchAuditState(
+	cwd: string,
+	patch: Partial<AuditState>,
+): boolean {
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const state = readAuditState(cwd);
+		const ok = writeAuditState(
+			cwd,
+			{ ...state, ...patch },
+			auditStateMtime(cwd),
+		);
+		if (ok) return true;
+	}
+	return false;
 }
 
 /**
@@ -446,20 +497,13 @@ export function recordSignature(
  */
 export function resetForSessionStart(cwd: string): void {
 	try {
-		const state = readAuditState(cwd);
-		const mtime = auditStateMtime(cwd);
 		const totalLines = convLogLineCount(cwd);
-		writeAuditState(
-			cwd,
-			{
-				...state,
-				// 推进到当前行数 = 视为已覆盖旧会话的对话（不触发 needsSignoff）
-				signatureConvLine: totalLines,
-				// 保留上次签名状态作参考，但不再触发待签名
-				inFlight: false,
-			},
-			mtime,
-		);
+		patchAuditState(cwd, {
+			// 推进到当前行数 = 视为已覆盖旧会话的对话（不触发 needsSignoff）
+			signatureConvLine: totalLines,
+			// 保留上次签名状态作参考，但不再触发待签名
+			inFlight: false,
+		});
 	} catch {
 		/* noop */
 	}

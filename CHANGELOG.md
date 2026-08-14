@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.26] - 2026-08-14
+
+泄露审计修复（函数式专家 + Jeff Dean 双视角交叉审计，独立 reviewer 验证闭环）：
+
+- **L3 critical：signature.head 单位错配根治**——审计者 prompt 此前要求写 `git rev-parse --short HEAD`（短哈希），扩展 `gitHead()` 返回全哈希，`shouldInjectSignatureFindings` 严格全等比较 → 审计者手写的 blocked/passed-with-warning 签名**恒判定过时、永不注入**（跨会话重注入通道被反向打成永久静默）。统一为全哈希（prompt + agents/decision-auditor.md），head 消毒补 `typeof === "string"` 守卫；回归测试用真实 git 仓库锁定（全哈希注入 / 短哈希不注入）
+- **L1 锁兑现：乐观锁从"纸锁"变真锁**——新增 `patchAuditState`（字段级 patch + 读最新 + mtime 冲突重试一次）；extension 全部 9 个写点改走它；锁获取点（agent_end spawn 前置、清残留锁、/pair-audit 前置）检查返回值，冲突失败跳过本轮 spawn 防并发双审计；`writeAuditState` 的 `{...raw, ...state}` 合并写 + `flush:true`（fsync）
+- **L2 消毒丢字段 + 损坏覆盖机制修复**——writeAuditState 读磁盘原文合并保留未知字段（新增字段不再被任意写者消毒删除——gatedHead 丢失事故的机制根因）；损坏 state.json 先备份 `state.json.corrupt-<ts>` 再重建，防默认值覆盖真实审计进度
+- **L4 auditFindings 双写者分离**——spawn 失败记账文本从审计者拥有的 `auditFindings` 改走扩展属主字段 `signature.reason`（防超时降级把它当价值点注入用户）；降级过滤补历史残留文本
+- **minor**：waitForAuditCompletion 双 sleep → 单 sleep（300s 门禁内轮询次数翻倍）；清残留锁点返回值检查；死导入清理
+- 测试：42/42 通过（+3 回归：L3 全哈希 / L2 合并写+损坏备份 / L1 patchAuditState）、tsc 0 错误
+
 ## [1.0.25] - 2026-08-14
 
 根治「新会话还有泄露」（用户报障：新会话开头仍自动出现审计结论——即使内容新鲜且属于本项目）：

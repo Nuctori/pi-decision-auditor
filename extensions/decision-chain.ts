@@ -12,7 +12,6 @@ import {
 	appendConv,
 	appendDecision,
 	appendProcessSignal,
-	auditStateMtime,
 	auditStatePath,
 	chainPath,
 	clampConvExtractedLine,
@@ -36,7 +35,7 @@ import {
 	shouldClearStaleLock,
 	shouldInjectInterimFindings,
 	shouldInjectSignatureFindings,
-	writeAuditState,
+	patchAuditState,
 } from "../lib/chain-store.js";
 // ---- pi-subagents RPC 通道（进程内事件总线）----
 const RPC_READY = "subagents:rpc:v1:ready";
@@ -271,13 +270,13 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 	);
 	lines.push("");
 	lines.push(
-		"【blockers 可操作规范（防 diff 漂移）】每条 blocker 必须含：① 文件路径 ② 审计基线行号（你读到的当前行号）③ 问题描述——描述必须**独立于行号成立**（下一轮修复时产物可能已演进，行号会漂移，描述是重定位锚点）。blockers 末尾附审计基线：git HEAD 短哈希 + 未提交文件列表（用 `git rev-parse --short HEAD` 与 `git status --porcelain` 获取），供主 agent 判断基线是否已漂移。",
+		"【blockers 可操作规范（防 diff 漂移）】每条 blocker 必须含：① 文件路径 ② 审计基线行号（你读到的当前行号）③ 问题描述——描述必须**独立于行号成立**（下一轮修复时产物可能已演进，行号会漂移，描述是重定位锚点）。blockers 末尾附审计基线：git HEAD 全哈希 + 未提交文件列表（用 `git rev-parse HEAD` 与 `git status --porcelain` 获取），供主 agent 判断基线是否已漂移。",
 	);
 	lines.push("");
 	lines.push("【输出】逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 产物总评。");
 	lines.push("");
 	lines.push(
-		`【收尾】写 signature **之前**先用 read 看 state.json（按【state 写入纪律】：收尾只改 signature/lastAuditedId/lastAuditAt/signatureConvLine 字段，auditFindings 保留原值不删不覆盖；若 read 发现 signatureConvLine 已被 extension 推进（> 你 read 时的值）→ 基于最新值推进，绝不回退覆盖）：若已有 signature 且 status==="passed-with-warning" **且 at ≥ 本轮 auditStartedAt**（at 是本轮内主 agent 才因交付轮超时降级——陈旧降级（上轮遗留/blockedStreak≥3）不跳过，照常签名，否则签名流永久停滞：blockers 只留 findings、下轮被替换占位抹除）→ **不再写签名**（避免覆盖降级结论，仅保留 auditFindings 后停止）。否则用 write 更新 ${auditStatePath(cwd)}：inFlight=false，lastAuditedId 推进，lastAuditAt 置当前。产物通过 → signature={status:"passed", at:<当前 epoch ms>}、signatureConvLine 推进到当前对话行总数；发现 blocker → signature={status:"blocked", at:<当前 epoch ms>, blockers:[...具体可操作缺口]}、signatureConvLine 同样推进（签名即推进——修复走 blockers 注入通道，不靠 convLine 滞后）。**signature 必须带 at 字段**（值 = lastAuditAt，epoch ms）——扩展按 signature.at ≥ auditStartedAt 判定审计完成，缺 at 会被交付轮误判为超时。**signature 必须带 head 字段**（值 = \`git rev-parse --short HEAD\` 输出，你审计时的产物基线短哈希）——扩展按 head 与当前 HEAD 是否一致校验注入新鲜度，缺 head 时陈旧签名会在后续会话反复注入（跨会话泄露，v1.0.24）。**保留本轮 auditFindings（不删）**。写完后立即停止。`,
+		`【收尾】写 signature **之前**先用 read 看 state.json（按【state 写入纪律】：收尾只改 signature/lastAuditedId/lastAuditAt/signatureConvLine 字段，auditFindings 保留原值不删不覆盖；若 read 发现 signatureConvLine 已被 extension 推进（> 你 read 时的值）→ 基于最新值推进，绝不回退覆盖）：若已有 signature 且 status==="passed-with-warning" **且 at ≥ 本轮 auditStartedAt**（at 是本轮内主 agent 才因交付轮超时降级——陈旧降级（上轮遗留/blockedStreak≥3）不跳过，照常签名，否则签名流永久停滞：blockers 只留 findings、下轮被替换占位抹除）→ **不再写签名**（避免覆盖降级结论，仅保留 auditFindings 后停止）。否则用 write 更新 ${auditStatePath(cwd)}：inFlight=false，lastAuditedId 推进，lastAuditAt 置当前。产物通过 → signature={status:"passed", at:<当前 epoch ms>}、signatureConvLine 推进到当前对话行总数；发现 blocker → signature={status:"blocked", at:<当前 epoch ms>, blockers:[...具体可操作缺口]}、signatureConvLine 同样推进（签名即推进——修复走 blockers 注入通道，不靠 convLine 滞后）。**signature 必须带 at 字段**（值 = lastAuditAt，epoch ms）——扩展按 signature.at ≥ auditStartedAt 判定审计完成，缺 at 会被交付轮误判为超时。**signature 必须带 head 字段**（值 = \`git rev-parse HEAD\` 输出，你审计时的产物基线全哈希，与扩展 gitHead() 同格式）——扩展按 head 与当前 HEAD 是否一致校验注入新鲜度，缺 head 时陈旧签名会在后续会话反复注入（跨会话泄露，v1.0.24）。**保留本轮 auditFindings（不删）**。写完后立即停止。`,
 	);
 	lines.push(
 		"写权限仅限：append chain.md + 改 state.json。禁止修改任何其他文件。",
@@ -315,14 +314,9 @@ async function waitForAuditCompletion(
 			// 阻塞时长在轮询循环内写（print 模式下 handler 尾段可能不执行，这里最可靠）
 			if (state.auditStartedAt) {
 				try {
-					writeAuditState(
-						cwd,
-						{
-							...readAuditState(cwd),
-							lastAuditDurationMs: Date.now() - state.auditStartedAt,
-						},
-						auditStateMtime(cwd),
-					);
+					patchAuditState(cwd, {
+						lastAuditDurationMs: Date.now() - state.auditStartedAt,
+					});
 				} catch {
 					/* noop */
 				}
@@ -332,7 +326,6 @@ async function waitForAuditCompletion(
 				blockers: state.signature.blockers,
 			};
 		}
-		await sleep(pollMs);
 		await sleep(pollMs);
 	}
 	return null;
@@ -760,15 +753,17 @@ export default function (pi: ExtensionAPI): void {
 					runId: "",
 					startedAt: Date.now(),
 				});
-				writeAuditState(
-					root,
-					{
-						...readAuditState(root),
-						inFlight: true,
-						auditStartedAt: Date.now(),
-					},
-					auditStateMtime(root),
-				);
+				// 锁获取点兑现返回值：写失败（他写者并发）→ 跳过 spawn，防并发双审计（L1）
+				if (
+					!patchAuditState(root, { inFlight: true, auditStartedAt: Date.now() })
+				) {
+					inFlightAudits.delete(root);
+					ctx.ui.notify(
+						"审计状态写冲突，本轮 /pair-audit 已跳过（防并发双审计）",
+						"warning",
+					);
+					return;
+				}
 				const result = await rpc<{ runId?: string; asyncId?: string }>(
 					"spawn",
 					{
@@ -793,11 +788,7 @@ export default function (pi: ExtensionAPI): void {
 				inFlightAudits.delete(root);
 				stopAuditBreath(root); // spawn 失败：灭灯
 				try {
-					writeAuditState(
-						root,
-						{ ...readAuditState(root), inFlight: false },
-						auditStateMtime(root),
-					);
+					patchAuditState(root, { inFlight: false });
 				} catch {
 					/* noop */
 				}
@@ -818,11 +809,7 @@ export default function (pi: ExtensionAPI): void {
 	 *  失败静默（M3 mtime 冲突放弃，下轮 agent_end 重试）。 */
 	const persistGatedHead = (root: string, baseline: string): void => {
 		try {
-			writeAuditState(
-				root,
-				{ ...readAuditState(root), gatedHead: baseline },
-				auditStateMtime(root),
-			);
+			patchAuditState(root, { gatedHead: baseline });
 		} catch {
 			/* noop */
 		}
@@ -847,7 +834,8 @@ export default function (pi: ExtensionAPI): void {
 			// injectedSignatureAt/injectedInterimAt 持久化到 state.json——同一签名/中间态
 			// 只注入一次（审计完成后首个 turn / followUp 场景），之后所有新会话不再重复弹出；
 			// 内存 map 优先（同会话内去重），热重载/新会话从 state 恢复（跨会话去重）
-			const injectedSig = injectedSignatureAt.get(root) ?? state.injectedSignatureAt;
+			const injectedSig =
+				injectedSignatureAt.get(root) ?? state.injectedSignatureAt;
 			const injectedInterim =
 				injectedInterimAt.get(root) ?? state.injectedInterimAt;
 			// 价值点注入（用户可观察）：blockers 结论与中间态发现——审计抓出的
@@ -857,7 +845,11 @@ export default function (pi: ExtensionAPI): void {
 			// （行为级测试锁定）：blocked/passed-with-warning + blockers + 同签名未注入过 + 新鲜度
 			// （v1.0.24：签名带审计时 HEAD，当前 HEAD 已推进 = 签名可能过时 → 不注入陈旧 blockers）
 			if (
-				shouldInjectSignatureFindings(state, injectedSig ?? undefined, gitHead(root))
+				shouldInjectSignatureFindings(
+					state,
+					injectedSig ?? undefined,
+					gitHead(root),
+				)
 			) {
 				valueMsgs.push(
 					state.signature!.status === "passed-with-warning"
@@ -878,15 +870,10 @@ export default function (pi: ExtensionAPI): void {
 			// 价值点 → display:true（用户可观察）；注入后立即持久化去重标记（跨会话不重复注入）
 			if (valueMsgs.length > 0) {
 				try {
-					writeAuditState(
-						root,
-						{
-							...readAuditState(root),
-							injectedSignatureAt: injectedSignatureAt.get(root) ?? null,
-							injectedInterimAt: injectedInterimAt.get(root) ?? null,
-						},
-						auditStateMtime(root),
-					);
+					patchAuditState(root, {
+						injectedSignatureAt: injectedSignatureAt.get(root) ?? null,
+						injectedInterimAt: injectedInterimAt.get(root) ?? null,
+					});
 				} catch {
 					/* noop：mtime 冲突放弃（M3），下轮重试 */
 				}
@@ -906,14 +893,7 @@ export default function (pi: ExtensionAPI): void {
 	/** 记录审计阻塞时长（agent_end 从触发到签名，CI 跑分用）。 */
 	function recordAuditDuration(cwd: string, t0: number): void {
 		try {
-			writeAuditState(
-				cwd,
-				{
-					...readAuditState(cwd),
-					lastAuditDurationMs: Date.now() - t0,
-				},
-				auditStateMtime(cwd),
-			);
+			patchAuditState(cwd, { lastAuditDurationMs: Date.now() - t0 });
 		} catch {
 			/* noop */
 		}
@@ -962,17 +942,17 @@ export default function (pi: ExtensionAPI): void {
 			// state.json 假 inFlight 挂 2.5h，纯咨询轮 return 前无人清）
 			// 清锁后重读 state：spawn 分支必须用干净快照（旧快照 inFlight=true 会让本轮 spawn 被跳过）
 			if (shouldClearStaleLock(state, hasInFlight(root))) {
-				writeAuditState(
-					root,
-					{
-						...readAuditState(root),
+				// v1.0.26（L1）：清锁写也检查返回值——失败（他写者并发）→ 不动 state、不灭灯，
+				// 下轮 agent_end 自愈；成功才重读快照并灭灯
+				if (
+					patchAuditState(root, {
 						inFlight: false,
 						convExtractedLine: clampConvExtractedLine(root),
-					},
-					auditStateMtime(root),
-				);
-				state = readAuditState(root);
-				stopAuditBreath(root); // stale 锁清理（审计者被强杀未收尾）：灯灭，防“审计进行中”永久常亮
+					})
+				) {
+					state = readAuditState(root);
+					stopAuditBreath(root); // stale 锁清理（审计者被强杀未收尾）：灯灭，防“审计进行中”永久常亮
+				}
 			}
 			// 工作判据（便宜信号 + 决策信号，无需语义理解——语义判断交给审计者 AI）：
 			// 1. 有代码产物（git 未提交改动）或 本轮有提交 → 必审
@@ -1032,16 +1012,17 @@ export default function (pi: ExtensionAPI): void {
 				// 注意：**不写 lastAuditAt**——它必须是「上次审计收尾时间」（审计窗口起点，
 				// prompt 用 signature.at / lastAuditAt 定位 git log --since）；spawn 时覆盖为
 				// 当前时间会让本轮提交全在窗口外（安全审查 HIGH find#1）
-				writeAuditState(
-					root,
-					{
-						...readAuditState(root),
+				// 锁获取点兑现返回值：写失败（他写者并发）→ 本轮不 spawn，下轮重试（L1）
+				if (
+					!patchAuditState(root, {
 						inFlight: true,
 						auditStartedAt: Date.now(),
 						convExtractedLine: clampConvExtractedLine(root),
-					},
-					auditStateMtime(root),
-				);
+					})
+				) {
+					inFlightAudits.delete(root);
+					return; // 下轮 agent_end 重试（有产物信号仍在）
+				}
 				try {
 					await readyPromise;
 					const task = buildIncrementalAuditTask(root, RUN_ID);
@@ -1073,30 +1054,21 @@ export default function (pi: ExtensionAPI): void {
 					// v1.0.24 加固：
 					// ① 保留上轮 blockers——failed 是「未审」不是「无缺口」，整体覆盖会抹掉真实
 					//    blockers/降级价值点（注入判据只认 blocked/passed-with-warning，永久丢失）；
-					// ② findings 去重——重试风暴下不无限累积重复行（超时降级会把 findings 当 blockers）；
-					// ③ 门禁轮（本轮有提交）失败保留可见信号——产物落库但未过审，不得静默放行。
+					// v1.0.26（L4）：记账文本不再 append 进审计者拥有的 auditFindings（双写者混合，
+					// 超时降级会把它当价值点注入用户）——改走 signature.reason（扩展属主字段）。
 					const fresh = readAuditState(root);
 					const prevBlockers = fresh.signature?.blockers;
-					const FAILED_FINDING = "审计未触发：spawn 失败，下轮重试";
-					const findings = fresh.auditFindings.includes(FAILED_FINDING)
-						? fresh.auditFindings
-						: [...fresh.auditFindings, FAILED_FINDING];
-					writeAuditState(
-						root,
-						{
-							...fresh,
-							inFlight: false,
-							signature: {
-								status: "failed",
-								at: Date.now(),
-								...(prevBlockers && prevBlockers.length > 0
-									? { blockers: prevBlockers }
-									: {}),
-							},
-							auditFindings: findings,
+					patchAuditState(root, {
+						inFlight: false,
+						signature: {
+							status: "failed",
+							reason: "审计触发失败：spawn 失败，下轮重试",
+							at: Date.now(),
+							...(prevBlockers && prevBlockers.length > 0
+								? { blockers: prevBlockers }
+								: {}),
 						},
-						auditStateMtime(root),
-					);
+					});
 					if (hasNewCommit) {
 						try {
 							ctx.ui.notify(
@@ -1133,8 +1105,13 @@ export default function (pi: ExtensionAPI): void {
 				// 无 findings 才给流程提示（实证：8 条真实 findings 曾被超时文案替换——价值被流程噪音覆盖）
 				const timeoutState = readAuditState(root);
 				// 过滤启动占位（'审计开始'）与纯咨询占位——被杀在占位阶段时降级注入不得给噪音（reviewer Low）
+				// v1.0.26（L4）：扩展记账文本已改走 signature.reason；过滤历史残留的
+				// FAILED_FINDING 文本（旧版本写入 auditFindings 的），防降级时当价值点注入
 				const realFindings = timeoutState.auditFindings.filter(
-					(f) => f !== "审计开始" && f !== PURE_CHAT_PLACEHOLDER,
+					(f) =>
+						f !== "审计开始" &&
+						f !== PURE_CHAT_PLACEHOLDER &&
+						f !== "审计未触发：spawn 失败，下轮重试",
 				);
 				recordSignature(root, {
 					status: "passed-with-warning",
@@ -1203,15 +1180,10 @@ export default function (pi: ExtensionAPI): void {
 					// 再次注入同一签名——「新会话还有泄露」根治）
 					injectedSignatureAt.set(completedCwd, st.signature.at ?? Date.now());
 					try {
-						writeAuditState(
-							completedCwd,
-							{
-								...readAuditState(completedCwd),
-								injectedSignatureAt:
-									injectedSignatureAt.get(completedCwd) ?? null,
-							},
-							auditStateMtime(completedCwd),
-						);
+						patchAuditState(completedCwd, {
+							injectedSignatureAt:
+								injectedSignatureAt.get(completedCwd) ?? null,
+						});
 					} catch {
 						/* noop：mtime 冲突放弃（M3），下轮注入路径重试 */
 					}

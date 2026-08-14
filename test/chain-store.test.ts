@@ -38,6 +38,7 @@ import {
 	shouldClearStaleLock,
 	shouldInjectInterimFindings,
 	shouldInjectSignatureFindings,
+	patchAuditState,
 	writeAuditState,
 } from "../lib/chain-store.js";
 function tmpDir(): string {
@@ -192,18 +193,19 @@ test("injectedSignatureAt/injectedInterimAt：跨会话注入去重持久化（v
 	assert.equal(st0.injectedSignatureAt, null);
 	assert.equal(st0.injectedInterimAt, null);
 	// 写去重标记 → 读回（新会话 before_agent_start 依赖此值跳过已注入签名）
-	writeAuditState(
-		dir,
-		{ ...readAuditState(dir), injectedSignatureAt: 1000, injectedInterimAt: 2000 },
-	);
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		injectedSignatureAt: 1000,
+		injectedInterimAt: 2000,
+	});
 	const st1 = readAuditState(dir);
 	assert.equal(st1.injectedSignatureAt, 1000);
 	assert.equal(st1.injectedInterimAt, 2000);
 	// 非数值 → 消毒为 null（不污染去重判定）
-	writeAuditState(
-		dir,
-		{ ...readAuditState(dir), injectedSignatureAt: "bad" as unknown as number },
-	);
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		injectedSignatureAt: "bad" as unknown as number,
+	});
 	assert.equal(readAuditState(dir).injectedSignatureAt, null);
 	// resetForSessionStart 不清去重标记（跨会话去重必须持久存活）
 	resetForSessionStart(dir);
@@ -563,15 +565,20 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	// B1：中间态注入判据 = shouldInjectInterimFindings 纯函数（行为级测试锁定，非字符串守卫）；
 	// v1.0.25：跨会话去重持久化——判据入参从 state 恢复的持久化值（injectedInterim ?? undefined）
 	assert.ok(
-		src.includes("shouldInjectInterimFindings(state, injectedInterim ?? undefined)") ||
-			src.includes("shouldInjectInterimFindings(state, injectedInterimAt.get(root))"),
+		src.includes(
+			"shouldInjectInterimFindings(state, injectedInterim ?? undefined)",
+		) ||
+			src.includes(
+				"shouldInjectInterimFindings(state, injectedInterimAt.get(root))",
+			),
 		"中间态注入必须走 shouldInjectInterimFindings 纯函数（行为级测试在 lib 单测）",
 	);
 	// v1.0.25：注入去重持久化——injectedSignatureAt/injectedInterimAt 必须落 state.json
 	// （同一签名只注入一次，新会话不再重复弹出审计结论——「新会话还有泄露」根治）
 	assert.ok(
-		src.includes("injectedSignatureAt: injectedSignatureAt.get(root) ?? null") &&
-			src.includes("injectedInterimAt: injectedInterimAt.get(root) ?? null"),
+		src.includes(
+			"injectedSignatureAt: injectedSignatureAt.get(root) ?? null",
+		) && src.includes("injectedInterimAt: injectedInterimAt.get(root) ?? null"),
 		"注入后必须持久化去重标记到 state.json（跨会话去重，v1.0.25）",
 	);
 	// B2：convExtractedLine 单位钳制（审计者写文件行号超界 → 钳制，防对话增量触发断线）
@@ -1177,4 +1184,95 @@ test("gitHead：交付门禁的客观信号（HEAD 变化）", () => {
 		head1,
 		"新提交后 HEAD 必须变化（门禁触发依据）",
 	);
+});
+
+test("L3：signature.head 必须与 gitHead() 同格式（全哈希）——短哈希永不注入", () => {
+	const dir = tmpDir();
+	// 建 git 仓库拿真实全哈希
+	execFileSync("git", ["init", "-q"], { cwd: dir });
+	execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+	execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+	fs.writeFileSync(path.join(dir, "a.txt"), "v1");
+	execFileSync("git", ["add", "a.txt"], { cwd: dir });
+	execFileSync("git", ["commit", "-qm", "c1"], { cwd: dir });
+	const full = gitHead(dir)!;
+	assert.ok(full.length > 20, "gitHead 必须返回全哈希");
+	const short = full.slice(0, 7);
+	// 构造 blocked 签名：head = 全哈希 → 新鲜，注入
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		signature: {
+			status: "blocked",
+			at: 1000,
+			blockers: ["缺口"],
+			head: full,
+		},
+	});
+	assert.equal(
+		shouldInjectSignatureFindings(readAuditState(dir), undefined, full),
+		true,
+		"全哈希 head 与当前 HEAD 一致 → 注入",
+	);
+	// 审计者误写短哈希（旧 prompt 行为）→ 恒不等于全哈希 → 永不注入（v1.0.26 回归锁定）
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		signature: {
+			status: "blocked",
+			at: 2000,
+			blockers: ["缺口"],
+			head: short,
+		},
+	});
+	assert.equal(
+		shouldInjectSignatureFindings(readAuditState(dir), undefined, full),
+		false,
+		"短哈希 head ≠ 全哈希 currentHead → 不注入（防止单位错配永久静默）",
+	);
+});
+
+test("L2：writeAuditState 合并写保留未知字段 + 损坏文件备份重建", () => {
+	const dir = tmpDir();
+	// 未知字段（未来版本新增）不能被任意写者消毒删除
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		inFlight: true,
+	});
+	const file = auditStatePath(dir);
+	const raw = JSON.parse(fs.readFileSync(file, "utf-8"));
+	raw.futureField = "未来新增字段";
+	fs.writeFileSync(file, JSON.stringify(raw), "utf-8");
+	// 任意写者写入 → 未知字段保留
+	writeAuditState(dir, { ...readAuditState(dir), inFlight: false });
+	const after = JSON.parse(fs.readFileSync(file, "utf-8"));
+	assert.equal(
+		after.futureField,
+		"未来新增字段",
+		"字段级合并写必须保留未知字段（gatedHead 丢失事故的机制修复）",
+	);
+	assert.equal(after.inFlight, false);
+	// 损坏文件 → 备份 .corrupt-* 后重建，不丢真实进度
+	fs.writeFileSync(file, "{broken json", "utf-8");
+	writeAuditState(dir, { ...readAuditState(dir), inFlight: true });
+	const dirEntries = fs.readdirSync(path.dirname(file));
+	assert.ok(
+		dirEntries.some((e) => e.startsWith("state.json.corrupt-")),
+		"损坏 state.json 必须备份为 .corrupt-*（防默认值覆盖真实进度）",
+	);
+	assert.equal(readAuditState(dir).inFlight, true);
+});
+
+test("L1：patchAuditState 字段级写（乐观锁冲突重试一次）", () => {
+	const dir = tmpDir();
+	// 正常路径：只 patch 指定字段，其他字段保留
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		inFlight: true,
+		gatedHead: "abc",
+	});
+	assert.equal(patchAuditState(dir, { inFlight: false }), true);
+	const st = readAuditState(dir);
+	assert.equal(st.inFlight, false);
+	assert.equal(st.gatedHead, "abc", "patch 只改指定字段，其他字段保留");
+	// 冲突拒绝路径由既有测试 "writeAuditState mtime 乐观锁：匹配写、冲突放弃" 覆盖；
+	// patchAuditState 重试（读最新 → 重写）在同步单测中无法注入 read-write 窗口竞态，不做伪测试
 });
