@@ -1,12 +1,25 @@
 # Changelog
 
+## [1.0.43] - 2026-08-15
+
+v1.0.42 审计者 blocker（一致性/完备性维度）：注释与 prompt 文本过时残留（与 v1.0.41 blocker 同类模式）：
+
+- **审计者 prompt「主 agent 会同步等你的签名」（L199）**：门禁已改后台轮询——改为「经后台轮询等你的签名（不阻塞）」；顺带去掉 prompt 内「用户提交/发布/merge」信号词（→ 本轮 git HEAD 变化，与 D-022 触发语义一致）
+- **「审计阻塞时长/审计阻塞计时起点」（L1191/L1383）**：门禁非阻塞，t0 测审计总时长——改为「审计时长/审计时长计时起点」
+- **「门禁轮同步共用」（L473/L1459）**：→「门禁轮后台轮询共用」
+- **根因级补丁（审计者误写域）**：v1.0.42 审计者收尾误写 blockedStreak=2（扩展维护域）→ gateComplete 读到 streak=2 递增至 3 → A2 提前降级（blockers 保留，降级时机失真）。prompt 写入纪律补明确：**blockedStreak 是扩展的 A2 连续 blocked 计数域，原样保留**（与 gatedHead/injected* 同列）
+- **D-046 入链（v1.0.40 F-13 决策条目，reviewer Low）**：门禁轮询 timer 生命周期双保险（shutdown 清理 + 防御 clear）作为独立决策条目补录——F-13 是 v1.0.39 审计 blocker 的落地实现，上轮审计者裁定 D-044 已覆盖；本轮 reviewer 建议产物↔决策对照可追溯，补录消除分歧
+- **接线守卫测试补 F-13 断言（reviewer Low）**：session_shutdown 清理 + agent_end 防御 clear 两处接线断言（防回归，锁 v1.0.40 blocker 场景）
+- 复扫：L1540「F5 同步短路」/L1600「原同步完成分支」为历史引用或语义正确，非残留（审计者发散核实确认）
+- 测试：59/59 通过（+2 接线断言），tsc 0 错误
+
 ## [1.0.42] - 2026-08-15
 
 v1.0.41 审计者 blocker（完备性维度）：文档同步主题内漏改 3 处直接矛盾残留（en+zh 共 6 处）：
 
 - **Quick start 段（README L51/53 + zh L51/53）**：「sync gate on delivery rounds / 交付轮同步门禁」旧语义 +「On delivery (submit/publish/merge/deploy) / 交付时（提交/发布/merge/部署）」信号词残留（D-022 已改 git HEAD 客观信号）——改为后台轮询门禁 + git HEAD 变化触发
 - **L2 门禁描述（README L97 + zh L95）**：「no git diff & no decisions → skip」与代码矛盾——L2 与 L1 同源由 hasNewCommit 触发（decision-chain.ts L1377），提交后 diff 空仍审查；改为「与 L1 门禁同源触发：本轮 git HEAD 变化（无提交不 spawn）」
-- **全仓复扫补齐同类残留（8 处）**：README Design philosophy（L37「submit / publish / merge / deploy」信号词）、docs/audit-state-machine.md（L52「await 签名」）、decision-chain.ts 6 处代码注释（L1004/L1029/L1344/L1381/L1539「同步等签名」→「后台轮询等签名」）——代码注释与实现不一致同属机制完整性缺陷，一并修
+- **全仓复扫补齐同类残留（8 处）**：README Design philosophy（L37「submit / publish / merge / deploy」信号词）、docs/audit-state-machine.md（L52「await 签名」）、decision-chain.ts 5 处注释块 6 行（L1004/L1029/L1344-1345/L1381/L1539「同步等签名」→「后台轮询等签名」）——代码注释与实现不一致同属机制完整性缺陷，一并修
 - 复扫确认：*.md 零残留（CHANGELOG 历史条目如实记录当时行为，不改）
 - 测试：57/57 通过，tsc 0 错误
 

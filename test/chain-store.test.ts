@@ -540,6 +540,17 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 			src.includes("isAuditCompleted(recheck, recheck.auditStartedAt || 0)"),
 		"完成判定必须走 isAuditCompleted 纯函数（lib 行为级测试锁定：at 判定 + runId 身份校验 + failed 排除）",
 	);
+	// F-13（v1.0.40）：门禁轮询 timer 生命周期——session_shutdown 清理 + agent_end 防御 clear
+	assert.ok(
+		src.includes('gatePollTimers.get(cachedProjectRoot ?? "")') &&
+			src.includes("clearInterval(staleGateTimer)"),
+		"session_shutdown 必须清理本 root 的门禁轮询 timer（跨会话轮询泄漏 → 双轮询并发，v1.0.40 blocker）",
+	);
+	assert.ok(
+		src.includes("const staleGate = gatePollTimers.get(root)") &&
+			src.includes("if (staleGate) clearInterval(staleGate)"),
+		"agent_end 启动门禁轮询前必须防御 clear 旧 timer（shutdown 未执行路径双保险，v1.0.40 blocker）",
+	);
 	// 门禁基线：会话起始 HEAD 初始化 + 持久化（非 git 仓库无门禁）
 	assert.ok(
 		src.includes("const head = gitHead(root)") &&

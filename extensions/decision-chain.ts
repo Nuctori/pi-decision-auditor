@@ -196,10 +196,10 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 		"你是本会话的结对审计者（单层）。本轮工作已完成，你负责：① 从对话提取关键决策入链（不靠主 agent 自觉）② 审计本轮产物并签名。两件事一次完成。",
 	);
 	lines.push(
-		"【窗口约束】常规轮你在 agent_end 之后异步运行（主 agent 已结束本轮，不阻塞等待你）——本轮产物已完整（不会有后续产物），直接给结论；发现 blocker 就给可操作的 blockers。交付轮（用户提交/发布/merge 时）主 agent 会同步等你的签名，此时尽快收尾：若审计超时，主 agent 会降级放行并把你的 blockers 注入下轮。",
+		"【窗口约束】常规轮你在 agent_end 之后异步运行（主 agent 已结束本轮，不阻塞等待你）——本轮产物已完整（不会有后续产物），直接给结论；发现 blocker 就给可操作的 blockers。交付轮（本轮 git HEAD 变化）主 agent 经后台轮询等你的签名（不阻塞），此时尽快收尾：若审计超时，主 agent 会降级放行并把你的 blockers 注入下轮。",
 	);
 	lines.push(
-		"【state 写入纪律（最高优先，事故教训：2026-08-13 reviewer 实证审查期间 signatureConvLine 3139→3159 被并发改写——审计者 write 全量覆盖了 extension 并发推进的字段）】state.json 是共享文件（extension 与审计者子进程并发读写）。每次 write 前**必须 read 最新内容**；write 的 content = **最新原文 + 只修改你负责的字段**（中间态：auditFindings/inFlight；推进：convExtractedLine；收尾：signature/lastAuditedId/lastAuditAt/signatureConvLine；**gatedHead 是扩展的门禁基线字段，无论何时都必须原样保留**——v1.0.24 实证：审计者收尾写曾把 gatedHead 字段整个丢掉，导致热重载后修复提交再被吞；**injectedSignatureAt/injectedInterimAt 是扩展的跨会话注入去重标记，同样原样保留**（v1.0.25：丢则审计结论在每个新会话重复注入——「新会话还有泄露」报障根因）），**其他字段原样保留**——禁止全量覆盖任何你没在最新 read 里见过的字段；write 后**立即 read 验证**你的字段生效且其他字段未被你的 write 改动；若 read 发现你负责的字段已被 extension 或他人推进（值 > 你 read 时的值）→ 基于最新值继续，绝不回退覆盖。**宁可中间态多写，不可覆盖他人字段**。",
+		"【state 写入纪律（最高优先，事故教训：2026-08-13 reviewer 实证审查期间 signatureConvLine 3139→3159 被并发改写——审计者 write 全量覆盖了 extension 并发推进的字段）】state.json 是共享文件（extension 与审计者子进程并发读写）。每次 write 前**必须 read 最新内容**；write 的 content = **最新原文 + 只修改你负责的字段**（中间态：auditFindings/inFlight；推进：convExtractedLine；收尾：signature/lastAuditedId/lastAuditAt/signatureConvLine；**gatedHead 是扩展的门禁基线字段，无论何时都必须原样保留**——v1.0.24 实证：审计者收尾写曾把 gatedHead 字段整个丢掉，导致热重载后修复提交再被吞；**injectedSignatureAt/injectedInterimAt 是扩展的跨会话注入去重标记，同样原样保留**（v1.0.25：丢则审计结论在每个新会话重复注入——「新会话还有泄露」报障根因）；**blockedStreak 是扩展的 A2 连续 blocked 计数域，同样原样保留**（v1.0.42 实证：误写 blockedStreak=2 触发 streak 2→3 提前 A2 降级——blockers 虽保留但降级时机失真）），**其他字段原样保留**——禁止全量覆盖任何你没在最新 read 里见过的字段；write 后**立即 read 验证**你的字段生效且其他字段未被你的 write 改动；若 read 发现你负责的字段已被 extension 或他人推进（值 > 你 read 时的值）→ 基于最新值继续，绝不回退覆盖。**宁可中间态多写，不可覆盖他人字段**。",
 	);
 	lines.push(
 		"【中间态交付（最重要，任何时刻被杀都要有产出）】用 write 更新 state.json 时**先写中间态再继续**（按【state 写入纪律】：只改 auditFindings/inFlight 两字段，其他字段原样保留）：启动后立即把 auditFindings **替换**为占位（如 ['审计开始']）——**清掉上一轮的旧 findings**（超时降级会把 findings 当 blockers 注入，陈旧/已解决内容会污染价值点）；之后每完成一步核实（推导目标 ✓ / 提取决策 ✓ / 读 diff ✓ / 逐维度进攻 ✓），就把该步的已确认事实与已发现缺口**追加**进 auditFindings。你随时可能被超时终止（SIGINT 强杀，收尾来不及）——已写入的 auditFindings 就是你的部分审计结果，主 agent 下轮会读到并交付给用户。**宁可中间态多写，不可最后一起写**：最后一步签名（passed/blocked）只是收尾，auditFindings 才是价值交付的主通道。**中间态写入必须保留 inFlight=true**（仅收尾签名时写 inFlight=false）——扩展按 inFlight===true 判定「审计被中断」并注入中间态，提前置 false 会让被杀后的 findings 无法交付。",
@@ -470,7 +470,7 @@ function auditStatusText(secs: number): string {
 		: `${frame} 结对审计进行中（${secs}s）`;
 }
 
-/** 亮灯：spawn 审计者后调用（常规轮异步/门禁轮同步共用）。 */
+/** 亮灯：spawn 审计者后调用（常规轮异步/门禁轮后台轮询共用）。 */
 function startAuditBreath(ui: ExtensionUIContext, cwd: string): void {
 	cachedAuditUi = ui;
 	auditBreathCwd = cwd;
@@ -1188,7 +1188,7 @@ export default function (pi: ExtensionAPI): void {
 		}
 	});
 
-	/** 记录审计阻塞时长（agent_end 从触发到签名，CI 跑分用）。 */
+	/** 记录审计时长（agent_end 从触发到签名，CI 跑分用）。 */
 	function recordAuditDuration(cwd: string, t0: number): void {
 		try {
 			patchAuditState(cwd, { lastAuditDurationMs: Date.now() - t0 });
@@ -1380,7 +1380,7 @@ export default function (pi: ExtensionAPI): void {
 
 			// 交付轮（本轮有新提交 = 产物落库）→ 后台轮询等签名（硬门禁，不阻塞）；
 			// 常规轮 → 异步 spawn，不阻塞——审计者完成写 signature，findings 下轮注入
-			const t0 = Date.now(); // 审计阻塞计时起点
+			const t0 = Date.now(); // 审计时长计时起点
 
 			// 已有审计在跑（inFlight）→ 等待它完成；否则 fresh spawn 审计者
 			// （残留锁兜底已上移到 hasWork 判断之前；此处 state 已是清锁后的最新快照）
@@ -1456,7 +1456,7 @@ export default function (pi: ExtensionAPI): void {
 					if (runId) {
 						persistAuditRunId(root, runId);
 					}
-					// 呼吸灯亮：审计已 spawn（常规轮异步/门禁轮同步共用）
+					// 呼吸灯亮：审计已 spawn（常规轮异步/门禁轮后台轮询共用）
 					startAuditBreath(ctx.ui, root);
 				} catch (err) {
 					// v1.0.28 双审计 F-03/LC-05：spawn 失败/超时不得无差别释放锁——
