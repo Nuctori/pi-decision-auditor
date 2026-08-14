@@ -903,6 +903,7 @@ export default function (pi: ExtensionAPI): void {
 					auditStateMtime(root),
 				);
 				state = readAuditState(root);
+				stopAuditBreath(root); // stale 锁清理（审计者被强杀未收尾）：灯灭，防“审计进行中”永久常亮
 			}
 			if (!hasWork) return;
 
@@ -978,21 +979,26 @@ export default function (pi: ExtensionAPI): void {
 				} catch {
 					inFlightAudits.delete(root);
 					stopAuditBreath(); // spawn 失败：灯灭
-					// spawn 失败：释放 inFlight 锁 + 产物未过审标记 blocked
+					// spawn 失败：释放 inFlight 锁 + 标记 failed（非 blocked）——
+					// 审计未触发 ≠ 产物有问题：不递增 blockedStreak、不推进 signatureConvLine、
+					// 不注入假 blocker（每轮“审计触发失败，产物未过审”即此假缺口）。
+					// failed 状态下轮 hasWork 时自动重新 spawn；auditFindings 留真实原因供追溯。
+					const fresh = readAuditState(root);
 					writeAuditState(
 						root,
 						{
-							...readAuditState(root),
+							...fresh,
 							inFlight: false,
+							signature: { status: "failed", at: Date.now() },
+							auditFindings: [
+								...fresh.auditFindings,
+								"审计未触发：spawn 失败，下轮重试",
+							],
 						},
 						auditStateMtime(root),
 					);
-					recordSignature(root, {
-						status: "blocked",
-						blockers: ["审计触发失败，产物未过审"],
-					});
 					return;
-				}
+			}
 			}
 
 			// 常规轮：异步审计不阻塞——end 就是 end，审计者完成签名后下轮注入 findings；
@@ -1088,10 +1094,11 @@ export default function (pi: ExtensionAPI): void {
 				/* noop */
 			}
 		}
-		// 无法匹配 runId：清除所有已过 TTL 的条目（兜底）
+		// 无法匹配 runId：清除所有已过 TTL 的条目（兜底）——同时灭灯，防“审计进行中”永久常亮
 		for (const [cwd, rec] of inFlightAudits) {
 			if (Date.now() - rec.startedAt > IN_FLIGHT_TTL_MS) {
 				inFlightAudits.delete(cwd);
+				stopAuditBreath(cwd);
 			}
 		}
 	});

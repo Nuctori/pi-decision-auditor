@@ -269,11 +269,7 @@ test("writeAuditState mtime 乐观锁：匹配写、冲突放弃（M3 单写者�
 	const m1 = auditStateMtime(dir);
 	assert.equal(typeof m1, "number");
 	assert.equal(
-		writeAuditState(
-			dir,
-			{ ...readAuditState(dir), inFlight: false },
-			m1,
-		),
+		writeAuditState(dir, { ...readAuditState(dir), inFlight: false }, m1),
 		true,
 	);
 	assert.equal(readAuditState(dir).inFlight, false);
@@ -496,9 +492,7 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	const lazyInit = src.indexOf("st.gatedHead ?? head");
 	const hasNewCommitCalc = src.indexOf("const hasNewCommit =");
 	assert.ok(
-		lazyInit !== -1 &&
-			hasNewCommitCalc !== -1 &&
-			lazyInit < hasNewCommitCalc,
+		lazyInit !== -1 && hasNewCommitCalc !== -1 && lazyInit < hasNewCommitCalc,
 		"gatedHead 惰性初始化必须从 state 恢复持久化基线（st.gatedHead ?? head）且先于 hasNewCommit 计算——防热重载吞修复提交（v1.0.23）",
 	);
 	// M4：残留锁兜底（文件锁在但内存锁无 → 释放，防审计永久停摆）
@@ -697,6 +691,36 @@ test("blockedStreak：blocked 递增，passed/降级清零（timeout 态已移�
 	});
 	assert.equal(readAuditState(dir).blockedStreak, 0);
 	assert.equal(readAuditState(dir).signature?.status, "passed-with-warning");
+	assert.equal(readAuditState(dir).signature?.status, "passed-with-warning");
+});
+
+test("recordSignature failed：不递增 blockedStreak、不推进 signatureConvLine（审计未触发，下轮重审）", () => {
+	const dir = tmpDir();
+	appendConv(dir, "user", "测试");
+
+	// 先有 blocked 记录（streak=1）与已推进的 convLine
+	recordSignature(dir, { status: "blocked", blockers: ["a"] });
+	const before = readAuditState(dir);
+	assert.equal(before.blockedStreak, 1);
+	assert.ok(before.signatureConvLine > 0);
+
+	// 再追加对话（未审计的增量）
+	appendConv(dir, "user", "新增产物");
+	const convLineAfterAppend = convLogLineCount(dir);
+	assert.ok(convLineAfterAppend > before.signatureConvLine);
+
+	// failed 签名（spawn 失败）
+	recordSignature(dir, { status: "failed", reason: "审计触发失败（spawn 失败）" });
+	const after = readAuditState(dir);
+	assert.equal(after.signature?.status, "failed");
+	assert.equal(after.signature?.reason, "审计触发失败（spawn 失败）");
+	// 不递增 blockedStreak（非产物问题）
+	assert.equal(after.blockedStreak, 1);
+	// 不推进 signatureConvLine（产物未被审计覆盖 → needsSignoff 仍 true → 下轮重审）
+	assert.equal(after.signatureConvLine, before.signatureConvLine);
+	assert.equal(needsSignoff(dir), true);
+	// 释放 inFlight（防锁泄漏）
+	assert.equal(after.inFlight, false);
 });
 
 test("recordSignature 释放 inFlight 锁（H1：防锁泄漏致审计永久停摆）", () => {

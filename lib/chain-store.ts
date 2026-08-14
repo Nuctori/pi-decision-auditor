@@ -218,14 +218,19 @@ export interface AuditSignature {
 	/**
 	 * 签名状态：
 	 * passed = 审计通过；blocked = 发现问题（streak+1）；
-	 * passed-with-warning = 交付轮超时降级 或 连续 blocked 达上限（A2 门禁退出）。
+	 * passed-with-warning = 交付轮超时降级 或 连续 blocked 达上限（A2 门禁退出）；
+	 * failed = 审计未触发（spawn 失败）——非产物质量问题：不递增 blockedStreak、
+	 *          不推进 signatureConvLine（产物未被审计覆盖，下轮 hasWork 时自动重新 spawn）、
+	 *          不注入 blockers（不走修复轮）。
 	 * 无 timeout 态（v1.0.15 起超时直接降级 passed-with-warning，见 docs/audit-state-machine.md）。
 	 */
-	status: "passed" | "blocked" | "passed-with-warning";
+	status: "passed" | "blocked" | "passed-with-warning" | "failed";
 	/** 签名时间（epoch ms）。 */
 	at: number;
 	/** blocker 摘要（blocked 时）。 */
 	blockers?: string[];
+	/** failed 原因（审计未触发时，如 spawn 失败）。 */
+	reason?: string;
 	/** 本轮审计的 runId。 */
 	runId?: string;
 }
@@ -302,6 +307,9 @@ export function readAuditState(cwd: string): AuditState {
 								: {}),
 							...(typeof (obj.signature as AuditSignature).runId === "string"
 								? { runId: (obj.signature as AuditSignature).runId }
+								: {}),
+							...(typeof (obj.signature as AuditSignature).reason === "string"
+								? { reason: (obj.signature as AuditSignature).reason }
 								: {}),
 						}
 					: null,
@@ -388,7 +396,16 @@ export function recordSignature(
 		const mtime = auditStateMtime(cwd);
 		const totalLines = convLogLineCount(cwd);
 		// A2 门禁：连续 blocked 递增；passed / 降级放行后清零。（timeout 态已移除，见 docs/audit-state-machine.md）
-		const blockedStreak = sig.status === "blocked" ? state.blockedStreak + 1 : 0;
+		// failed（审计未触发/spawn 失败）：非产物问题，不递增 streak。
+		const blockedStreak =
+			sig.status === "blocked"
+				? state.blockedStreak + 1
+				: sig.status === "failed"
+					? state.blockedStreak
+					: 0;
+		// failed 不推进 signatureConvLine——审计未发生，产物未被审计覆盖，下轮 hasWork 时自动重新 spawn，不得假装已审计。
+		const nextConvLine =
+			sig.status === "failed" ? state.signatureConvLine : totalLines;
 		const ok = writeAuditState(
 			cwd,
 			{
@@ -396,7 +413,7 @@ export function recordSignature(
 				// 签名 = 审计结束：释放文件锁（防 decision_signoff 路径泄漏 inFlight → 后续审计永久停摆）
 				inFlight: false,
 				signature: { ...sig, at: Date.now() },
-				signatureConvLine: totalLines,
+				signatureConvLine: nextConvLine,
 				blockedStreak,
 			},
 			mtime,

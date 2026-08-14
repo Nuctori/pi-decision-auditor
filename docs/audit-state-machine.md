@@ -8,7 +8,7 @@
 | 字段 | 取值 | 含义 |
 | --- | --- | --- |
 | `inFlight` | `false \| true` | 是否有审计 run 在跑（防重入） |
-| `signature.status` | `null \| "passed" \| "blocked" \| "passed-with-warning"` | 最近一次审计结论 |
+| `signature.status` | `null \| "passed" \| "blocked" \| "passed-with-warning" \| "failed"` | 最近一次审计结论（failed = 审计未触发/spawn 失败，非产物问题） |
 | `signature.blockers` | `string[]` | blocked / passed-with-warning 时的具体缺口（价值点） |
 | `signature.at` | `epoch ms` | 签名时间（注入去重键 + 完成判定键） |
 | `blockedStreak` | `0..3` | 连续 blocked 次数（A2 门禁） |
@@ -19,6 +19,21 @@
 > **已移除状态/字段**：`timeout`（v1.0.15 前存在）——超时直接降级为
 > `passed-with-warning` + blockers（无 600s 协商黑洞）。`chainFindings` / `auditorRunId` /
 > `roundsSinceAudit` / `pendingChars`（v1.0.15 架构重构删除——单层审计 + fresh spawn）。
+
+### failed 状态（2026-08-14 新增）
+
+**触发**：spawn 审计者失败（rpc spawn 抛错/超时）——审计**未触发**。
+
+**语义**：不是产物质量问题（产物没被审，不等于产物有问题）。因此：
+- 不递增 `blockedStreak`（A2 门禁不计数）；
+- 不推进 `signatureConvLine`（审计未覆盖产物，下轮 `hasWork`/`needsSignoff` 仍判定有增量 → 自动重新 spawn）；
+- 不注入 blockers（不走修复轮，不产生“审计触发失败，产物未过审”假缺口）；
+- `auditFindings` 追加真实原因（如“审计未触发：spawn 失败，下轮重试”）供追溯；
+- 完成判定（`signature.at ≥ auditStartedAt`）与降级跳过逻辑对 failed **不适用**——failed 不会到达门禁等待路径（spawn 失败即 return）。
+
+**恢复**：下轮 agent_end `hasWork` 为真（产物仍在）时自动重新 spawn——无需人工干预。
+
+**呼吸灯**：spawn 失败 / 残留锁清理 / async-complete TTL 过期均灭灯（防“审计进行中”永久常亮——实证：审计者 run 卡死无产出时 UI 提示持续 7220s）。
 
 ## 状态转移
 
