@@ -152,8 +152,9 @@ export function nextId(entries: DecisionEntry[]): string {
 
 /** 追加一条决策（append-only；返回新条目）。
  *  乐观锁（v1.0.26 双审计发现 high#2）：read→parse→nextId→append 是 read-modify-write，
- *  并发写者（双实例 / 审计者按纪律 append）可得重复 D-NNN——写前校验 chain.md mtime，
- *  冲突重读重试（最多 3 次），仍冲突抛错（调用方决策_add 可见，不静默追加重复编号）。 */
+ *  并发写者（双实例 / 审计者按纪律 append）可得重复 D-NNN——rename 紧前校验 chain.md
+ *  mtime（v1.0.27 双审计 FP#3/JD#1：校验在 tmp 写前时两写者交错 rename 会 last-writer-wins
+ *  静默丢条目），冲突重读重试（最多 3 次），仍冲突抛错（调用方决策_add 可见，不静默追加）。 */
 export function appendDecision(
 	cwd: string,
 	fields: DecisionFields,
@@ -169,8 +170,19 @@ export function appendDecision(
 			fields.supersedes && fields.supersedes.length > 0
 				? fields.supersedes
 				: undefined;
+		// 字段消毒（v1.0.27 双审计 FP#5a）：\n 可注入伪条目（parseChain 按行解析，
+		// 宽容解析会把断行当新条目）；无长度上限 → 链无界增长。单行化 + 截断。
+		const cleanField = (s: string, max: number): string =>
+			s.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
 		const entry: DecisionEntry = {
 			...fields,
+			summary: cleanField(fields.summary, 200),
+			context: cleanField(fields.context, 1000),
+			decision: cleanField(fields.decision, 1000),
+			rationale: cleanField(fields.rationale, 1000),
+			...(fields.alternatives
+				? { alternatives: cleanField(fields.alternatives, 500) }
+				: {}),
 			id,
 			status: "Accepted",
 			date: now.toISOString(),
@@ -190,13 +202,21 @@ export function appendDecision(
 		lines.push(`- Date: ${entry.date}`);
 		lines.push("");
 		const payload = `${raw.replace(/\r?\n$/, "")}\n\n${lines.join("\n")}`;
-		if (expectedMtime !== null && chainMtime(file) !== expectedMtime) {
-			continue; // 他写者已改 → 重读重试
-		}
 		// 原子写：唯一 tmp + rename（与 writeAuditState 同模式）
 		const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 		try {
 			fs.writeFileSync(tmp, payload, "utf-8");
+			// rename 紧前 mtime 复校验（v1.0.27）：把 stat→rename 窗口缩到 µs 级——
+			// 两写者均通过写前校验后交错 rename → 后写者覆盖先写者且双方返回成功
+			// （write-after-verify 只检测"最终内容 ≠ 自身 payload"，恰好漏掉该交错）
+			if (expectedMtime !== null && chainMtime(file) !== expectedMtime) {
+				try {
+					fs.unlinkSync(tmp);
+				} catch {
+					/* noop */
+				}
+				continue; // 他写者已改 → 重读重试
+			}
 			fs.renameSync(tmp, file);
 		} catch {
 			try {
@@ -416,6 +436,21 @@ export function auditStateMtime(cwd: string): number | null {
 	}
 }
 
+/** 读状态 + 读时刻 mtime（乐观锁配对，v1.0.27 决策审计者 D-028 偏离项修复）：
+ *  mtime 必须**先于** read 取——反序（先 read 后 stat，v1.0.26 原状）时，写者落在
+ *  read→stat 间隙会得到「新 mtime + 陈旧快照」：写前校验通过（stat 到的就是写者落盘
+ *  后的 mtime），`{...raw, ...state}` 合并把陈旧快照已知字段覆盖 fresh raw，
+ *  verify-after-write 读回自身 payload 检测不到——并发写者更新被静默吞掉
+ *  （08-13 signatureConvLine 改写事故同类，D-028 声明不成立项）。
+ *  stat 先于 read：写者落在 stat→read 间隙 → 旧 mtime + 新内容 → 写前校验必冲突重试。 */
+export function readAuditStateWithMtime(cwd: string): {
+	state: AuditState;
+	mtime: number | null;
+} {
+	const mtime = auditStateMtime(cwd);
+	return { state: readAuditState(cwd), mtime };
+}
+
 /**
  * 原子写目录垃圾清扫（T3 生命周期泄露修复）：
  *  - `.corrupt-*` 损坏备份只保留最新 1 份（旧版本每次损坏 +1 个文件，无上限累积）；
@@ -520,6 +555,18 @@ export function writeAuditState(
 		flush: true,
 	});
 	try {
+		// rename 紧前 mtime 复校验（v1.0.27 决策审计者 D-028 偏离项）：entry 校验在
+		// tmp 写（含 flush fsync）之前，fsync 期间他写者落盘由 verify-after-write 兜底；
+		// entry 校验通过后、rename 前落盘的写入由本复校验拦截（窗口 µs 级）。
+		if (expectedMtime !== undefined && auditStateMtime(cwd) !== expectedMtime) {
+			try {
+				fs.unlinkSync(tmp);
+			} catch {
+				/* noop */
+			}
+			console.warn(`audit state rename 前 mtime 冲突，按冲突放弃: ${file}`);
+			return false;
+		}
 		fs.renameSync(tmp, file);
 	} catch {
 		// rename 失败（极端：tmp 被并发写者移走/权限）→ 按冲突处理，不落半成品
@@ -558,12 +605,10 @@ export function patchAuditState(
 	patch: Partial<AuditState>,
 ): boolean {
 	for (let attempt = 0; attempt < 2; attempt++) {
-		const state = readAuditState(cwd);
-		const ok = writeAuditState(
-			cwd,
-			{ ...state, ...patch },
-			auditStateMtime(cwd),
-		);
+		// mtime 与读配对（v1.0.27 D-028 偏离项）：expectedMtime 必须是「读时刻的
+		// mtime」——写时刻再取会漏掉 read→stat 间隙的并发写入（见 readAuditStateWithMtime）
+		const { state, mtime } = readAuditStateWithMtime(cwd);
+		const ok = writeAuditState(cwd, { ...state, ...patch }, mtime);
 		if (ok) return true;
 	}
 	return false;
@@ -597,7 +642,8 @@ export function recordSignature(
 	head?: string | null,
 ): void {
 	for (let attempt = 0; attempt < 2; attempt++) {
-		const state = readAuditState(cwd);
+		// mtime 与读配对（v1.0.27 D-028 偏离项）：读时刻捕获，见 readAuditStateWithMtime
+		const { state, mtime } = readAuditStateWithMtime(cwd);
 		const prev = state.signature;
 		if (
 			prev &&
@@ -607,7 +653,6 @@ export function recordSignature(
 		) {
 			return; // 幂等：同轮同结论已签名
 		}
-		const mtime = auditStateMtime(cwd);
 		const totalLines = convLogLineCount(cwd);
 		// A2 门禁：连续 blocked 递增；passed / 降级放行后清零。（timeout 态已移除，见 docs/audit-state-machine.md）
 		// failed（审计未触发/spawn 失败）：非产物问题，不递增 streak。
@@ -670,7 +715,16 @@ export function resetForSessionStart(cwd: string): void {
 			// 推进到当前行数 = 视为已覆盖旧会话的对话（不触发 needsSignoff）
 			signatureConvLine: totalLines,
 			// 保留上次签名状态作参考，但不再触发待签名
-			...(auditDead ? { inFlight: false } : {}),
+			...(auditDead
+				? { inFlight: false }
+				: {
+						// 会话边界门禁覆盖泄露（v1.0.27 双审计 FP#1）：保留锁（遗留审计者
+						// 还在跑）时，本会话首轮提交的门禁不得被「窗口早于本会话提交」的
+						// 遗留签名满足——覆写 auditRunId 为新鲜值，遗留签名 runId 必然
+						// 不匹配 → 门禁可见降级、下轮全量重审；同时修复现网 auditRunId
+						// 空值导致 runId 身份校验整段空转的旁路（FP#2a）。
+						auditRunId: `reset-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+					}),
 		});
 	} catch {
 		/* noop */
@@ -917,35 +971,62 @@ export function appendConv(
 			? `## 👤 用户: ${clipped}${tag}`
 			: `## 🤖 助手: ${clipped}${tag}`;
 	fs.appendFileSync(file, `\n${line}\n`, "utf-8");
-	trimConvlog(file);
+	trimConvlog(cwd, file);
 }
 
 /**
  * convlog 滚动截断（T2 生命周期泄露修复）：convlog 永久追加无上限（实测 428KB/天，
- * 年 156MB 磁盘无界增长）——超 1MB 时重写为头注释 + 最近 MAX_CONVLOG_LINES 条对话行
- * （与 process.md 滚动同模式）。截断后对话行计数减少，历史 convExtractedLine 超界值由
- * clampConvExtractedLine 钳制（写超视为已读完，不会断线）；convLineCache 按 (mtime,size)
- * 键控，截断自动失效重扫。截断只删已提取历史（游标已推进过），无审计窗口丢失。
+ * 年 156MB 磁盘无界增长）——超 1MB 时重写为头注释 + 最近 N 条对话行（与 process.md
+ * 滚动同模式）。保留规则：**游标未覆盖行（i ≥ convExtractedLine）永不删除**（D-023
+ * 「延迟而非丢失」承诺——游标滞后场景最老未提取行留给下轮审计者）；已覆盖历史按
+ * 字节预算倒推（防 CJK 行宽 800 字符 ≈ 2.4KB/行 下固定行数截断后仍超阈值、每次
+ * append 全量重写震荡）。截断后游标超界由 clampConvExtractedLine 钳制不断线；
+ * convLineCache 按 (mtime,size) 键控自动失效。并发保护：写前校验 mtime（convlog
+ * 是设计上的多实例共享文件 D-015，全量重写窗口内他实例 append 会丢行→放弃本轮）；
+ * 重写走唯一 tmp + rename 原子落盘（直接 writeFileSync 覆盖是截断写，SIGKILL 落
+ * 在写中会截断整个 convlog——原 append-only 最多丢一行）。
  */
 const MAX_CONVLOG_LINES = 1000;
 const MAX_CONVLOG_BYTES = 1024 * 1024;
-function trimConvlog(file: string): void {
+/** 截断后目标字节上限（≈ 阈值一半），防 CJK 行宽下震荡。 */
+const TRIM_TARGET_BYTES = MAX_CONVLOG_BYTES / 2;
+function trimConvlog(cwd: string, file: string): void {
 	try {
 		if (fs.statSync(file).size <= MAX_CONVLOG_BYTES) return;
+		const cursor = readAuditState(cwd).convExtractedLine;
+		const mtime0 = fs.statSync(file).mtimeMs; // 并发保护锚点
 		const raw = fs.readFileSync(file, "utf-8");
 		// 对话行判据与 convLogLineCount 一致（## 👤 / ## 🤖）
 		const dialog = raw.split(/\r?\n/).filter((l) => {
 			const t = l.trim();
 			return t.startsWith("## 👤") || t.startsWith("## 🤖");
 		});
-		if (dialog.length <= MAX_CONVLOG_LINES) return; // 行数未超不截（防截断后震荡）
-		// 截断后 ≤1000 行 × 800B 上限 ≈ 800KB < 1MB 阈值，不会反复触发
-		const keep = dialog.slice(-MAX_CONVLOG_LINES);
-		fs.writeFileSync(
-			file,
-			CONVLOG_HEADER + "\n" + keep.join("\n") + "\n",
-			"utf-8",
-		);
+		// 从尾部倒推保留：游标未覆盖行（i ≥ cursor）必须全部保留；已覆盖历史受字节预算约束
+		const keep: string[] = [];
+		let bytes = 0;
+		for (let i = dialog.length - 1; i >= 0; i--) {
+			const l = dialog[i];
+			keep.unshift(l);
+			bytes += Buffer.byteLength(l, "utf-8") + 2;
+			if (i < cursor && bytes >= TRIM_TARGET_BYTES) break;
+		}
+		if (keep.length === dialog.length) return; // 保底即全部 → 不截（防删未提取行）
+		if (fs.statSync(file).mtimeMs !== mtime0) return; // 并发 append 窗口 → 放弃，下轮再试
+		const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+		try {
+			fs.writeFileSync(
+				tmp,
+				CONVLOG_HEADER + "\n" + keep.join("\n") + "\n",
+				"utf-8",
+			);
+			fs.renameSync(tmp, file);
+		} catch {
+			try {
+				fs.unlinkSync(tmp);
+			} catch {
+				/* noop */
+			}
+		}
 	} catch {
 		/* noop：截断失败不阻塞对话记录 */
 	}

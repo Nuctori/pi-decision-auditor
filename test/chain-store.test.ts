@@ -1441,9 +1441,11 @@ test("v1.0.26：appendDecision 并发写不产生重复 D-NNN（乐观锁回归�
 	assert.equal(ids.length, 2);
 });
 
-test("T2：appendConv 超 1MB 滚动截断（保留头部+最近对话行）", () => {
+test("T2：appendConv 超 1MB 滚动截断（游标已推进时保留尾部+最近历史）", () => {
 	const dir = tmpDir();
 	const file = convlogPath(dir);
+	// 模拟正常审计状态：游标已推进到 1200（0..1199 已提取）
+	writeAuditState(dir, { ...readAuditState(dir), convExtractedLine: 1200 });
 	// 大文本行快速撑爆 1MB 阈值：1300 行 × ~838B（maxLen=800 截断）≈ 1.09MB > 1MB
 	const big = "x".repeat(1000);
 	for (let i = 0; i < 1300; i++) {
@@ -1456,8 +1458,8 @@ test("T2：appendConv 超 1MB 滚动截断（保留头部+最近对话行）", (
 	const raw = fs.readFileSync(file, "utf-8");
 	assert.ok(raw.startsWith("# Conversation Log"), "头部注释保留");
 	assert.ok(raw.includes("## 👤 用户: 1299"), "最近对话行保留");
-	assert.ok(!raw.includes("## 👤 用户: 0 "), "最老行被截断");
-	// 截断后对话行计数仍一致（convLogLineCount 只数对话行）
+	assert.ok(!raw.includes("## 👤 用户: 0 "), "最老已提取行被截断");
+	assert.ok(raw.includes("## 👤 用户: 1200"), "游标未覆盖行（1200+）全部保留");
 	const dialog = raw
 		.split(/\r?\n/)
 		.filter((l) => {
@@ -1465,8 +1467,62 @@ test("T2：appendConv 超 1MB 滚动截断（保留头部+最近对话行）", (
 			return t.startsWith("## 👤") || t.startsWith("## 🤖");
 		})
 		.length;
-	// 截断后对话行数下降（原始 1300 行 → 截断保留 1000 + 尾部追加增量），证明截断发生过
+	// 截断后对话行数下降（原始 1300 行 → 截断保留 <1300），证明截断发生过
 	assert.ok(dialog < 1300, `截断后对话行 <1300，实际 ${dialog}`);
+});
+
+test("T2：游标滞后（0）时超 1MB 不截断——未提取行永不删除（D-023 保底）", () => {
+	const dir = tmpDir();
+	const file = convlogPath(dir);
+	// state 不存在 = 从未审计（游标 0）→ 全部行都是未提取行
+	const big = "x".repeat(1000);
+	for (let i = 0; i < 1300; i++) {
+		appendConv(dir, "user", `${i} ${big}`, "run-t");
+	}
+	const raw = fs.readFileSync(file, "utf-8");
+	assert.ok(raw.includes("## 👤 用户: 0 "), "最老未提取行保留");
+	assert.ok(raw.includes("## 👤 用户: 1299"), "最近行保留");
+	const dialog = raw
+		.split(/\r?\n/)
+		.filter((l) => {
+			const t = l.trim();
+			return t.startsWith("## 👤") || t.startsWith("## 🤖");
+		})
+		.length;
+	assert.equal(dialog, 1300, "游标滞后：不截断，全部保留");
+});
+
+test("T2：CJK 行宽（800 字符 ≈ 2.4KB/行）截断收敛不震荡（M2 回归）", () => {
+	const dir = tmpDir();
+	const file = convlogPath(dir);
+	// 游标推进到 500：0..499 已提取
+	writeAuditState(dir, { ...readAuditState(dir), convExtractedLine: 500 });
+	const cjk = "测".repeat(800); // 800 字符 ≈ 2.4KB UTF-8
+	for (let i = 0; i < 550; i++) {
+		appendConv(dir, "user", `${i} ${cjk}`, "run-t");
+	}
+	// 550 行 × ~2.4KB ≈ 1.3MB > 1MB → 触发截断；截断后目标 ≤512KB（预算）+ 未覆盖 50 行
+	assert.ok(
+		fs.statSync(file).size <= 1024 * 1024,
+		`截断后 ≤1MB，实际 ${fs.statSync(file).size}`,
+	);
+	const raw1 = fs.readFileSync(file, "utf-8");
+	assert.ok(raw1.includes("## 👤 用户: 549"), "最近行保留");
+	assert.ok(raw1.includes("## 👤 用户: 500"), "游标未覆盖行保留");
+	assert.ok(!raw1.includes("## 👤 用户: 0 "), "最老已提取行被截断");
+	// 收敛性：再追加 6 条尾部行，不得再次触发全量重写震荡（size 保持 ≤1MB）
+	for (let i = 550; i < 556; i++) {
+		appendConv(dir, "user", `${i} ${cjk}`, "run-t");
+	}
+	const sizeAfter = fs.statSync(file).size;
+	assert.ok(
+		sizeAfter <= 1024 * 1024,
+		`追加后仍 ≤1MB（无震荡），实际 ${sizeAfter}`,
+	);
+	assert.ok(
+		fs.readFileSync(file, "utf-8").includes("## 👤 用户: 555"),
+		"追加行未丢",
+	);
 });
 
 test("T3：writeAuditState 清扫 .corrupt-*（保留最新 1 份）与 >24h .tmp-* 残留", () => {

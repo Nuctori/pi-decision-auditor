@@ -434,7 +434,7 @@ async function triggerDeliveryAudit(
 		await readyPromise;
 		for (const angle of DELIVERY_ANGLES) {
 			try {
-				await rpc(
+				const result = await rpc<{ runId?: string; asyncId?: string }>(
 					"spawn",
 					{
 						agent: "reviewer", // 内置 reviewer（fresh，独立）
@@ -444,6 +444,11 @@ async function triggerDeliveryAudit(
 					},
 					900_000,
 				);
+				// L2 reviewer run 登记（T1 补漏）：spawn 的 reviewer 此前无记录无终止——
+				// 挂起 = 算力泄漏（reviewer 只读无 state 写，无双写风险）。登记后：
+				// async-complete 完成即移除；session_shutdown 对剩余挂起 run stop。
+				const rid = result?.runId ?? result?.asyncId ?? "";
+				if (rid) deliveryReviewerRuns.add(rid);
 			} catch {
 				/* 单个角度失败不阻塞其他 */
 			}
@@ -454,6 +459,8 @@ async function triggerDeliveryAudit(
 }
 
 const deliveryAuditInFlight = new Set<string>();
+/** 在跑（未完成）的 L2 交付 reviewer runId（T1 补漏）：async-complete 移除，session_shutdown 终止。 */
+const deliveryReviewerRuns = new Set<string>();
 
 // ---- 审计状态呼吸灯（TUI footer 常驻指示）：spawn 亮、完成/失败/超时灭 ----
 // setStatus(key, text) 是 footer 持久状态（传 undefined 清除）；无 i18n 框架，
@@ -593,13 +600,17 @@ export default function (pi: ExtensionAPI): void {
 	});
 	pi.on("session_shutdown", async () => {
 		// T1：会话结束 = 挂起审计者 run 无存在意义（中间态 findings 已按纪律落盘）——
-		// best-effort stop 全部 in-flight run 防算力泄漏；stop 成功（run 已死）才清文件锁，
+		// best-effort stop 超 TTL 的 in-flight run 防算力泄漏；stop 成功（run 已死）才清文件锁，
 		// 防新会话 16min 停摆（JD#15 并发双写风险随 run 终止而消失；stop 失败 = run 可能
 		// 还在收尾 → 保留锁让遗留审计者先写，resetForSessionStart 的 TTL 条件兜底）
+		// 未超 TTL 的 run 不杀：刚 spawn 的正常审计者让其继续收尾（JD#15 语义）
+		const now = performance.now();
 		const entries = [...inFlightAudits.entries()];
-		await Promise.allSettled(
-			entries.map(async ([cwd, rec]) => {
-				const stopped = await stopRun(rec.runId);
+		// L2 reviewer run（T1 补漏）：只读无 state 写，会话结束直接全部 stop（挂起 = 纯泄漏）
+		await Promise.allSettled([
+			...entries.map(async ([cwd, rec]) => {
+				const expired = now - rec.startedAt > IN_FLIGHT_TTL_MS;
+				const stopped = expired ? await stopRun(rec.runId) : false;
 				inFlightAudits.delete(cwd);
 				if (stopped) {
 					try {
@@ -609,7 +620,12 @@ export default function (pi: ExtensionAPI): void {
 					}
 				}
 			}),
-		);
+			(async () => {
+				const ids = [...deliveryReviewerRuns];
+				deliveryReviewerRuns.clear();
+				await Promise.allSettled(ids.map(async (rid) => stopRun(rid)));
+			})(),
+		]);
 		inFlightAudits.clear();
 		cachedProjectRoot = null;
 		stopAuditBreath(); // 呼吸灯灭（会话结束）
@@ -816,13 +832,9 @@ export default function (pi: ExtensionAPI): void {
 					runId,
 					startedAt: performance.now(),
 				});
-				// run 身份锚点（JD #14，同 agent_end 路径）
-				try {
-					if (runId) {
-						patchAuditState(root, { auditRunId: runId });
-					}
-				} catch {
-					/* noop */
+				// run 身份锚点（JD #14，同 agent_end 路径；v1.0.27 返回值检查 + 落盘验证）
+				if (runId) {
+					persistAuditRunId(root, runId);
 				}
 				startAuditBreath(ctx.ui, root); // 亮灯（与自动审计同一语义）
 				ctx.ui.notify(
@@ -941,6 +953,30 @@ export default function (pi: ExtensionAPI): void {
 	function recordAuditDuration(cwd: string, t0: number): void {
 		try {
 			patchAuditState(cwd, { lastAuditDurationMs: Date.now() - t0 });
+		} catch {
+			/* noop */
+		}
+	}
+
+	/** run 身份锚点落盘（JD #14 身份校验的数据源）：spawn 返回的 runId 写入 state。
+	 *  v1.0.27（FP #2a）：检查返回值 + 验证落盘值——patch 静默失败（他写者并发）
+	 *  或审计者首写基于旧快照把 auditRunId 覆盖回空（读-写竞态）时，runId 身份校验
+	 *  整段空转 = 遗留/并发审计者签名劫持面回到修复前；失败 warn + lastError 落盘（可观测）。 */
+	function persistAuditRunId(root: string, runId: string): void {
+		try {
+			let ok = patchAuditState(root, { auditRunId: runId });
+			// 审计者首写可能基于旧快照（auditRunId=""）→ 验证落盘值，被覆盖则补写一次
+			if (ok && readAuditState(root).auditRunId !== runId) {
+				ok = patchAuditState(root, { auditRunId: runId });
+			}
+			if (!ok) {
+				console.warn(
+					`[pi-pair] auditRunId 落盘失败（${runId}），本轮门禁 run 身份校验降级为兼容模式`,
+				);
+				patchAuditState(root, {
+					lastError: `auditRunId 落盘失败: ${runId}`,
+				});
+			}
 		} catch {
 			/* noop */
 		}
@@ -1112,13 +1148,10 @@ export default function (pi: ExtensionAPI): void {
 					});
 					// run 身份锚点（JD #14）：spawn 返回的 runId 落盘，isAuditCompleted
 					// 校验签名 runId 与之匹配——遗留/并发审计者的签名不得劫持本会话门禁。
-					// 失败静默（下轮门禁重试）。
-					try {
-						if (runId) {
-							patchAuditState(root, { auditRunId: runId });
-						}
-					} catch {
-						/* noop */
+					// v1.0.27（FP #2a）：返回值检查 + 落盘值验证（审计者首写竞态覆盖），
+					// 失败可观测（warn + lastError），不再静默空转。
+					if (runId) {
+						persistAuditRunId(root, runId);
 					}
 					// 呼吸灯亮：审计已 spawn（常规轮异步/门禁轮同步共用）
 					startAuditBreath(ctx.ui, root);
@@ -1207,9 +1240,14 @@ export default function (pi: ExtensionAPI): void {
 				// FAILED_FINDING 文本（旧版本写入 auditFindings 的），防降级时当价值点注入
 				const realFindings = timeoutState.auditFindings.filter(
 					(f) =>
-						f !== "审计开始" &&
+						// 启动占位：审计者可能写成「审计开始：窗口=…」（精确匹配漏网，
+						// v1.0.27 决策审计者实证：降级 blockers 吃到该占位并注入用户）——
+						// 前缀匹配覆盖全部变体
+						!f.startsWith("审计开始") &&
 						f !== PURE_CHAT_PLACEHOLDER &&
-						f !== "审计未触发：spawn 失败，下轮重试",
+						// 历史残留两种措辞都滤（v1.0.26 L4 前曾写入 auditFindings）
+						f !== "审计未触发：spawn 失败，下轮重试" &&
+						f !== "审计触发失败：spawn 失败，下轮重试",
 				);
 				recordSignature(
 					root,
@@ -1233,18 +1271,30 @@ export default function (pi: ExtensionAPI): void {
 			gatedHead.set(root, head);
 			persistGatedHead(root, head);
 			stopAuditBreath(); // 门禁轮同步完成：灯灭
-			// 审计者已签名（passed/blocked），blockedStreak 已由 recordSignature 递增/清零
+			// 审计者已签名（passed/blocked）；v1.0.27（FP#5c 核实）：审计者按协议直写
+			// signature（不走 decision_signoff/recordSignature）→ streak 不自动维护——
+			// 门禁完成点按签名状态补齐（passed 清零 / blocked 递增）
 			if (sig.status === "passed" || sig.status === "passed-with-warning") {
+				const s0 = readAuditState(root);
+				if (s0.blockedStreak !== 0) {
+					patchAuditState(root, { blockedStreak: 0 });
+				}
 				return; // 门禁通过，end 就是 end
 			}
 			// blocked：A2 连续超限降级放行；未超限保留 blocked，缺口已注入（下轮开工主 agent 收到）
 			const s = readAuditState(root);
-			if (s.blockedStreak >= MAX_BLOCKED_STREAK) {
+			// streak 递增 cap 在 MAX：主 agent 门禁等待中 signoff（recordSignature 已
+			// 递增）的混合路径最多提前一轮触发降级，可接受。
+			if (sig.status === "blocked" && s.blockedStreak < MAX_BLOCKED_STREAK) {
+				patchAuditState(root, { blockedStreak: s.blockedStreak + 1 });
+			}
+			const s2 = readAuditState(root);
+			if (s2.blockedStreak >= MAX_BLOCKED_STREAK) {
 				recordSignature(
 					root,
 					{
 						status: "passed-with-warning",
-						blockers: s.signature?.blockers,
+						blockers: s2.signature?.blockers,
 					},
 					head,
 				);
@@ -1276,6 +1326,8 @@ export default function (pi: ExtensionAPI): void {
 	pi.events.on("subagent:async-complete", (data: unknown) => {
 		const env = data as { asyncId?: string; runId?: string } | null;
 		const completedId = env?.runId ?? env?.asyncId ?? "";
+		// L2 reviewer run 完成即移除（T1 补漏）：Set 只保留挂起 run，session_shutdown 有界
+		if (completedId) deliveryReviewerRuns.delete(completedId);
 		let completedCwd: string | null = null;
 		for (const [cwd, rec] of inFlightAudits) {
 			if (completedId && rec.runId === completedId) {

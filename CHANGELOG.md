@@ -9,7 +9,13 @@
 - **T3 state 目录垃圾文件累积（低-中）**：`.corrupt-*` 损坏备份永不清理（每次损坏 +1）；崩溃窗口 `.tmp-*` 残留无人清扫。writeAuditState 写前清扫：corrupt 只保留最新 1 份、>24h 的 tmp 残留删除（原子写目录通用 `sweepAtomicWrites`）
 - **T4 agent_end 异常路径内存残留（低）**：外层 catch 只落盘 lastError → inFlightAudits 残留 16min 停摆不可观测 + 呼吸灯常亮。补删内存锁 + 灭灯（文件锁不盲清——审计者可能实际在跑，留给 stale-lock TTL 年龄条件兜底）
 - **T5 会话级 Map 无界增长（低）**：gatedHead / injectedSignatureAt / injectedInterimAt / nonGitRootWarned 按 root 只增不减，常驻进程长期切项目累积。session_start 清非当前 root 条目（注入去重有 state.json 持久化兜底、gatedHead 有 agent_end 惰性恢复兜底，清内存安全）
-- 测试 47/47（+T2 截断回归 +T3 清扫回归），tsc 0
+- **独立 reviewer 验证闭环修复（fresh-context 4 路交叉复核）**：
+  - M1 trimConvlog 游标保底：截断保留量从「固定 1000 行」改为「游标未覆盖行永不删除 + 已覆盖历史按 512KB 字节预算倒推」——游标滞后（纯聊天不 spawn / 审计者挂起）场景未提取行不再被物理删除（D-023 延迟而非丢失承诺在滚动截断下成立）
+  - M2 CJK 行宽震荡修复：maxLen=800 字符 ≈ 2.4KB/行（实证：截断后 2.04MB > 1MB 阈值，每次 append 全量重写）→ 字节预算倒推保留行，截断后 ≤512KB 收敛，CJK 回归测试锁定
+  - L3 trim 原子化：writeFileSync 直接覆盖是截断写（SIGKILL 窗口可截断整个 convlog）→ 唯一 tmp + rename；mtime 写前校验（多实例共享文件 D-015 的并发 append 窗口放弃本轮）
+  - L2 L2 交付 reviewer run 终止（T1 补漏）：triggerDeliveryAudit 的 3 个 reviewer run 此前无记录无终止——登记 deliveryReviewerRuns，async-complete 完成即移除，session_shutdown 对挂起 run stop（reviewer 只读无 state 写，无双写风险）
+  - T1 细化：session_shutdown 仅 stop 超 TTL 的 run（刚 spawn 的正常审计者让其在会话结束后收尾，JD#15 语义——pi 运行时实证 await async handler）
+- 测试 49/49（+T2 截断游标/CJK 收敛/游标滞后保底 3 回归 +T3 清扫回归），tsc 0
 
 ## [1.0.26] - 2026-08-14
 
