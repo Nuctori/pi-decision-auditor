@@ -417,6 +417,57 @@ export function auditStateMtime(cwd: string): number | null {
 }
 
 /**
+ * 原子写目录垃圾清扫（T3 生命周期泄露修复）：
+ *  - `.corrupt-*` 损坏备份只保留最新 1 份（旧版本每次损坏 +1 个文件，无上限累积）；
+ *  - `.tmp-*` 崩溃残留（SIGKILL 落在 writeFileSync→renameSync 窗口）超过 24h 清扫。
+ * 每次写前调用，成本 = 一次 readdir（目录内文件数可忽略）。清理失败不阻塞写。
+ */
+const TMP_STALE_MS = 24 * 60 * 60 * 1000;
+function sweepAtomicWrites(file: string): void {
+	try {
+		const dir = path.dirname(file);
+		const base = path.basename(file);
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return; // 目录不存在（首次写）
+		}
+		// corrupt 备份按 mtime 新→旧，保留最新 1 份
+		const corrupts: Array<{ m: number; p: string }> = [];
+		for (const e of entries) {
+			if (!e.isFile() || !e.name.startsWith(`${base}.corrupt-`)) continue;
+			const p = path.join(dir, e.name);
+			try {
+				corrupts.push({ m: fs.statSync(p).mtimeMs, p });
+			} catch {
+				/* stat 失败（被并发删）跳过 */
+			}
+		}
+		corrupts.sort((a, b) => b.m - a.m);
+		for (const c of corrupts.slice(1)) {
+			try {
+				fs.unlinkSync(c.p);
+			} catch {
+				/* noop */
+			}
+		}
+		const now = Date.now();
+		for (const e of entries) {
+			if (!e.isFile() || !e.name.startsWith(`${base}.tmp-`)) continue;
+			const p = path.join(dir, e.name);
+			try {
+				if (now - fs.statSync(p).mtimeMs > TMP_STALE_MS) fs.unlinkSync(p);
+			} catch {
+				/* noop */
+			}
+		}
+	} catch {
+		/* noop：清理失败不阻塞写 */
+	}
+}
+
+/**
  * 写审计状态（原子写 + mtime 乐观锁）。
  * expectedMtime 提供时：写前校验当前 mtime 是否仍等于它——不匹配（其他写者已改，
  * read-modify-write 竞态）→ 放弃本次提交（防丢失更新），console.warn 后返回 false。
@@ -429,6 +480,7 @@ export function writeAuditState(
 ): boolean {
 	const file = auditStatePath(cwd);
 	fs.mkdirSync(path.dirname(file), { recursive: true });
+	sweepAtomicWrites(file); // T3：写前清扫陈旧 .corrupt-* / .tmp-* 残留
 	if (expectedMtime !== undefined) {
 		const cur = auditStateMtime(cwd);
 		if (cur !== expectedMtime) {
@@ -865,6 +917,38 @@ export function appendConv(
 			? `## 👤 用户: ${clipped}${tag}`
 			: `## 🤖 助手: ${clipped}${tag}`;
 	fs.appendFileSync(file, `\n${line}\n`, "utf-8");
+	trimConvlog(file);
+}
+
+/**
+ * convlog 滚动截断（T2 生命周期泄露修复）：convlog 永久追加无上限（实测 428KB/天，
+ * 年 156MB 磁盘无界增长）——超 1MB 时重写为头注释 + 最近 MAX_CONVLOG_LINES 条对话行
+ * （与 process.md 滚动同模式）。截断后对话行计数减少，历史 convExtractedLine 超界值由
+ * clampConvExtractedLine 钳制（写超视为已读完，不会断线）；convLineCache 按 (mtime,size)
+ * 键控，截断自动失效重扫。截断只删已提取历史（游标已推进过），无审计窗口丢失。
+ */
+const MAX_CONVLOG_LINES = 1000;
+const MAX_CONVLOG_BYTES = 1024 * 1024;
+function trimConvlog(file: string): void {
+	try {
+		if (fs.statSync(file).size <= MAX_CONVLOG_BYTES) return;
+		const raw = fs.readFileSync(file, "utf-8");
+		// 对话行判据与 convLogLineCount 一致（## 👤 / ## 🤖）
+		const dialog = raw.split(/\r?\n/).filter((l) => {
+			const t = l.trim();
+			return t.startsWith("## 👤") || t.startsWith("## 🤖");
+		});
+		if (dialog.length <= MAX_CONVLOG_LINES) return; // 行数未超不截（防截断后震荡）
+		// 截断后 ≤1000 行 × 800B 上限 ≈ 800KB < 1MB 阈值，不会反复触发
+		const keep = dialog.slice(-MAX_CONVLOG_LINES);
+		fs.writeFileSync(
+			file,
+			CONVLOG_HEADER + "\n" + keep.join("\n") + "\n",
+			"utf-8",
+		);
+	} catch {
+		/* noop：截断失败不阻塞对话记录 */
+	}
 }
 
 /** 对话日志尾部（最近 N 条），供审计者读目标。 */

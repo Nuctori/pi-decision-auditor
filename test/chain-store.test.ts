@@ -1440,3 +1440,49 @@ test("v1.0.26：appendDecision 并发写不产生重复 D-NNN（乐观锁回归�
 	assert.equal(new Set(ids).size, ids.length, "链中不允许重复编号");
 	assert.equal(ids.length, 2);
 });
+
+test("T2：appendConv 超 1MB 滚动截断（保留头部+最近对话行）", () => {
+	const dir = tmpDir();
+	const file = convlogPath(dir);
+	// 大文本行快速撑爆 1MB 阈值：1300 行 × ~838B（maxLen=800 截断）≈ 1.09MB > 1MB
+	const big = "x".repeat(1000);
+	for (let i = 0; i < 1300; i++) {
+		appendConv(dir, "user", `${i} ${big}`, "run-t");
+	}
+	assert.ok(
+		fs.statSync(file).size <= 1024 * 1024,
+		`截断后 ≤1MB，实际 ${fs.statSync(file).size}`,
+	);
+	const raw = fs.readFileSync(file, "utf-8");
+	assert.ok(raw.startsWith("# Conversation Log"), "头部注释保留");
+	assert.ok(raw.includes("## 👤 用户: 1299"), "最近对话行保留");
+	assert.ok(!raw.includes("## 👤 用户: 0 "), "最老行被截断");
+	// 截断后对话行计数仍一致（convLogLineCount 只数对话行）
+	const dialog = raw
+		.split(/\r?\n/)
+		.filter((l) => {
+			const t = l.trim();
+			return t.startsWith("## 👤") || t.startsWith("## 🤖");
+		})
+		.length;
+	// 截断后对话行数下降（原始 1300 行 → 截断保留 1000 + 尾部追加增量），证明截断发生过
+	assert.ok(dialog < 1300, `截断后对话行 <1300，实际 ${dialog}`);
+});
+
+test("T3：writeAuditState 清扫 .corrupt-*（保留最新 1 份）与 >24h .tmp-* 残留", () => {
+	const dir = tmpDir();
+	const file = auditStatePath(dir);
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file + ".corrupt-old", "x");
+	fs.writeFileSync(file + ".corrupt-new", "y");
+	fs.writeFileSync(file + ".tmp-stale", "z");
+	fs.writeFileSync(file + ".tmp-fresh", "w");
+	const old = new Date(Date.now() - 25 * 60 * 60 * 1000);
+	fs.utimesSync(file + ".corrupt-old", old, old);
+	fs.utimesSync(file + ".tmp-stale", old, old);
+	writeAuditState(dir, { ...readAuditState(dir), inFlight: false });
+	assert.ok(!fs.existsSync(file + ".corrupt-old"), "旧 corrupt 备份被删");
+	assert.ok(fs.existsSync(file + ".corrupt-new"), "最新 corrupt 备份保留");
+	assert.ok(!fs.existsSync(file + ".tmp-stale"), "24h 前 tmp 残留被删");
+	assert.ok(fs.existsSync(file + ".tmp-fresh"), "新鲜 tmp 保留");
+});

@@ -523,6 +523,19 @@ function stopAuditBreath(cwd?: string): void {
 export default function (pi: ExtensionAPI): void {
 	const rpc = makeRpc(pi);
 	const readyPromise = waitForRpcReady(pi);
+
+	/** best-effort 终止审计者 run（T1 生命周期泄露修复）：
+	 *  TTL 过期/会话结束判定 run 已死时调用——挂起的审计者 run 不终止 = 算力泄漏 +
+	 *  迟到写 state 双写竞争。stop 失败（rpc 通道已死/run 已自然结束）不阻塞清理路径。 */
+	const stopRun = async (runId: string): Promise<boolean> => {
+		if (!runId) return false;
+		try {
+			await rpc("stop", { runId }, 10_000);
+			return true;
+		} catch {
+			return false;
+		}
+	};
 	// 本会话唯一标识（进程 + 随机）：convlog 按 cwd 多实例共享追加的隔离键。
 	// 会话级（非模块级——loader 对同 cwd 缓存扩展工厂，模块顶层只执行一次，模块级
 	// RUN_ID 会让同进程切会话时两个会话行混标，A 会话的审计把 B 会话的对话当自己的）。
@@ -544,6 +557,21 @@ export default function (pi: ExtensionAPI): void {
 		try {
 			cachedProjectRoot = null; // 新会话重新解析（或读 PI_PAIR_PROJECT_ROOT）
 			const root = projectRoot(ctx.cwd);
+			// T5：会话级 Map 只保留当前 root 条目——常驻进程长期切换项目防无界增长
+			// （injected* 去重有 state.json 持久化兜底；gatedHead 有 agent_end 惰性恢复兜底；
+			// nonGitRootWarned 仅一次性提示去重，清掉让新会话可重新提示）
+			for (const k of injectedSignatureAt.keys()) {
+				if (k !== root) injectedSignatureAt.delete(k);
+			}
+			for (const k of injectedInterimAt.keys()) {
+				if (k !== root) injectedInterimAt.delete(k);
+			}
+			for (const k of gatedHead.keys()) {
+				if (k !== root) gatedHead.delete(k);
+			}
+			for (const k of nonGitRootWarned) {
+				if (k !== root) nonGitRootWarned.delete(k);
+			}
 			resetForSessionStart(root);
 			// 决策信号清零（FP 审计 #3：print 模式 agent_end 可能不执行，防跨会话残留误触发）
 			roundDecisionMade = false;
@@ -563,8 +591,25 @@ export default function (pi: ExtensionAPI): void {
 			/* noop */
 		}
 	});
-	pi.on("session_shutdown", () => {
-		// fresh spawn 无残留 run 可停；仅清内存锁与根缓存
+	pi.on("session_shutdown", async () => {
+		// T1：会话结束 = 挂起审计者 run 无存在意义（中间态 findings 已按纪律落盘）——
+		// best-effort stop 全部 in-flight run 防算力泄漏；stop 成功（run 已死）才清文件锁，
+		// 防新会话 16min 停摆（JD#15 并发双写风险随 run 终止而消失；stop 失败 = run 可能
+		// 还在收尾 → 保留锁让遗留审计者先写，resetForSessionStart 的 TTL 条件兜底）
+		const entries = [...inFlightAudits.entries()];
+		await Promise.allSettled(
+			entries.map(async ([cwd, rec]) => {
+				const stopped = await stopRun(rec.runId);
+				inFlightAudits.delete(cwd);
+				if (stopped) {
+					try {
+						patchAuditState(cwd, { inFlight: false });
+					} catch {
+						/* noop */
+					}
+				}
+			}),
+		);
 		inFlightAudits.clear();
 		cachedProjectRoot = null;
 		stopAuditBreath(); // 呼吸灯灭（会话结束）
@@ -943,6 +988,16 @@ export default function (pi: ExtensionAPI): void {
 			// 防「agent_end 中断后 inFlight=true 假挂起」永久残留——实证：17:41:45 提交轮 spawn 中断，
 			// state.json 假 inFlight 挂 2.5h，纯咨询轮 return 前无人清）
 			// 清锁后重读 state：spawn 分支必须用干净快照（旧快照 inFlight=true 会让本轮 spawn 被跳过）
+			// T1：TTL 过期判定为死的挂起审计者 run → best-effort stop（防 run 算力泄漏 + 迟到写
+			// 双写竞争）。必须在 hasInFlight() 之前取记录：hasInFlight 惰性清理会删条目丢 runId
+			const deadAuditor = inFlightAudits.get(root);
+			if (
+				deadAuditor &&
+				performance.now() - deadAuditor.startedAt > IN_FLIGHT_TTL_MS
+			) {
+				inFlightAudits.delete(root);
+				void stopRun(deadAuditor.runId);
+			}
 			if (shouldClearStaleLock(state, hasInFlight(root))) {
 				// v1.0.26（L1）：清锁写也检查返回值——失败（他写者并发）→ 不动 state、不灭灯，
 				// 下轮 agent_end 自愈；成功才重读快照并灭灯
@@ -1203,6 +1258,11 @@ export default function (pi: ExtensionAPI): void {
 				patchAuditState(root, {
 					lastError: `agent_end: ${err instanceof Error ? err.message : String(err)}`,
 				});
+				// T4：异常路径也清内存锁+灭灯（防 16min 停摆不可观测 + 呼吸灯常亮）。
+				// 文件锁不盲清——审计者可能实际在跑（异常发生在 spawn 之后），盲清会并发
+				// 双写；文件锁留给 stale-lock TTL 兜底（shouldClearStaleLock 年龄条件）
+				inFlightAudits.delete(root);
+				stopAuditBreath(root);
 			} catch {
 				/* noop：日志失败不阻塞 */
 			}
@@ -1258,6 +1318,9 @@ export default function (pi: ExtensionAPI): void {
 			if (performance.now() - rec.startedAt > IN_FLIGHT_TTL_MS) {
 				inFlightAudits.delete(cwd);
 				stopAuditBreath(cwd);
+				// T1：TTL 判定 run 已死（TTL 16min > spawn 超时 15min）→ stop 挂起 run
+				// 防算力泄漏 + 迟到写 state 双写竞争（v1.0.27）
+				void stopRun(rec.runId);
 			}
 		}
 	});

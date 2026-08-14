@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.27] - 2026-08-14
+
+生命周期泄露审计（v1.0.26 泄露修复的残留资源闭环）——子代理 run / 文件 / 内存状态三类资源：
+
+- **T1 审计者 run 终止闭环（高）**：常规轮异步审计者挂起时，TTL 清理只删内存锁从不 stop run → 算力泄漏 + 迟到写 state 双写竞争。统一 best-effort `stopRun`：① agent_end stale-lock 分支（TTL 过期判定 run 已死 → stop 再清内存锁，先于 hasInFlight 取记录防 runId 丢失）；② async-complete 兜底循环（TTL 过期条目 stop）；③ session_shutdown 遍历全部 in-flight run stop——stop 成功才清文件锁（run 已死不会再写，防新会话 16min 停摆；stop 失败 = run 可能还在收尾 → 保留锁，JD#15 TTL 条件兜底）
+- **T2 convlog 无界增长（中）**：convlog 永久追加无滚动截断（实测 428KB/天 ≈ 156MB/年）。超 1MB 重写为头注释 + 最近 1000 条对话行（与 process.md 同模式）；历史 convExtractedLine 超界由 clampConvExtractedLine 钳制不断线；convLineCache 按 (mtime,size) 自动失效；截断只删已提取历史，无审计窗口丢失
+- **T3 state 目录垃圾文件累积（低-中）**：`.corrupt-*` 损坏备份永不清理（每次损坏 +1）；崩溃窗口 `.tmp-*` 残留无人清扫。writeAuditState 写前清扫：corrupt 只保留最新 1 份、>24h 的 tmp 残留删除（原子写目录通用 `sweepAtomicWrites`）
+- **T4 agent_end 异常路径内存残留（低）**：外层 catch 只落盘 lastError → inFlightAudits 残留 16min 停摆不可观测 + 呼吸灯常亮。补删内存锁 + 灭灯（文件锁不盲清——审计者可能实际在跑，留给 stale-lock TTL 年龄条件兜底）
+- **T5 会话级 Map 无界增长（低）**：gatedHead / injectedSignatureAt / injectedInterimAt / nonGitRootWarned 按 root 只增不减，常驻进程长期切项目累积。session_start 清非当前 root 条目（注入去重有 state.json 持久化兜底、gatedHead 有 agent_end 惰性恢复兜底，清内存安全）
+- 测试 47/47（+T2 截断回归 +T3 清扫回归），tsc 0
+
 ## [1.0.26] - 2026-08-14
 
 泄露审计修复（函数式专家 + Jeff Dean 双视角交叉审计，独立 reviewer 验证闭环）：
