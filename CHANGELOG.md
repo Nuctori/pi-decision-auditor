@@ -16,6 +16,16 @@
   - L2 L2 交付 reviewer run 终止（T1 补漏）：triggerDeliveryAudit 的 3 个 reviewer run 此前无记录无终止——登记 deliveryReviewerRuns，async-complete 完成即移除，session_shutdown 对挂起 run stop（reviewer 只读无 state 写，无双写风险）
   - T1 细化：session_shutdown 仅 stop 超 TTL 的 run（刚 spawn 的正常审计者让其在会话结束后收尾，JD#15 语义——pi 运行时实证 await async handler）
 - 测试 49/49（+T2 截断游标/CJK 收敛/游标滞后保底 3 回归 +T3 清扫回归），tsc 0
+- **本会话双审计（FP 专家 + Jeff Dean）交叉审查修复（1200s 延迟审查轮，3 路发现合并）**：
+  - **乐观锁 read→stat TOCTOU（决策审计者 D-028 偏离项，run-55708 同结论）**：expectedMtime 在写时刻捕获而非读时刻——写者落在 read→stat 间隙时 `{...raw, ...state}` 用陈旧快照覆盖 fresh raw、verify-after-write 读回自身 payload 检测不到（08-13 signatureConvLine 改写事故同类）。新增 `readAuditStateWithMtime`（stat 先于 read 配对），patchAuditState/recordSignature 改走配对读；writeAuditState/appendDecision rename 紧前 mtime 复校验（stat→rename 窗口缩到 µs）
+  - **appendDecision last-writer-wins 丢失窗口（双路共识 FP#3/JD#1）**：mtime 校验原在 tmp 写前——两写者均通过校验后交错 rename → 先写者条目静默丢失且双方返回成功。复校验移到 renameSync 紧前；补重试路径行为测试（写 tmp 期间 mtime 前拨触发重读重试——JD 审计 #2 指出的重试路径零覆盖）
+  - **会话边界门禁覆盖泄露（FP#1）**：TTL 内新会话继承旧审计锁 → 首轮提交门禁被「窗口早于本会话提交」的遗留签名满足（auditRunId 匹配即放行）。resetForSessionStart 保留锁时覆写 auditRunId 为新鲜值 → 遗留签名必不匹配 → 门禁可见降级、下轮全量重审
+  - **auditRunId 静默写失败（FP#2a）**：现网 auditRunId=""（spawn 后 patch 冲突静默 / 审计者首写基于旧快照覆盖回空）→ runId 身份校验整段空转。`persistAuditRunId`（返回值检查 + 落盘值验证补写 + warn/lastError 可观测），agent_end 与 /pair-audit 共用
+  - **decision_add 字段消毒（FP#5a）**：换行可注入伪条目（parseChain 按行宽容解析）+ 无长度上限 → 链无界增长。appendDecision 单行化 + 截断（summary 200 / context·decision·rationale 1000 / alternatives 500）
+  - **超时降级占位噪音（决策审计者实证）**：「审计开始：窗口=…」未命中精确 `"审计开始"` 过滤 → 降级 blockers 当价值点注入用户。改前缀匹配 + 补滤历史「审计触发失败」残留措辞
+  - **A2 blockedStreak 路径补齐（FP#5c 核实）**：审计者按协议直写 signature（不走 decision_signoff/recordSignature）→ streak 不递增、A2 门禁（≥3 连续 blocked 降级）对审计结论不响应。门禁完成点按签名状态维护（passed 清零 / blocked 递增，cap 在 MAX 防混合路径双计）
+  - **接受项（文档化取舍）**：decision_signoff 无 runId 可完成门禁（semi-by-design——signoff 工具即设计签名通道）；审计者 write 通道无乐观锁（扩展侧不可拦截，纪律约束 + 审计者 prompt 字段保留清单）；recordSignature 幂等对 auditStartedAt=0 恒真（实际调用面不触发）；超时重读 duration 起算点（CI 指标无行为影响）；JD#18 公共链模式排除 docs/decisions 的漏审面（hasNewCommit 覆盖）
+- 测试 52/52（49 + 双审计轮 +3：乐观锁重试 / 字段消毒 / 会话边界 auditRunId），tsc 0
 
 ## [1.0.26] - 2026-08-14
 

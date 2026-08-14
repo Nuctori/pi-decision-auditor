@@ -6,6 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
+import fsModule from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -24,6 +25,7 @@ import {
 	gitHead,
 	hasNewConversation,
 	hasUncommittedChanges,
+	IN_FLIGHT_TTL_MS,
 	isAuditCompleted,
 	listEntries,
 	needsSignoff,
@@ -1407,15 +1409,27 @@ test("v1.0.26：recordSignature 幂等（同轮同结论重复 signoff 不重写
 		blockers: ["缺口A", "缺口B"],
 	});
 	const after = readAuditState(dir);
-	assert.equal(after.signature?.at, before.signature?.at, "幂等：at 不得重写（去重键失效 → blockers 重复注入）");
-	assert.equal(after.blockedStreak, 0, "幂等：blockedStreak 不得双计（A2 早触发降级）");
+	assert.equal(
+		after.signature?.at,
+		before.signature?.at,
+		"幂等：at 不得重写（去重键失效 → blockers 重复注入）",
+	);
+	assert.equal(
+		after.blockedStreak,
+		0,
+		"幂等：blockedStreak 不得双计（A2 早触发降级）",
+	);
 	// 不同 blockers（新结论）→ 正常重签
 	recordSignature(dir, {
 		status: "blocked",
 		blockers: ["新缺口"],
 	});
 	const updated = readAuditState(dir);
-	assert.equal(updated.signature?.blockers?.length, 1, "不同 blockers → 正常重签");
+	assert.equal(
+		updated.signature?.blockers?.length,
+		1,
+		"不同 blockers → 正常重签",
+	);
 	assert.equal(updated.blockedStreak, 1, "重签递增 streak");
 });
 
@@ -1460,13 +1474,10 @@ test("T2：appendConv 超 1MB 滚动截断（游标已推进时保留尾部+最�
 	assert.ok(raw.includes("## 👤 用户: 1299"), "最近对话行保留");
 	assert.ok(!raw.includes("## 👤 用户: 0 "), "最老已提取行被截断");
 	assert.ok(raw.includes("## 👤 用户: 1200"), "游标未覆盖行（1200+）全部保留");
-	const dialog = raw
-		.split(/\r?\n/)
-		.filter((l) => {
-			const t = l.trim();
-			return t.startsWith("## 👤") || t.startsWith("## 🤖");
-		})
-		.length;
+	const dialog = raw.split(/\r?\n/).filter((l) => {
+		const t = l.trim();
+		return t.startsWith("## 👤") || t.startsWith("## 🤖");
+	}).length;
 	// 截断后对话行数下降（原始 1300 行 → 截断保留 <1300），证明截断发生过
 	assert.ok(dialog < 1300, `截断后对话行 <1300，实际 ${dialog}`);
 });
@@ -1482,13 +1493,10 @@ test("T2：游标滞后（0）时超 1MB 不截断——未提取行永不删除
 	const raw = fs.readFileSync(file, "utf-8");
 	assert.ok(raw.includes("## 👤 用户: 0 "), "最老未提取行保留");
 	assert.ok(raw.includes("## 👤 用户: 1299"), "最近行保留");
-	const dialog = raw
-		.split(/\r?\n/)
-		.filter((l) => {
-			const t = l.trim();
-			return t.startsWith("## 👤") || t.startsWith("## 🤖");
-		})
-		.length;
+	const dialog = raw.split(/\r?\n/).filter((l) => {
+		const t = l.trim();
+		return t.startsWith("## 👤") || t.startsWith("## 🤖");
+	}).length;
 	assert.equal(dialog, 1300, "游标滞后：不截断，全部保留");
 });
 
@@ -1541,4 +1549,82 @@ test("T3：writeAuditState 清扫 .corrupt-*（保留最新 1 份）与 >24h .tm
 	assert.ok(fs.existsSync(file + ".corrupt-new"), "最新 corrupt 备份保留");
 	assert.ok(!fs.existsSync(file + ".tmp-stale"), "24h 前 tmp 残留被删");
 	assert.ok(fs.existsSync(file + ".tmp-fresh"), "新鲜 tmp 保留");
+});
+
+test("v1.0.27：appendDecision 乐观锁重试（写 tmp 期间 mtime 变化触发重读重试）", () => {
+	const dir = tmpDir();
+	appendDecision(dir, {
+		summary: "A",
+		context: "C1",
+		decision: "D1",
+		rationale: "R1",
+	});
+	const file = chainPath(dir);
+	const origWrite = fs.writeFileSync;
+	let bumped = false;
+	// 单进程模拟并发写者：首次 tmp 写时把 chain.md mtime 前拨（≈ 他写者已落盘）——
+	// rename 紧前复校验必冲突 → continue 重读重试（JD 审计 #2：重试路径此前零覆盖）
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	(fsModule as any).writeFileSync = (...args: unknown[]) => {
+		if (!bumped) {
+			bumped = true;
+			const st = fs.statSync(file);
+			fs.utimesSync(file, st.atime, new Date(st.mtimeMs + 5000));
+		}
+		// @ts-expect-error 转发原始调用
+		return origWrite.apply(fs, args);
+	};
+	try {
+		const e = appendDecision(dir, {
+			summary: "B",
+			context: "C2",
+			decision: "D2",
+			rationale: "R2",
+		});
+		assert.equal(e.id, "D-002"); // 冲突后重读重试成功，编号连续无重复
+		assert.ok(readRaw(dir).includes("D-002"));
+	} finally {
+		(fsModule as any).writeFileSync = origWrite;
+	}
+});
+
+test("v1.0.27：appendDecision 字段消毒（换行单行化 + 截断，防伪条目注入/无界增长）", () => {
+	const dir = tmpDir();
+	const e = appendDecision(dir, {
+		summary: "行一\n## D-099: 伪条目 [Accepted]\n行二",
+		context: "x".repeat(2000),
+		decision: "D",
+		rationale: "R",
+	});
+	assert.ok(!e.summary.includes("\n"), "summary 单行化");
+	assert.ok(e.summary.startsWith("行一"), "原文保留");
+	assert.ok(e.context.length <= 1000, "context 截断到 1000");
+	assert.equal(parseChain(readRaw(dir)).length, 1, "伪条目未注入链");
+});
+
+test("v1.0.27：resetForSessionStart 保留锁时覆写 auditRunId（会话边界门禁覆盖）", () => {
+	const dir = tmpDir();
+	// 审计在跑（未超 TTL）→ 保留锁 + 覆写 auditRunId 为新鲜值
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		inFlight: true,
+		auditStartedAt: Date.now(),
+		auditRunId: "run-old-001",
+	});
+	resetForSessionStart(dir);
+	const st = readAuditState(dir);
+	assert.equal(st.inFlight, true, "锁保留（遗留审计者可能还在跑）");
+	assert.ok(st.auditRunId !== "run-old-001", "auditRunId 覆写为新鲜值");
+	assert.ok(st.auditRunId.startsWith("reset-"), "新鲜值带 reset- 前缀");
+	// TTL 过期 → 清锁，不覆写 auditRunId
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		inFlight: true,
+		auditStartedAt: Date.now() - IN_FLIGHT_TTL_MS - 1000,
+		auditRunId: "run-old-002",
+	});
+	resetForSessionStart(dir);
+	const st2 = readAuditState(dir);
+	assert.equal(st2.inFlight, false, "过期锁清除");
+	assert.equal(st2.auditRunId, "run-old-002", "清锁轮不覆写 auditRunId");
 });
