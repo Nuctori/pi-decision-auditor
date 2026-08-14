@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.25] - 2026-08-14
+
+根治「新会话还有泄露」（用户报障：新会话开头仍自动出现审计结论——即使内容新鲜且属于本项目）：
+
+- **跨会话注入去重持久化**：`injectedSignatureAt`/`injectedInterimAt` 从进程内存改为 state.json 持久化字段——同一审计签名/中间态**只注入一次**（审计完成后首个 turn 或 async-complete followUp 场景），之后所有新会话不再重复弹出；内存 map 优先（同会话去重）、热重载/新会话从 state 恢复（跨会话去重）；审计者 prompt 字段保留清单 + agents/decision-auditor.md 显式要求原样保留（gatedHead 教训复用）
+- **followUp 同步记录去重**：async-complete 发送 blocked 缺口 followUp 时立即持久化 injectedSignatureAt——已即时交付的结论不在下个会话再注入一遍
+- 测试：去重字段往返 + 消毒 + resetForSessionStart 不清除（跨会话存活）；39/39 测试通过、tsc 0 错误
+
 ## [1.0.24] - 2026-08-14
 
 修复跨会话/跨项目审计串台（用户报障「会话刚开始就有个审计结果」+「为什么别的会话的审计会串台」）+ 审计缺口 L1-L7 全量修复（函数式 + 系统设计双视角交叉审计）：

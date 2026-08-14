@@ -134,6 +134,7 @@ acceptanceRole: writer
 - `inFlight` 置 `false`（解除去重锁）
 - `lastAuditedId` 推进到链最新条目；`lastAuditAt` 置当前时间戳；`convExtractedLine` 推进到已读对话行
 - **`gatedHead` 必须原样保留**（扩展的门禁基线字段；v1.0.24 实证：审计者收尾写曾把它整个丢掉，导致热重载后修复提交再被吞）
+- **`injectedSignatureAt` / `injectedInterimAt` 必须原样保留**（扩展的跨会话注入去重标记；v1.0.25：丢则审计结论在每个新会话重复注入）
 - **签名语义**：产物通过 → `signature={status:"passed", at:<epoch ms>}` 且 `signatureConvLine` 推进到当前对话行总数（## 👤/## 🤖 行数）；发现 blocker → `signature={status:"blocked", at:<epoch ms>, blockers:[...可操作缺口]}` 且 `signatureConvLine` **同样推进**（签名即推进——修复走 blockers 注入通道，不靠 convLine 滞后）。**signature 必须带 `at`**（= lastAuditAt 的 epoch ms）：扩展按 `signature.at ≥ auditStartedAt` 判定完成，缺 at 会被交付轮误判为超时并覆盖真实 blockers。**signature 必须带 `head`**（= `git rev-parse --short HEAD` 输出，你审计时的产物基线短哈希）：扩展按 head 与当前 HEAD 是否一致校验注入新鲜度，缺 head 时陈旧签名会在后续会话反复注入（跨会话泄露，v1.0.24）。
 - 不要写 `passed-with-warning`——那是扩展在连续 blocked 达上限（3 次）或交付轮超时时的降级动作，不是你的结论。
 

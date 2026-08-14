@@ -260,6 +260,10 @@ export interface AuditState {
 	auditStartedAt: number;
 	/** 交付门禁基线（上次门禁覆盖的 HEAD 短哈希；持久化——扩展热重载后恢复，防吞修复提交）。 */
 	gatedHead: string | null;
+	/** 已注入过的签名时间戳（跨会话去重：同一签名只注入一次——审计结论不每个新会话重复弹出，v1.0.25）。 */
+	injectedSignatureAt: number | null;
+	/** 已注入过的中间态 auditStartedAt（跨会话去重，同上）。 */
+	injectedInterimAt: number | null;
 }
 
 const DEFAULT_STATE: AuditState = {
@@ -274,6 +278,8 @@ const DEFAULT_STATE: AuditState = {
 	lastAuditDurationMs: 0,
 	auditStartedAt: 0,
 	gatedHead: null,
+	injectedSignatureAt: null,
+	injectedInterimAt: null,
 };
 
 /** 审计状态文件路径：<cwd>/.pi/decision-auditor/state.json */
@@ -313,11 +319,11 @@ export function readAuditState(cwd: string): AuditState {
 							...(typeof (obj.signature as AuditSignature).reason === "string"
 								? { reason: (obj.signature as AuditSignature).reason }
 								: {}),
-							...(obj.signature as AuditSignature).head !== undefined
+							...((obj.signature as AuditSignature).head !== undefined
 								? {
 										head: (obj.signature as AuditSignature).head,
-								  }
-								: {},
+									}
+								: {}),
 						}
 					: null,
 			signatureConvLine:
@@ -334,6 +340,10 @@ export function readAuditState(cwd: string): AuditState {
 			auditStartedAt:
 				typeof obj.auditStartedAt === "number" ? obj.auditStartedAt : 0,
 			gatedHead: typeof obj.gatedHead === "string" ? obj.gatedHead : null,
+			injectedSignatureAt:
+				typeof obj.injectedSignatureAt === "number" ? obj.injectedSignatureAt : null,
+			injectedInterimAt:
+				typeof obj.injectedInterimAt === "number" ? obj.injectedInterimAt : null,
 		};
 	} catch {
 		return { ...DEFAULT_STATE };

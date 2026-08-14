@@ -190,7 +190,7 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 		"【窗口约束】常规轮你在 agent_end 之后异步运行（主 agent 已结束本轮，不阻塞等待你）——本轮产物已完整（不会有后续产物），直接给结论；发现 blocker 就给可操作的 blockers。交付轮（用户提交/发布/merge 时）主 agent 会同步等你的签名，此时尽快收尾：若审计超时，主 agent 会降级放行并把你的 blockers 注入下轮。",
 	);
 	lines.push(
-		"【state 写入纪律（最高优先，事故教训：2026-08-13 reviewer 实证审查期间 signatureConvLine 3139→3159 被并发改写——审计者 write 全量覆盖了 extension 并发推进的字段）】state.json 是共享文件（extension 与审计者子进程并发读写）。每次 write 前**必须 read 最新内容**；write 的 content = **最新原文 + 只修改你负责的字段**（中间态：auditFindings/inFlight；推进：convExtractedLine；收尾：signature/lastAuditedId/lastAuditAt/signatureConvLine；**gatedHead 是扩展的门禁基线字段，无论何时都必须原样保留**——v1.0.24 实证：审计者收尾写曾把 gatedHead 字段整个丢掉，导致热重载后修复提交再被吞），**其他字段原样保留**——禁止全量覆盖任何你没在最新 read 里见过的字段；write 后**立即 read 验证**你的字段生效且其他字段未被你的 write 改动；若 read 发现你负责的字段已被 extension 或他人推进（值 > 你 read 时的值）→ 基于最新值继续，绝不回退覆盖。**宁可中间态多写，不可覆盖他人字段**。",
+		"【state 写入纪律（最高优先，事故教训：2026-08-13 reviewer 实证审查期间 signatureConvLine 3139→3159 被并发改写——审计者 write 全量覆盖了 extension 并发推进的字段）】state.json 是共享文件（extension 与审计者子进程并发读写）。每次 write 前**必须 read 最新内容**；write 的 content = **最新原文 + 只修改你负责的字段**（中间态：auditFindings/inFlight；推进：convExtractedLine；收尾：signature/lastAuditedId/lastAuditAt/signatureConvLine；**gatedHead 是扩展的门禁基线字段，无论何时都必须原样保留**——v1.0.24 实证：审计者收尾写曾把 gatedHead 字段整个丢掉，导致热重载后修复提交再被吞；**injectedSignatureAt/injectedInterimAt 是扩展的跨会话注入去重标记，同样原样保留**（v1.0.25：丢则审计结论在每个新会话重复注入——「新会话还有泄露」报障根因）），**其他字段原样保留**——禁止全量覆盖任何你没在最新 read 里见过的字段；write 后**立即 read 验证**你的字段生效且其他字段未被你的 write 改动；若 read 发现你负责的字段已被 extension 或他人推进（值 > 你 read 时的值）→ 基于最新值继续，绝不回退覆盖。**宁可中间态多写，不可覆盖他人字段**。",
 	);
 	lines.push(
 		"【中间态交付（最重要，任何时刻被杀都要有产出）】用 write 更新 state.json 时**先写中间态再继续**（按【state 写入纪律】：只改 auditFindings/inFlight 两字段，其他字段原样保留）：启动后立即把 auditFindings **替换**为占位（如 ['审计开始']）——**清掉上一轮的旧 findings**（超时降级会把 findings 当 blockers 注入，陈旧/已解决内容会污染价值点）；之后每完成一步核实（推导目标 ✓ / 提取决策 ✓ / 读 diff ✓ / 逐维度进攻 ✓），就把该步的已确认事实与已发现缺口**追加**进 auditFindings。你随时可能被超时终止（SIGINT 强杀，收尾来不及）——已写入的 auditFindings 就是你的部分审计结果，主 agent 下轮会读到并交付给用户。**宁可中间态多写，不可最后一起写**：最后一步签名（passed/blocked）只是收尾，auditFindings 才是价值交付的主通道。**中间态写入必须保留 inFlight=true**（仅收尾签名时写 inFlight=false）——扩展按 inFlight===true 判定「审计被中断」并注入中间态，提前置 false 会让被杀后的 findings 无法交付。",
@@ -843,19 +843,21 @@ export default function (pi: ExtensionAPI): void {
 		try {
 			const root = projectRoot(ctx.cwd);
 			const state = readAuditState(root);
+			// 跨会话注入去重（v1.0.25，用户报障「为什么新会话还有泄露」）：
+			// injectedSignatureAt/injectedInterimAt 持久化到 state.json——同一签名/中间态
+			// 只注入一次（审计完成后首个 turn / followUp 场景），之后所有新会话不再重复弹出；
+			// 内存 map 优先（同会话内去重），热重载/新会话从 state 恢复（跨会话去重）
+			const injectedSig = injectedSignatureAt.get(root) ?? state.injectedSignatureAt;
+			const injectedInterim =
+				injectedInterimAt.get(root) ?? state.injectedInterimAt;
 			// 价值点注入（用户可观察）：blockers 结论与中间态发现——审计抓出的
 			// 具体缺口是价值，必须让用户看到（可感知），而非流程噪音（等待/计数/协商才隐藏）
 			const valueMsgs: string[] = [];
 			// 审计结论注入（价值点，用户可观察）：判据 = shouldInjectSignatureFindings 纯函数
 			// （行为级测试锁定）：blocked/passed-with-warning + blockers + 同签名未注入过 + 新鲜度
-			// （v1.0.24 跨会话泄露根治：签名带审计时 HEAD，当前 HEAD 已推进 = 签名可能过时 →
-			// 不注入陈旧 blockers——修复已落库但再审未跑时不重复刷屏「请修复」）
+			// （v1.0.24：签名带审计时 HEAD，当前 HEAD 已推进 = 签名可能过时 → 不注入陈旧 blockers）
 			if (
-				shouldInjectSignatureFindings(
-					state,
-					injectedSignatureAt.get(root),
-					gitHead(root),
-				)
+				shouldInjectSignatureFindings(state, injectedSig ?? undefined, gitHead(root))
 			) {
 				valueMsgs.push(
 					state.signature!.status === "passed-with-warning"
@@ -867,14 +869,27 @@ export default function (pi: ExtensionAPI): void {
 			// 审计中间态注入（价值点，用户可观察）：审计进行中被杀/超时时留下的部分结果 → 交付价值而非丢弃；
 			// 判据 = shouldInjectInterimFindings 纯函数（行为级测试锁定）：inFlight===true（审计仍在跑 = 中断；
 			// 纯咨询轮审计者主动写 inFlight=false，不注入——零注入承诺，D-006）；同轮去重（injectedInterimAt）
-			if (shouldInjectInterimFindings(state, injectedInterimAt.get(root))) {
+			if (shouldInjectInterimFindings(state, injectedInterim ?? undefined)) {
 				valueMsgs.push(
 					`结对审计被中断/未完成（可能来自上次会话），已确认的部分发现（价值点）：\n${state.auditFindings.map((f) => `- ${f}`).join("\n")}\n\n供参考，可据此继续处理。`,
 				);
 				injectedInterimAt.set(root, state.auditStartedAt ?? Date.now());
 			}
-			// 价值点 → display:true（用户可观察）
+			// 价值点 → display:true（用户可观察）；注入后立即持久化去重标记（跨会话不重复注入）
 			if (valueMsgs.length > 0) {
+				try {
+					writeAuditState(
+						root,
+						{
+							...readAuditState(root),
+							injectedSignatureAt: injectedSignatureAt.get(root) ?? null,
+							injectedInterimAt: injectedInterimAt.get(root) ?? null,
+						},
+						auditStateMtime(root),
+					);
+				} catch {
+					/* noop：mtime 冲突放弃（M3），下轮重试 */
+				}
 				return {
 					message: {
 						customType: "pi-pair-findings",
@@ -1184,6 +1199,22 @@ export default function (pi: ExtensionAPI): void {
 						`结对审计发现缺口（请处理，处理后下轮自动再审）：\n${st.signature.blockers.map((b) => `- ${b}`).join("\n")}`,
 						{ deliverAs: "followUp" },
 					);
+					// followUp 已交付 → 记录跨会话去重（v1.0.25：避免新会话 before_agent_start
+					// 再次注入同一签名——「新会话还有泄露」根治）
+					injectedSignatureAt.set(completedCwd, st.signature.at ?? Date.now());
+					try {
+						writeAuditState(
+							completedCwd,
+							{
+								...readAuditState(completedCwd),
+								injectedSignatureAt:
+									injectedSignatureAt.get(completedCwd) ?? null,
+							},
+							auditStateMtime(completedCwd),
+						);
+					} catch {
+						/* noop：mtime 冲突放弃（M3），下轮注入路径重试 */
+					}
 				}
 			} catch {
 				/* noop */

@@ -185,6 +185,34 @@ test("审计状态读写与 entriesSinceLastAudit", () => {
 	assert.ok(fs.existsSync(auditStatePath(dir)));
 });
 
+test("injectedSignatureAt/injectedInterimAt：跨会话注入去重持久化（v1.0.25 新会话泄露根治）", () => {
+	const dir = tmpDir();
+	// 旧状态/首次升级 → null（不注入去重，首次注入放行）
+	const st0 = readAuditState(dir);
+	assert.equal(st0.injectedSignatureAt, null);
+	assert.equal(st0.injectedInterimAt, null);
+	// 写去重标记 → 读回（新会话 before_agent_start 依赖此值跳过已注入签名）
+	writeAuditState(
+		dir,
+		{ ...readAuditState(dir), injectedSignatureAt: 1000, injectedInterimAt: 2000 },
+	);
+	const st1 = readAuditState(dir);
+	assert.equal(st1.injectedSignatureAt, 1000);
+	assert.equal(st1.injectedInterimAt, 2000);
+	// 非数值 → 消毒为 null（不污染去重判定）
+	writeAuditState(
+		dir,
+		{ ...readAuditState(dir), injectedSignatureAt: "bad" as unknown as number },
+	);
+	assert.equal(readAuditState(dir).injectedSignatureAt, null);
+	// resetForSessionStart 不清去重标记（跨会话去重必须持久存活）
+	resetForSessionStart(dir);
+	assert.equal(readAuditState(dir).injectedSignatureAt, null); // 上面消毒后已是 null
+	writeAuditState(dir, { ...readAuditState(dir), injectedSignatureAt: 3000 });
+	resetForSessionStart(dir);
+	assert.equal(readAuditState(dir).injectedSignatureAt, 3000);
+});
+
 test("gatedHead：门禁基线持久化（扩展热重载恢复，v1.0.23）", () => {
 	const dir = tmpDir();
 	// 旧状态文件/首次升级 → null（回退当前 HEAD 兜底）
@@ -412,8 +440,10 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	// 会话隔离规则注入计数：审计/L2 prompt 用 ${runId}（v1.0.24 会话级 RUN_ID），
 	// 写入点与注释保留 ${RUN_ID} 形态——两种都算（防重构删掉）
 	const ruleCount =
-		src.split("<!--run:${RUN_ID}-->").length - 1 +
-		src.split("<!--run:${runId}-->").length - 1;
+		src.split("<!--run:${RUN_ID}-->").length -
+		1 +
+		src.split("<!--run:${runId}-->").length -
+		1;
 	assert.ok(
 		ruleCount >= 4,
 		`4 处审计/L2 prompt 必须注入会话隔离规则（防重构删掉），实际 ${ruleCount} 处`,
@@ -530,12 +560,19 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		src.includes("完成即停") && src.includes("签名后的一切继续都是浪费"),
 		"审计者 prompt 必须含完成即停边界（签名后不再扩大范围）",
 	);
-	// B1：中间态注入判据 = shouldInjectInterimFindings 纯函数（行为级测试锁定，非字符串守卫）
+	// B1：中间态注入判据 = shouldInjectInterimFindings 纯函数（行为级测试锁定，非字符串守卫）；
+	// v1.0.25：跨会话去重持久化——判据入参从 state 恢复的持久化值（injectedInterim ?? undefined）
 	assert.ok(
-		src.includes(
-			"shouldInjectInterimFindings(state, injectedInterimAt.get(root))",
-		),
+		src.includes("shouldInjectInterimFindings(state, injectedInterim ?? undefined)") ||
+			src.includes("shouldInjectInterimFindings(state, injectedInterimAt.get(root))"),
 		"中间态注入必须走 shouldInjectInterimFindings 纯函数（行为级测试在 lib 单测）",
+	);
+	// v1.0.25：注入去重持久化——injectedSignatureAt/injectedInterimAt 必须落 state.json
+	// （同一签名只注入一次，新会话不再重复弹出审计结论——「新会话还有泄露」根治）
+	assert.ok(
+		src.includes("injectedSignatureAt: injectedSignatureAt.get(root) ?? null") &&
+			src.includes("injectedInterimAt: injectedInterimAt.get(root) ?? null"),
+		"注入后必须持久化去重标记到 state.json（跨会话去重，v1.0.25）",
 	);
 	// B2：convExtractedLine 单位钳制（审计者写文件行号超界 → 钳制，防对话增量触发断线）
 	assert.ok(
@@ -748,7 +785,10 @@ test("recordSignature failed：不递增 blockedStreak、不推进 signatureConv
 	assert.ok(convLineAfterAppend > before.signatureConvLine);
 
 	// failed 签名（spawn 失败）
-	recordSignature(dir, { status: "failed", reason: "审计触发失败（spawn 失败）" });
+	recordSignature(dir, {
+		status: "failed",
+		reason: "审计触发失败（spawn 失败）",
+	});
 	const after = readAuditState(dir);
 	assert.equal(after.signature?.status, "failed");
 	assert.equal(after.signature?.reason, "审计触发失败（spawn 失败）");
@@ -1038,7 +1078,10 @@ test("shouldInjectSignatureFindings：结论注入判据 + 新鲜度校验（v1.
 	// blocked + head 与当前一致 → 注入
 	assert.equal(shouldInjectSignatureFindings(base, undefined, "abc1234"), true);
 	// HEAD 已推进（修复提交落库但再审未跑）→ 签名过时，不注入陈旧 blockers
-	assert.equal(shouldInjectSignatureFindings(base, undefined, "def5678"), false);
+	assert.equal(
+		shouldInjectSignatureFindings(base, undefined, "def5678"),
+		false,
+	);
 	// 同签名已注入过 → 去重
 	assert.equal(shouldInjectSignatureFindings(base, 1000, "abc1234"), false);
 	// head 缺失（旧版本签名/审计者漏写）→ 兼容注入（无法校验，不丢交付）
@@ -1069,7 +1112,14 @@ test("shouldInjectSignatureFindings：结论注入判据 + 新鲜度校验（v1.
 		false,
 	);
 	// 无签名 → 不注入
-	assert.equal(shouldInjectSignatureFindings({ ...base, signature: null }, undefined, "abc1234"), false);
+	assert.equal(
+		shouldInjectSignatureFindings(
+			{ ...base, signature: null },
+			undefined,
+			"abc1234",
+		),
+		false,
+	);
 	// passed-with-warning（降级）+ head 一致 → 注入（价值点保留）
 	assert.equal(
 		shouldInjectSignatureFindings(
