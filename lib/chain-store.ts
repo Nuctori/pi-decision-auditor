@@ -251,6 +251,8 @@ export interface AuditState {
 	lastAuditDurationMs: number;
 	/** 最近一次审计的启动时间戳（扩展 spawn 时写；审计者收尾算 duration）。 */
 	auditStartedAt: number;
+	/** 交付门禁基线（上次门禁覆盖的 HEAD 短哈希；持久化——扩展热重载后恢复，防吞修复提交）。 */
+	gatedHead: string | null;
 }
 
 const DEFAULT_STATE: AuditState = {
@@ -264,6 +266,7 @@ const DEFAULT_STATE: AuditState = {
 	auditFindings: [],
 	lastAuditDurationMs: 0,
 	auditStartedAt: 0,
+	gatedHead: null,
 };
 
 /** 审计状态文件路径：<cwd>/.pi/decision-auditor/state.json */
@@ -315,6 +318,7 @@ export function readAuditState(cwd: string): AuditState {
 					: 0,
 			auditStartedAt:
 				typeof obj.auditStartedAt === "number" ? obj.auditStartedAt : 0,
+			gatedHead: typeof obj.gatedHead === "string" ? obj.gatedHead : null,
 		};
 	} catch {
 		return { ...DEFAULT_STATE };

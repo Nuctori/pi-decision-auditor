@@ -561,9 +561,14 @@ export default function (pi: ExtensionAPI): void {
 			cachedProjectRoot = null; // 新会话重新解析（或读 PI_PAIR_PROJECT_ROOT）
 			const root = projectRoot(ctx.cwd);
 			resetForSessionStart(root);
-			// 交付门禁基线：会话起始 HEAD（非 git 仓库 → 无门禁）
+			// 交付门禁基线：会话起始 HEAD（非 git 仓库 → 无门禁）；持久化——
+			// 扩展热重载（/reload / pi install）不重发 session_start，内存基线丢失后
+			// 惰性初始化从 state 恢复（v1.0.23：防热重载把刚提交的修复吞成基线）
 			const head = gitHead(root);
-			if (head !== null) gatedHead.set(root, head);
+			if (head !== null) {
+				gatedHead.set(root, head);
+				persistGatedHead(root, head);
+			}
 		} catch {
 			/* noop */
 		}
@@ -762,6 +767,19 @@ export default function (pi: ExtensionAPI): void {
 	// 不用词表/模式匹配判定「完工」（语义判断不可靠——v1.0.17 废弃正则信号词的先例）；
 	// 本轮产生了 git 提交 = 交付发生的客观事实。gatedHead 记录上次门禁覆盖的 HEAD。
 	const gatedHead = new Map<string, string>();
+	/** 持久化门禁基线到 state.json（热重载后惰性初始化恢复用——不把热重载后刚提交的修复吞成基线）。
+	 *  失败静默（M3 mtime 冲突放弃，下轮 agent_end 重试）。 */
+	const persistGatedHead = (root: string, baseline: string): void => {
+		try {
+			writeAuditState(
+				root,
+				{ ...readAuditState(root), gatedHead: baseline },
+				auditStateMtime(root),
+			);
+		} catch {
+			/* noop */
+		}
+	};
 	// 本轮决策信号（decision_add 调用置位，agent_end 消费）——对话增量触发审计的门控
 	let roundDecisionMade = false;
 	// ---- findings 注入去重：两个独立 map 防互相覆盖（D1）----
@@ -846,10 +864,17 @@ export default function (pi: ExtensionAPI): void {
 			// 客观信号，无词表/模式匹配（完工语义判断不可靠，v1.0.17 先例）；
 			// 问句/任意措辞天然免疫（不产生提交就不触发）
 			const head = gitHead(root);
-			// gatedHead 惰性初始化：扩展热重载（/reload）不会重发 session_start → map 空 →
-			// 首次 agent_end 把当前 HEAD 建为基线（本轮不门禁），杜绝「无提交也触发门禁+L2」误触发
+			// gatedHead 惰性初始化：扩展热重载（/reload / pi install）不重发 session_start → map 空 →
+			// 从 state 恢复持久化基线（v1.0.23）：热重载发生在修复轮中途时，当前 HEAD 已是刚提交的
+			// 修复——若把当前 HEAD 建为基线，本轮修复提交被吞（hasNewCommit=false），再审永不触发，
+			// 陈旧 blocked 签名反复注入每个新会话（实证：08-13 21:07 修复提交后无审计者 spawn）。
+			// state 无基线（旧版本首次升级）→ 回退当前 HEAD 并持久化（本轮不门禁，杜绝
+			// 「无提交也触发门禁+L2」误触发；后续热重载恢复该基线）
 			if (head !== null && !gatedHead.has(root)) {
-				gatedHead.set(root, head);
+				const st = readAuditState(root);
+				const baseline = st.gatedHead ?? head;
+				gatedHead.set(root, baseline);
+				persistGatedHead(root, baseline);
 			}
 			const hasNewCommit = head !== null && gatedHead.get(root) !== head;
 			// 工作判据（便宜信号 + 决策信号，无需语义理解——语义判断交给审计者 AI）：
@@ -1005,11 +1030,13 @@ export default function (pi: ExtensionAPI): void {
 								],
 				});
 				gatedHead.set(root, head);
+				persistGatedHead(root, head);
 				stopAuditBreath(); // 超时降级：灯灭
 				return;
 			}
 			// 门禁完成（passed/blocked/降级）——本次提交已覆盖；下次提交重新门禁
 			gatedHead.set(root, head);
+			persistGatedHead(root, head);
 			stopAuditBreath(); // 门禁轮同步完成：灯灭
 			// 审计者已签名（passed/blocked），blockedStreak 已由 recordSignature 递增/清零
 			if (sig.status === "passed" || sig.status === "passed-with-warning") {

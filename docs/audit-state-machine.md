@@ -14,6 +14,7 @@
 | `blockedStreak` | `0..3` | 连续 blocked 次数（A2 门禁） |
 | `signatureConvLine` | `number` | 签名覆盖到的 convlog 对话行数（每次签名都推进到当前行，needsSignoff 用） |
 | `auditFindings` | `string[]` | 审计中间态（审计者边审边追加，被杀/超时也可交付）；纯咨询占位（`"本轮纯咨询，无审计对象"`）不算真实中间态 |
+| `gatedHead` | `null \| 短哈希` | 交付门禁基线（上次门禁覆盖的 HEAD；v1.0.23 持久化——扩展热重载后惰性初始化从 state 恢复，不把热重载后刚提交的修复吞成基线） |
 
 > **已移除状态/字段**：`timeout`（v1.0.15 前存在）——超时直接降级为
 > `passed-with-warning` + blockers（无 600s 协商黑洞）。`chainFindings` / `auditorRunId` /

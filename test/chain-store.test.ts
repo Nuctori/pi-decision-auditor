@@ -184,6 +184,24 @@ test("审计状态读写与 entriesSinceLastAudit", () => {
 	assert.ok(fs.existsSync(auditStatePath(dir)));
 });
 
+test("gatedHead：门禁基线持久化（扩展热重载恢复，v1.0.23）", () => {
+	const dir = tmpDir();
+	// 旧状态文件/首次升级 → null（回退当前 HEAD 兜底）
+	assert.equal(readAuditState(dir).gatedHead, null);
+	// 写基线 → 读回（热重载后惰性初始化依赖此值，防吞修复提交）
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		gatedHead: "2a0b55b",
+	});
+	assert.equal(readAuditState(dir).gatedHead, "2a0b55b");
+	// 非字符串值 → 消毒为 null（不污染基线判定）
+	writeAuditState(dir, {
+		...readAuditState(dir),
+		gatedHead: 123 as unknown as string,
+	});
+	assert.equal(readAuditState(dir).gatedHead, null);
+});
+
 test("convlog 追加与截断", () => {
 	const dir = tmpDir();
 	appendConv(dir, "user", "请给 calc.py 加一个除法函数");
@@ -465,11 +483,23 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		src.includes("state.signature.at >= startedAt"),
 		"完成判定必须用 signature.at >= auditStartedAt（blocked 也是完成，完成判定只看 at）",
 	);
-	// 门禁基线：会话起始 HEAD 初始化（非 git 仓库无门禁）
+	// 门禁基线：会话起始 HEAD 初始化 + 持久化（非 git 仓库无门禁）
 	assert.ok(
 		src.includes("const head = gitHead(root)") &&
-			src.includes("if (head !== null) gatedHead.set(root, head)"),
-		"session_start 必须初始化 gatedHead 基线（非 git 仓库不设门禁）",
+			src.includes("gatedHead.set(root, head)") &&
+			src.includes("persistGatedHead(root, head)"),
+		"session_start 必须初始化并持久化 gatedHead 基线（热重载后惰性初始化恢复）",
+	);
+	// M5：惰性初始化从 state 恢复持久化基线——热重载把当前 HEAD 建为基线会吞掉刚提交的
+	// 修复（hasNewCommit=false → 再审永不触发 → 陈旧 blocked 签名反复注入每个新会话）；
+	// 位置语义：恢复逻辑必须在 hasNewCommit 计算之前；判据 = state.gatedHead ?? head
+	const lazyInit = src.indexOf("st.gatedHead ?? head");
+	const hasNewCommitCalc = src.indexOf("const hasNewCommit =");
+	assert.ok(
+		lazyInit !== -1 &&
+			hasNewCommitCalc !== -1 &&
+			lazyInit < hasNewCommitCalc,
+		"gatedHead 惰性初始化必须从 state 恢复持久化基线（st.gatedHead ?? head）且先于 hasNewCommit 计算——防热重载吞修复提交（v1.0.23）",
 	);
 	// M4：残留锁兜底（文件锁在但内存锁无 → 释放，防审计永久停摆）
 	// 行为级：判据走 shouldClearStaleLock 纯函数（lib 单测锁定：清锁不依赖 hasWork 信号）；
