@@ -83,20 +83,22 @@ each agent_end (when real work exists)
      · one task = capture decisions into chain + audit artifacts + sign
      · interim results written to state.json as auditFindings — killed mid-audit still delivers value
      · plan decisions without decision_add are picked up by the next artifact round's auditor (cursor stays put)
-  └─ delivery rounds (submit/publish/merge/deploy): agent_end awaits signature (300s cap)
+  └─ delivery rounds (this round has a git HEAD change — objective commit signal): spawn,
+      then poll signature in background (2s interval, 300s cap) — agent_end does NOT block
       · adversarial 5-dimension attack on artifacts (guilty until proven innocent)
       · independently verify Context facts vs repository
       · continuous delivery: any blocker found → immediately notify main agent (fix → re-audit until clean)
       · passed → end ✓
       · 3× still blocked → passed-with-warning release (end is end)
       · timeout → release with warning + findings injected next round (no negotiate blackhole)
+      · new user message → gate wait released (verdict still delivered via followUp)
 
-L2 — delivery review (on "submit/publish/merge/deploy")
+L2 — delivery review (same git HEAD change signal)
   └─ only when real deliverables exist (gate: no git diff & no decisions → skip, no empty review)
   └─ 1 fresh reviewer, full-dimension deep review (correctness / goal-alignment / security-robustness)
 ```
 
-**Fresh-spawn pairing**: every audit spawns a fresh auditor run (`context:"fork"` — it inherits this session's conversation context, so it understands what "this session" is doing without a persistent run). The run ends when the audit ends — no resident process, no lifecycle bookkeeping, no residue. Normal rounds are async (no blocking, findings injected without user-visible noise); only delivery rounds await the signature. Any blocker found at any stage is delivered to the main agent immediately for fixing, re-audited until clean — the user sees the fixed result, not the audit process. Findings are value points: blockers / interim auditFindings are injected user-visible (`display:true`); only internal hints stay hidden.
+**Fresh-spawn pairing**: every audit spawns a fresh auditor run (`context:"fork"` — it inherits this session's conversation context, so it understands what "this session" is doing without a persistent run). The run ends when the audit ends — no resident process, no lifecycle bookkeeping, no residue. Normal rounds are async (no blocking, findings injected without user-visible noise); delivery rounds gate on the signature via non-blocking background polling (2s interval, 300s cap; a new user message releases the wait early, the verdict is still delivered). Any blocker found at any stage is delivered to the main agent immediately for fixing, re-audited until clean — the user sees the fixed result, not the audit process. Findings are value points: blockers / interim auditFindings are injected user-visible (`display:true`); only internal hints stay hidden.
 
 **Layered cost control**: L1 (the single audit) runs per round with real artifacts; L2 runs once per delivery, gated on real deliverables. A high-signal **process log** (decision-intent summaries, ≤200 chars each, roll-trimmed) lets the auditor check artifacts against your reasoning trajectory instead of reverse-engineering it — CI bench confirms **zero measurable time cost** for this communication channel.
 
@@ -147,7 +149,7 @@ Each round the auditor:
 3. **Audit**: adversarial attack in 7 dimensions — atomicity / correctness / consistency / cohesion / completeness + **mechanism integrity** (trigger chains have live call sites) + **runtime behavior vs claim** (blocking/async claims hold across print/TUI/RPC, or mode differences are flagged)
 4. **Sign**: artifacts pass → `signature=passed`; findings → `signature=blocked` with actionable blockers (the main agent fixes them immediately)
 
-Lifecycle rules: every audit is a fresh-spawn run (`context:"fork"` inheriting this session's context). Normal rounds run async after `agent_end` (the agent does not block); delivery rounds (a git HEAD change — an objective signal, no keyword matching for "done") await the signature (300s cap — on timeout, release with warning and inject findings next round; no negotiate blackhole). The auditor may `contact_supervisor` for clarification during its run (60s cap — otherwise decide from evidence). Interim findings are written continuously to `auditFindings`; the run stops immediately after signing (完成即停).
+Lifecycle rules: every audit is a fresh-spawn run (`context:"fork"` inheriting this session's context). Normal rounds run async after `agent_end` (the agent does not block); delivery rounds (a git HEAD change this round — an objective signal, no keyword matching for "done") gate on the signature via non-blocking background polling (2s interval, 300s cap — on timeout, release with warning and inject findings next round; no negotiate blackhole; a new user message releases the wait early, the verdict is still delivered). The auditor may `contact_supervisor` for clarification during its run (60s cap — otherwise decide from evidence). Interim findings are written continuously to `auditFindings`; the run stops immediately after signing (完成即停).
 
 ## Tools
 

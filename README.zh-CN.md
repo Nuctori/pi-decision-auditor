@@ -82,20 +82,21 @@ pi install npm:pi-pair
      · 一次任务 = 捕获决策入链 + 审产物 + 签名
      · 中间结果边审边写 state.json（auditFindings）——中途被杀也交付价值
      · 没用 decision_add 的 plan 决策由下一个产物轮的审计者顺带提取（游标停留）
-  └─ 交付轮（提交/发布/merge/部署）：agent_end 等签名（300s 上限）
+  └─ 交付轮（本轮 git HEAD 变化——客观提交信号）：spawn 后后台轮询签名（2s 间隔，300s 上限）——agent_end 不阻塞
       · 对抗式五维度进攻产物（guilty until proven innocent）
       · 独立核实 Context 事实 vs 仓库
       · 持续交付：发现任何 blocker → 立即通知主 agent（修复 → 再审，直到干净）
       · passed → end ✓
       · 3 次仍不过 → passed-with-warning 降级放行（end 就是 end）
       · 超时 → 降级放行 + findings 下轮注入（无 600s 协商黑洞）
+      · 用户发新消息 → 解除门禁等待（结论仍经 followUp 交付）
 
-L2 — 交付审查（用户说"提交/发布/merge/部署"等）
+L2 — 交付审查（同 git HEAD 变化信号）
   └─ 仅当有真实交付物时（门禁：无 git diff 且无决策 → 跳过，不空审）
   └─ 1 个 fresh reviewer 全维度深度审查（正确性 / 目标一致性 / 安全健壮性）
 ```
 
-**fresh spawn 结对**：每次审计新起一个审计者 run（`context:"fork"`——继承本会话的对话上下文，理解"本会话"在做什么，无需常驻 run）。审计结束 run 即结束——无常驻进程、无生命周期登记、无残留。常规轮异步（不阻塞，findings 注入不打扰用户）；仅交付轮等签名。任何阶段发现任何 blocker 立即交付主 agent 处理、再审直到干净——用户看到的是修好的结果，不是审计的流程。**价值点可观察**：blockers / 中间态 auditFindings 以 `display:true` 注入（用户感知价值）；仅内部提示保持隐藏。
+**fresh spawn 结对**：每次审计新起一个审计者 run（`context:"fork"`——继承本会话的对话上下文，理解"本会话"在做什么，无需常驻 run）。审计结束 run 即结束——无常驻进程、无生命周期登记、无残留。常规轮异步（不阻塞，findings 注入不打扰用户）；交付轮经后台轮询门禁签名（2s 间隔，300s 上限；用户发新消息可提前解除等待，结论仍交付）。任何阶段发现任何 blocker 立即交付主 agent 处理、再审直到干净——用户看到的是修好的结果，不是审计的流程。**价值点可观察**：blockers / 中间态 auditFindings 以 `display:true` 注入（用户感知价值）；仅内部提示保持隐藏。
 
 **分层成本控制**：单层审计（L1）在有真实产物的轮次运行；L2 每次交付跑一次、且以真实交付物为门禁。高信号**过程日志**（决策意图摘要，≤200 字符/条，滚动截断）让审计者对照你的推理轨迹审产物而非反推——CI 跑分确认**该通信通道零可测时间成本**。
 
@@ -146,7 +147,7 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 3. **审计**：对抗式七维度进攻——原子性 / 正确性 / 一致性 / 内聚 / 完备 + **机制完整性**（触发链每环有实际调用点）+ **运行时行为 vs 声明**（阻塞/异步声明在 print/TUI/RPC 各模式成立，或标注模式差异）
 4. **签名**：产物通过 → `signature=passed`；发现问题 → `signature=blocked`（blockers 具体可操作，主 agent 当场修复）
 
-生命周期规约：每次审计都是 fresh spawn run（`context:"fork"` 继承本会话上下文）。常规轮在 agent_end 后异步运行（主 agent 不阻塞）；交付轮（提交/发布/merge/部署）等签名（300s 上限——超时降级放行 + findings 下轮注入，无协商黑洞）。审计者运行期间可 `contact_supervisor` 澄清（60s 上限，否则按证据判定）。中间发现持续写入 `auditFindings`；签名后立即停止（完成即停）。
+生命周期规约：每次审计都是 fresh spawn run（`context:"fork"` 继承本会话上下文）。常规轮在 agent_end 后异步运行（主 agent 不阻塞）；交付轮（本轮 git HEAD 变化——客观提交信号）经后台轮询门禁签名（2s 间隔，300s 上限——超时降级放行 + findings 下轮注入，无协商黑洞；用户发新消息可提前解除等待，结论仍交付）。审计者运行期间可 `contact_supervisor` 澄清（60s 上限，否则按证据判定）。中间发现持续写入 `auditFindings`；签名后立即停止（完成即停）。
 
 ## 工具
 
@@ -189,7 +190,7 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 
 ## 已知限制
 
-- **`pi -p`（print 模式）**：`agent_end` 审计不阻塞——pi 在 spawn await 处丢弃扩展 handler；审计者在后台完成并仍签名，但门禁的"阻塞"语义只在交互模式（TUI / RPC）完整生效。
+- **`pi -p`（print 模式）**：`agent_end` 审计不阻塞——pi 在 spawn await 处丢弃扩展 handler；审计者在后台完成并仍签名。门禁经后台轮询判定（非阻塞），print 模式无 UI 通知但状态照常落盘、结论经注入路径交付。
 - **同模型审计者**：默认与主 agent 同模型——对抗立场缓解同构偏见，但共同盲区仍可能（双方都漏同一个问题）。跨模型审计在 roadmap。
 - **CI E2E** 用免费免 key 模型（opencode CLI）；审计结论天然依赖模型——CI 断言机制（捕获/签名/锁），不断言结论质量。
 

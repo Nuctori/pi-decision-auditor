@@ -15,8 +15,8 @@
    决策链 / 上次签名 / process log 路径）——审计者理解"同一会话"在做什么，而非从零开始。
 3. **真实产物才审计**：git 未提交改动 或 对话增量（审计者 AI 判定有无决策性工作）→ 审；
    纯咨询轮审计者快速退出、零注入。
-4. **交付轮同步门禁，常规轮异步**：交付词（提交/发布/merge/部署…）→ agent_end 等签名；
-   常规轮 → spawn 后不阻塞。
+4. **交付轮门禁，常规轮异步（均不阻塞）**：git HEAD 变化（客观提交信号）→ spawn 后后台轮询签名
+   （2s 间隔，300s 上限；用户发新消息可解除门禁等待，结论仍交付）；常规轮 → spawn 后不阻塞。
 5. **价值点可观察，流程隐藏**：blockers/auditFindings → display:true 注入（用户感知价值）；
    等待/计数/协商等流程信息不呈现（无 chainFindings 内部通道——单层审计直接签名）。
 6. **持续交付 + 中间态**：审计者边审边写 auditFindings（被杀也有产出）；
@@ -38,7 +38,7 @@
 ```
 agent_end（有产物）:
   ├─ 常规轮 → fresh spawn（异步，不 await）→ inFlight=true
-  ├─ 交付轮 → fresh spawn → await 签名（300s 上限）
+  ├─ 交付轮 → fresh spawn → 后台轮询签名（2s 间隔，300s 上限；用户消息可解除等待）
   │     ├─ passed → 门禁通过
   │     ├─ blocked（streak<3）→ 保留 blocked，下轮注入
   │     ├─ blocked（streak≥3）→ 降级 passed-with-warning

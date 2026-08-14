@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.41] - 2026-08-15
+
+v1.0.39/40 复核 reviewer（无 blocker）P2 note——文档同步（项目文档同步纪律，v1.0.31 先例）：
+
+- **README/README.zh-CN/architecture.md 门禁语义同步**：旧文档仍描述「交付轮同步等签名（300s 上限）/ await 签名 / 仅交付轮等签名」——v1.0.39 已改为非阻塞后台轮询 + message_start 用户消息解除等待。9 处替换：README.md（How it works 图 + Fresh-spawn pairing + Lifecycle rules）、README.zh-CN.md（工作原理图 + fresh spawn 结对 + 生命周期规约 + print 模式已知限制）、architecture.md（设计原则 4 + agent_end 转移图）
+- **顺带修正 D-022 时代遗留触发描述**：README 两处「delivery rounds (submit/publish/merge/deploy) / L2 交付审查（用户说"提交/发布/merge/部署"）」→ git HEAD 客观信号（v1.0.26 已改触发，文档未同步）
+- 跳过（reviewer P3）：取消路径不记录 recordAuditDuration（metrics-only，无行为影响）；D-004/D-044 supersede 交叉指针（D-044 Context 已写明同步门禁失败，实质语义在）
+- 测试：57/57 通过，tsc 0 错误
+
 ## [1.0.40] - 2026-08-15
 
 v1.0.39 审计者 blocker（机制完整性维度）：门禁轮询 timer 生命周期缺口——跨会话轮询泄漏：
