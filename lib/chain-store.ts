@@ -233,6 +233,8 @@ export interface AuditSignature {
 	reason?: string;
 	/** 本轮审计的 runId。 */
 	runId?: string;
+	/** 审计时的产物基线 HEAD 短哈希（注入新鲜度校验：HEAD 已推进 = 签名可能过时，不注入陈旧 blockers）。 */
+	head?: string | null;
 }
 
 export interface AuditState {
@@ -311,6 +313,11 @@ export function readAuditState(cwd: string): AuditState {
 							...(typeof (obj.signature as AuditSignature).reason === "string"
 								? { reason: (obj.signature as AuditSignature).reason }
 								: {}),
+							...(obj.signature as AuditSignature).head !== undefined
+								? {
+										head: (obj.signature as AuditSignature).head,
+								  }
+								: {},
 						}
 					: null,
 			signatureConvLine:
@@ -412,7 +419,7 @@ export function recordSignature(
 				...state,
 				// 签名 = 审计结束：释放文件锁（防 decision_signoff 路径泄漏 inFlight → 后续审计永久停摆）
 				inFlight: false,
-				signature: { ...sig, at: Date.now() },
+				signature: { ...sig, at: Date.now(), head: gitHead(cwd) },
 				signatureConvLine: nextConvLine,
 				blockedStreak,
 			},
@@ -542,6 +549,33 @@ export function shouldInjectInterimFindings(
 		return false;
 	}
 	return state.inFlight === true || state.signature === null;
+}
+
+/**
+ * 审计结论注入判据（v1.0.24 行为级测试目标，从 before_agent_start 抽出的纯函数）：
+ * 注入 ⇔ blocked/passed-with-warning 且 blockers 非空 且 同签名未注入过 且 签名新鲜。
+ * 新鲜度（跨会话审计泄露根治）：签名带审计时的产物基线 HEAD——当前 HEAD 已推进
+ * （修复提交已落库但再审未跑）→ 签名可能过时 → 不注入陈旧 blockers（实证：08-13
+ * 已修复的 2 缺口在 16:28 与次日会话开头反复注入，用户报障「会话刚开始就有审计结果」）。
+ * head 缺失（旧版本签名/审计者漏写）→ 兼容注入（无法校验时保持旧行为，不丢交付）。
+ */
+export function shouldInjectSignatureFindings(
+	state: AuditState,
+	injectedAt: number | undefined,
+	currentHead: string | null,
+): boolean {
+	if (!state.signature) return false;
+	const sig = state.signature;
+	if (sig.status !== "blocked" && sig.status !== "passed-with-warning") {
+		return false;
+	}
+	if (!sig.blockers || sig.blockers.length === 0) return false;
+	if (injectedAt === sig.at) return false;
+	// 新鲜度：签名基于的 HEAD 与当前一致才注入；无法校验（head 缺失）→ 兼容注入
+	if (sig.head !== undefined && sig.head !== null && currentHead !== sig.head) {
+		return false;
+	}
+	return true;
 }
 
 /**
@@ -729,10 +763,13 @@ export function convLogLineCount(cwd: string): number {
 
 /**
  * 检测 convlog 中"并发其他 pi 实例的真实用户行"数量（多实例混写检测）。
- * 判定：本实例首行**之后**（实时交错追加）、带 runId 标记、非本实例、且非审计任务
+ * 判定：本实例首行**之后**（实时交错追加）、带 runId 标记、非本进程、且非审计任务
  * 注入（Task: 前缀）的 ## 👤 行。
  * >0 → 同一 cwd 下存在**并发**实例的真实会话 → 自动审计应跳过（run 级过滤 vs 全局
  * 状态机错配时，多实例下审计会错审/旁路，显式降级优于静默错审）。
+ * 进程判定（v1.0.24）：run 标记 = `run-<pid>-<随机>`——**pid 不同才算并发实例**；
+ * 同 pid 不同 run（同进程切会话：TUI 会话切换/新会话共享扩展模块，run 标记随会话
+ * 重新生成）不算外来——切会话后 A 会话的行不能把 B 会话的审计误判为多实例错审。
  * 本实例首行**之前**的历史行（已结束的旧会话）不算——convlog 按 cwd 永久追加，
  * 若计入历史行则第二个会话起守卫恒 >0，自动审计永久停摆（实证：本仓 165+97 行
  * 历史 run 标记曾导致复审永不触发）。并发检测只需一侧命中：先启动的实例会在
@@ -753,6 +790,9 @@ export function convlogForeignRuns(cwd: string, ownRunId: string): number {
 			}
 		}
 		if (firstOwn < 0) return 0; // 本实例尚未写入（首条消息之前），无可判定
+		// 并发 = 不同进程；ownRunId 带 pid 前缀（run-<pid>-…）时按 pid 判定，
+		// 否则（旧格式 run-xxx）回退到 run 标记全等判定
+		const ownPid = /^run-(\d+)-/.exec(ownRunId)?.[1];
 		let n = 0;
 		for (let i = firstOwn + 1; i < lines.length; i++) {
 			const t = lines[i].trim();
@@ -762,6 +802,7 @@ export function convlogForeignRuns(cwd: string, ownRunId: string): number {
 			const m = t.match(/<!--run:([a-zA-Z0-9-]+)-->\s*$/);
 			if (!m) continue; // 无标记（旧历史/未升级实例）——无法归属，不误报
 			if (m[1] === ownRunId) continue; // 本实例
+			if (ownPid && m[1].startsWith(`run-${ownPid}-`)) continue; // 同进程其他会话（切会话不算并发）
 			if (t.includes("Task:")) continue; // 审计者任务注入（user-role 记录），非真实会话
 			n++;
 		}

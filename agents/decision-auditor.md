@@ -108,6 +108,7 @@ acceptanceRole: writer
 **发散核实（对抗式的另一半——收敛核实只证明"声明的没错"，发散核实找"没声明但影响结果的"）**：
 
 在目标/决策/产物三个锚点内主动发散，攻击点：
+
 - **未声明的假设**：产物依赖了什么隐含前提（数据规模/时序/权限/单写者）？前提不成立会怎样？
 - **被忽略的替代方案**：有没有更简单的做法？当前选择是唯一解还是惰性解？
 - **边界反例**：输入/状态/并发/失败路径的极端情况产物没覆盖？
@@ -132,7 +133,8 @@ acceptanceRole: writer
 
 - `inFlight` 置 `false`（解除去重锁）
 - `lastAuditedId` 推进到链最新条目；`lastAuditAt` 置当前时间戳；`convExtractedLine` 推进到已读对话行
-- **签名语义**：产物通过 → `signature={status:"passed", at:<epoch ms>}` 且 `signatureConvLine` 推进到当前对话行总数（## 👤/## 🤖 行数）；发现 blocker → `signature={status:"blocked", at:<epoch ms>, blockers:[...可操作缺口]}` 且 `signatureConvLine` **同样推进**（签名即推进——修复走 blockers 注入通道，不靠 convLine 滞后）。**signature 必须带 `at`**（= lastAuditAt 的 epoch ms）：扩展按 `signature.at ≥ auditStartedAt` 判定完成，缺 at 会被交付轮误判为超时并覆盖真实 blockers。
+- **`gatedHead` 必须原样保留**（扩展的门禁基线字段；v1.0.24 实证：审计者收尾写曾把它整个丢掉，导致热重载后修复提交再被吞）
+- **签名语义**：产物通过 → `signature={status:"passed", at:<epoch ms>}` 且 `signatureConvLine` 推进到当前对话行总数（## 👤/## 🤖 行数）；发现 blocker → `signature={status:"blocked", at:<epoch ms>, blockers:[...可操作缺口]}` 且 `signatureConvLine` **同样推进**（签名即推进——修复走 blockers 注入通道，不靠 convLine 滞后）。**signature 必须带 `at`**（= lastAuditAt 的 epoch ms）：扩展按 `signature.at ≥ auditStartedAt` 判定完成，缺 at 会被交付轮误判为超时并覆盖真实 blockers。**signature 必须带 `head`**（= `git rev-parse --short HEAD` 输出，你审计时的产物基线短哈希）：扩展按 head 与当前 HEAD 是否一致校验注入新鲜度，缺 head 时陈旧签名会在后续会话反复注入（跨会话泄露，v1.0.24）。
 - 不要写 `passed-with-warning`——那是扩展在连续 blocked 达上限（3 次）或交付轮超时时的降级动作，不是你的结论。
 
 这是产物过审的证明：签名后立即停止（完成即停）。

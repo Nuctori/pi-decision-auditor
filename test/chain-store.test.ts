@@ -37,6 +37,7 @@ import {
 	resolveProjectRoot,
 	shouldClearStaleLock,
 	shouldInjectInterimFindings,
+	shouldInjectSignatureFindings,
 	writeAuditState,
 } from "../lib/chain-store.js";
 function tmpDir(): string {
@@ -408,7 +409,11 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		src.includes("appendProcessSignal(projectRoot(ctx.cwd), text, RUN_ID)"),
 		"process.md 意图信号必须带 RUN_ID 标记（隔离）",
 	);
-	const ruleCount = src.split("<!--run:${RUN_ID}-->").length - 1;
+	// 会话隔离规则注入计数：审计/L2 prompt 用 ${runId}（v1.0.24 会话级 RUN_ID），
+	// 写入点与注释保留 ${RUN_ID} 形态——两种都算（防重构删掉）
+	const ruleCount =
+		src.split("<!--run:${RUN_ID}-->").length - 1 +
+		src.split("<!--run:${runId}-->").length - 1;
 	assert.ok(
 		ruleCount >= 4,
 		`4 处审计/L2 prompt 必须注入会话隔离规则（防重构删掉），实际 ${ruleCount} 处`,
@@ -416,6 +421,17 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	assert.ok(
 		src.includes("convlogForeignRuns(root, RUN_ID) > 0"),
 		"agent_end 必须做多实例混写检测（跳过错审）",
+	);
+	// v1.0.24：RUN_ID 会话级（工厂作用域生成）——同进程切会话时各会话行可区分
+	assert.ok(
+		src.includes("const RUN_ID = `run-${process.pid}-"),
+		"RUN_ID 必须会话级生成（工厂内，非模块顶层）——同进程切会话不共享 run 标记",
+	);
+	// v1.0.24：非 git 根守卫（跨项目串台源头）——自动解析退化为非 git 目录（典型 home）
+	// 时跳过自动审计；显式 PI_PAIR_PROJECT_ROOT 不受限
+	assert.ok(
+		src.includes("head === null && !process.env.PI_PAIR_PROJECT_ROOT"),
+		"agent_end 必须有非 git 根守卫（home 目录不再自动审计——跨项目串台源头）",
 	);
 	// 工作判据（产物/提交信号 或 决策信号）+ 审计者 AI 判定（第零步）
 	assert.ok(
@@ -628,6 +644,28 @@ test("convlogForeignRuns：多实例混写检测（并发窗口语义）", () =>
 	const dir2 = tmpDir();
 	appendConv(dir2, "user", "只有本实例", "run-a");
 	assert.equal(convlogForeignRuns(dir2, "run-a"), 0);
+});
+
+test("convlogForeignRuns：同进程多会话（同 pid 不同 run）不算并发（v1.0.24）", () => {
+	// 同进程切会话：run 标记随会话重新生成，但 pid 相同——A 会话的行不得把 B 会话
+	// 的审计误判为多实例错审（否则切会话后自动审计永久停摆）
+	const dir = tmpDir();
+	appendConv(dir, "user", "本会话请求", "run-123-bbb");
+	appendConv(dir, "user", "同进程切换的上一会话", "run-123-aaa");
+	appendConv(dir, "user", "另一 pi 进程的会话", "run-456-ccc");
+	assert.equal(convlogForeignRuns(dir, "run-123-bbb"), 1); // 只数不同 pid 的 run-456-ccc
+	// 反向视角：run-456-ccc 首行之后无行（前两行是历史）→ 0
+	assert.equal(convlogForeignRuns(dir, "run-456-ccc"), 0);
+	// 同进程内两个会话互相不算并发（双向）
+	const dirSame = tmpDir();
+	appendConv(dirSame, "user", "会话 A", "run-123-aaa");
+	appendConv(dirSame, "user", "会话 B（同进程）", "run-123-bbb");
+	assert.equal(convlogForeignRuns(dirSame, "run-123-aaa"), 0);
+	// 旧格式 run 标记（无 pid 前缀，run-xxx）回退全等判定：互不相同 → 仍算并发
+	const dirLegacy = tmpDir();
+	appendConv(dirLegacy, "user", "本实例", "run-x");
+	appendConv(dirLegacy, "user", "另一实例（旧格式）", "run-y");
+	assert.equal(convlogForeignRuns(dirLegacy, "run-x"), 1);
 });
 
 test("lastAuditDurationMs：读写与消毒", () => {
@@ -984,6 +1022,68 @@ test("shouldInjectInterimFindings：中间态注入判据（B1 行为级 + 边�
 			undefined,
 		),
 		false,
+	);
+});
+
+test("shouldInjectSignatureFindings：结论注入判据 + 新鲜度校验（v1.0.24 跨会话泄露根治）", () => {
+	const base = {
+		...readAuditState(tmpDir()),
+		signature: {
+			status: "blocked" as const,
+			at: 1000,
+			blockers: ["缺口 A"],
+			head: "abc1234",
+		},
+	};
+	// blocked + head 与当前一致 → 注入
+	assert.equal(shouldInjectSignatureFindings(base, undefined, "abc1234"), true);
+	// HEAD 已推进（修复提交落库但再审未跑）→ 签名过时，不注入陈旧 blockers
+	assert.equal(shouldInjectSignatureFindings(base, undefined, "def5678"), false);
+	// 同签名已注入过 → 去重
+	assert.equal(shouldInjectSignatureFindings(base, 1000, "abc1234"), false);
+	// head 缺失（旧版本签名/审计者漏写）→ 兼容注入（无法校验，不丢交付）
+	assert.equal(
+		shouldInjectSignatureFindings(
+			{ ...base, signature: { ...base.signature!, head: undefined } },
+			undefined,
+			"def5678",
+		),
+		true,
+	);
+	// passed → 不注入（价值已交付）
+	assert.equal(
+		shouldInjectSignatureFindings(
+			{ ...base, signature: { ...base.signature!, status: "passed" as const } },
+			undefined,
+			"abc1234",
+		),
+		false,
+	);
+	// 无 blockers → 不注入
+	assert.equal(
+		shouldInjectSignatureFindings(
+			{ ...base, signature: { ...base.signature!, blockers: [] } },
+			undefined,
+			"abc1234",
+		),
+		false,
+	);
+	// 无签名 → 不注入
+	assert.equal(shouldInjectSignatureFindings({ ...base, signature: null }, undefined, "abc1234"), false);
+	// passed-with-warning（降级）+ head 一致 → 注入（价值点保留）
+	assert.equal(
+		shouldInjectSignatureFindings(
+			{
+				...base,
+				signature: {
+					...base.signature!,
+					status: "passed-with-warning" as const,
+				},
+			},
+			undefined,
+			"abc1234",
+		),
+		true,
 	);
 });
 

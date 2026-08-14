@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.0.24] - 2026-08-14
+
+修复跨会话/跨项目审计串台（用户报障「会话刚开始就有个审计结果」+「为什么别的会话的审计会串台」）+ 审计缺口 L1-L7 全量修复（函数式 + 系统设计双视角交叉审计）：
+
+- **注入新鲜度校验（跨会话泄露根治）**：signature 新增 `head` 字段（审计时的产物基线 HEAD）——before_agent_start 注入判据抽为 `shouldInjectSignatureFindings` 纯函数：当前 HEAD 已推进（修复提交落库但再审未跑）→ 签名过时 → 不注入陈旧 blockers；head 缺失（旧签名）兼容注入不丢交付。审计者 prompt + agents/decision-auditor.md 收尾协议要求签名必须带 head
+- **failed 重试闭环（L3）**：hasWork 加 `signature.status==="failed"` 分支——提交轮 spawn 失败后产物已落库、uncommitted/newCommit 信号都假，不加此分支 failed 永不重审、产物永不过审
+- **failed 保留 blockers（L2/L7）**：spawn 失败写 failed 时保留上轮 blockers（failed 是「未审」不是「无缺口」，整体覆盖会抹掉真实缺口/降级价值点）；findings 去重（L6，重试风暴不无限累积）
+- **多实例守卫前移（L4）**：convlogForeignRuns 守卫先于残留锁清理——多实例场景 state.inFlight 可能属于另一实例，非属主实例清锁会让对方审计者收尾写冲突放弃、签名丢失
+- **完成判定排除 failed（L5）**：waitForAuditCompletion 只认真实审计签名——多实例下 failed.at 可晚于本轮 auditStartedAt，不排除会劫持门禁完成判定
+- **门禁失败可见信号（L1）**：提交轮 spawn 失败 notify 告知「产物未过审」，不静默放行
+- **/pair-audit 纳入 inFlight 状态机（L3'）**：手动命令与自动审计共用锁 + 呼吸灯 + async-complete 持续交付（此前命令不写 inFlight → 并发双 spawn、灯被先完成者误灭）
+- **gatedHead 审计者保留（reviewer 实证）**：审计者收尾写曾把 gatedHead 字段整个丢掉——prompt 字段合并纪律显式要求原样保留
+- **非 git 根守卫（跨项目串台主通道）**：自动解析退化为非 git 目录（典型：home 目录）时 agent_end 跳过自动审计 + 每会话一次警告——审计基线=整个磁盘，无关项目产物被当成一个项目审（实证：fence-check 审计以 `C:\Users\Nuctori` 为根，结论写入 home 根 state 被其他会话注入）。显式 `PI_PAIR_PROJECT_ROOT`（用户权威根）与手动 `/pair-audit` 不受限
+- **RUN_ID 会话级（同进程切会话内容混读）**：RUN_ID 从模块顶层移入扩展工厂——pi 的 loader 对同 cwd 缓存扩展工厂、模块顶层只执行一次，模块级 RUN_ID 会让同进程切会话时两会话行混标、A 会话的审计把 B 会话的对话当自己的；三个 prompt 注入点改传参（buildAuditTask/buildIncrementalAuditTask/DELIVERY_ANGLES）
+- **convlogForeignRuns 按 pid 判并发**：外来判定从「run 标记不同」改为「pid 不同」——同 pid 不同 run（同进程切会话）不算并发实例，跨进程仍检出；旧格式 run 标记（无 pid 前缀）回退全等判定
+- **failed 状态语义（M2）**：spawn 失败改签 failed（非假 blocker「审计触发失败，产物未过审」）——不递增 blockedStreak、不推进 signatureConvLine（产物未被审计覆盖，下轮 hasWork 自动重试）、不注入假缺口；stale 锁清理/TTL 过期同步灭灯（防呼吸灯永久常亮——实证 7220s 卡灯）
+- 测试：38/38 通过（shouldInjectSignatureFindings 行为级 7 态 + pid 判定 + 非 git 根守卫/RUN_ID 会话级接线断言 + gatedHead 往返 + failed 语义）、tsc 0 错误
+
 ## [1.0.23] - 2026-08-14
 
 修复「陈旧 blocked 签名反复注入每个新会话」根因（用户报障：会话刚开始就有个审计结果——实证为 08-13 修复提交后再审永不触发，已修复的 blockers 在 state.json 挂 14h+ 反复注入）：
