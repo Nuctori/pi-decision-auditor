@@ -1001,7 +1001,7 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	// ---- 交付门禁：git HEAD 变化（客观信号）→ agent_end 同步等签名（门禁），常规轮异步 ----
+	// ---- 交付门禁：git HEAD 变化（客观信号）→ agent_end 启动后台轮询等签名（门禁），常规轮异步 ----
 	// 不用词表/模式匹配判定「完工」（语义判断不可靠——v1.0.17 废弃正则信号词的先例）；
 	// 本轮产生了 git 提交 = 交付发生的客观事实。gatedHead 记录上次门禁覆盖的 HEAD。
 	const gatedHead = new Map<string, string>();
@@ -1026,7 +1026,7 @@ export default function (pi: ExtensionAPI): void {
 	// 中间态注入去重（记录已注入的 auditStartedAt，同轮审计只注入一次）
 	const injectedInterimAt = new Map<string, number>();
 
-	// ---- 产物交叉审计（agent_end）：本轮有真实产物 → spawn 审计者；交付轮同步等签名，常规轮异步不阻塞 ----
+	// ---- 产物交叉审计（agent_end）：本轮有真实产物 → spawn 审计者；交付轮后台轮询等签名，常规轮异步不阻塞 ----
 	// ---- findings 注入：上一轮审计的结论/中间态带给主 agent（低优先级，不阻塞）----
 	pi.on("before_agent_start", async (event, ctx) => {
 		try {
@@ -1341,8 +1341,8 @@ export default function (pi: ExtensionAPI): void {
 				(hasNewConversation(root, clampConvExtractedLine(root)) &&
 					decisionThisRound);
 			// F5（v1.0.29 双审计）：failed 重试轮（上次 spawn 失败、本轮无未提交产物）
-			// 是「补审」不是「交付」——不得升级为 300s 同步门禁轮（failed 不推进
-			// gatedHead → hasNewCommit 持续为真 → 纯聊天轮也 spawn + 同步等 300s，
+			// 是「补审」不是「交付」——不得升级为 300s 门禁轮询（failed 不推进
+			// gatedHead → hasNewCommit 持续为真 → 纯聊天轮也 spawn + 门禁轮询 300s，
 			// 主会话每轮被阻塞 + 错误 notify 刷屏）。异步 spawn 后即 return，
 			// 结论经 async-complete / 下轮注入通道交付。
 			// 注意：**不能**含 !hasNewCommit——有未覆盖提交的 failed 重试轮
@@ -1378,7 +1378,7 @@ export default function (pi: ExtensionAPI): void {
 				void triggerDeliveryAudit(pi, rpc, readyPromise, root, RUN_ID, head);
 			}
 
-			// 交付轮（本轮有新提交 = 产物落库）→ 同步等签名（硬门禁）；
+			// 交付轮（本轮有新提交 = 产物落库）→ 后台轮询等签名（硬门禁，不阻塞）；
 			// 常规轮 → 异步 spawn，不阻塞——审计者完成写 signature，findings 下轮注入
 			const t0 = Date.now(); // 审计阻塞计时起点
 
@@ -1536,7 +1536,7 @@ export default function (pi: ExtensionAPI): void {
 			}
 
 			// 常规轮：异步审计不阻塞——end 就是 end，审计者完成签名后下轮注入 findings；
-			// 交付门禁：本轮有新提交（产物落库 = 交付）→ 同步等签名
+			// 交付门禁：本轮有新提交（产物落库 = 交付）→ 后台轮询等签名
 			// F5（v1.0.29）：failed 重试轮（无本轮新提交/无未提交产物）同步短路——
 			// 已异步 spawn，审计结论经 async-complete / 下轮注入交付，不阻塞主会话
 			if (!hasNewCommit || failedRetry) return;

@@ -49,7 +49,7 @@
 [plan 轮（无产物）] ── 未调 decision_add → 不 spawn，convExtractedLine 停留 → 决策由下一个产物轮的审计者按增量窗口顺带提取（不丢，仅延迟）；纯 plan 会话用 /pair-audit 或 decision_add 兜底
 [多实例混写]     ── convlogForeignRuns>0（并发窗口：本实例首行之后的外来行）──▶ 跳过 + notify（防错审）
 [常规轮]         ── fresh spawn（context:"fork"）→ inFlight=true → 立即返回（不阻塞）
-[交付轮]         ── git HEAD 变化（本轮产生了提交 = 交付的客观信号；无词表/模式匹配——完工语义判断不可靠，v1.0.17 先例）→ fresh spawn → inFlight=true → await 签名（300s 上限）
+[交付轮]         ── git HEAD 变化（本轮产生了提交 = 交付的客观信号；无词表/模式匹配——完工语义判断不可靠，v1.0.17 先例）→ fresh spawn → inFlight=true → 后台轮询签名（2s 间隔，300s 上限；用户发新消息可解除等待，结论仍交付）
 
 触发后审计者【第零步】AI 判定本轮有无工作（不做正则信号词判定——语义判断交给审计者）：
   纯咨询（问答无决策无产物）→ 快速退出：推进 convExtractedLine（对话行计数，非文件行号）、写 auditFindings=["本轮纯咨询，无审计对象"]、不写 signature、零注入

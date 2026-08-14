@@ -34,7 +34,7 @@ pi-pair makes deliberate trade-offs. Read these before deciding whether to adopt
 - **Simplicity is a feature, not a shortcut.** One audit layer, fresh-spawn runs, no resident process, no negotiation windows — each mechanism that survives earns its keep, each that fails is deleted rather than patched. The cost is fewer knobs; the payoff is a system you can reason about.
 - **Value is observable, process is hidden.** The user sees the *fixed result* — blockers delivered and repaired — not the audit machinery (counts, timeouts, negotiations). Audit findings are injected user-visible; process noise never is.
 - **Audit only what is real.** The auditor spawns only when real work exists: git artifacts (uncommitted changes or new commits) always spawn; conversation alone spawns only when this round used `decision_add` (an objective decision signal). Pure-chat rounds never spawn — no background task, no completion notification noise (the zero-noise promise upgraded from zero-injection to zero-spawn). Plan decisions made without `decision_add` are not lost: the convlog cursor stays put, so the next artifact round's auditor extracts them along with its own window. Auditing empty rounds would be theater, and theater teaches the auditor to rubber-stamp.
-- **Gate at delivery, not every round.** Normal rounds run async — the auditor works in the background and you're never blocked. The gate tightens only when it matters: submit / publish / merge / deploy.
+- **Gate at delivery, not every round.** Normal rounds run async — the auditor works in the background and you're never blocked. The gate tightens only when it matters: this round has a git HEAD change (an objective commit signal). The gate itself is non-blocking — background polling (2s interval, 300s cap) with a user-message escape hatch.
 - **Interim results over final ceremony.** The auditor writes findings continuously (`auditFindings`), so being killed mid-audit still delivers value. A finished signature is a formality, not the point.
 - **Stop when done.** After signing, the auditor stops — no scope creep, no "just one more check". Open questions go to the next round, where the next agent has full context.
 
@@ -48,9 +48,9 @@ pi install npm:pi-pair
 
 That's it. Start working normally — pi-pair hooks in automatically:
 
-1. Each round with real artifacts is **audited** (goal derivation → adversarial 5-dimension attack → signature): async in normal rounds (no blocking), sync gate on delivery rounds. Blockers are delivered immediately for fixing, re-audited until clean.
+1. Each round with real artifacts is **audited** (goal derivation → adversarial 5-dimension attack → signature): async in normal rounds (no blocking); delivery rounds gate on the signature via non-blocking background polling (2s interval, 300s cap; a new user message releases the wait early, the verdict is still delivered). Blockers are delivered immediately for fixing, re-audited until clean.
 2. Your **decisions are captured** into `.pi/decision-auditor/chain.md` (append-only, auto-numbered) — extracted from the conversation log, not from your initiative.
-3. On **delivery** ("submit / publish / merge / deploy"), 1 fresh reviewer does a full-dimension deep cross-check (correctness / goal-alignment / security-robustness).
+3. On a **git HEAD change this round** (an objective commit signal, no keyword matching), 1 fresh reviewer does a full-dimension deep cross-check (correctness / goal-alignment / security-robustness).
 
 Requires **pi-subagents** (spawns the auditor). See [Installation](#installation).
 
@@ -94,7 +94,7 @@ each agent_end (when real work exists)
       · new user message → gate wait released (verdict still delivered via followUp)
 
 L2 — delivery review (same git HEAD change signal)
-  └─ only when real deliverables exist (gate: no git diff & no decisions → skip, no empty review)
+  └─ same trigger as the L1 gate: this round has a git HEAD change (no commit, no spawn — no empty review)
   └─ 1 fresh reviewer, full-dimension deep review (correctness / goal-alignment / security-robustness)
 ```
 

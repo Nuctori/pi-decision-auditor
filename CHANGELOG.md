@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.42] - 2026-08-15
+
+v1.0.41 审计者 blocker（完备性维度）：文档同步主题内漏改 3 处直接矛盾残留（en+zh 共 6 处）：
+
+- **Quick start 段（README L51/53 + zh L51/53）**：「sync gate on delivery rounds / 交付轮同步门禁」旧语义 +「On delivery (submit/publish/merge/deploy) / 交付时（提交/发布/merge/部署）」信号词残留（D-022 已改 git HEAD 客观信号）——改为后台轮询门禁 + git HEAD 变化触发
+- **L2 门禁描述（README L97 + zh L95）**：「no git diff & no decisions → skip」与代码矛盾——L2 与 L1 同源由 hasNewCommit 触发（decision-chain.ts L1377），提交后 diff 空仍审查；改为「与 L1 门禁同源触发：本轮 git HEAD 变化（无提交不 spawn）」
+- **全仓复扫补齐同类残留（8 处）**：README Design philosophy（L37「submit / publish / merge / deploy」信号词）、docs/audit-state-machine.md（L52「await 签名」）、decision-chain.ts 6 处代码注释（L1004/L1029/L1344/L1381/L1539「同步等签名」→「后台轮询等签名」）——代码注释与实现不一致同属机制完整性缺陷，一并修
+- 复扫确认：*.md 零残留（CHANGELOG 历史条目如实记录当时行为，不改）
+- 测试：57/57 通过，tsc 0 错误
+
 ## [1.0.41] - 2026-08-15
 
 v1.0.39/40 复核 reviewer（无 blocker）P2 note——文档同步（项目文档同步纪律，v1.0.31 先例）：
