@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.77] - 2026-08-15
+
+reviewer 终审 Medium 处理：
+
+- **L2 prompt 补轻量退出前置守卫**（reviewer Medium-1，D-052 先例）：DELIVERY_ANGLES 全维度 prompt 缺 v1.0.74 前置守卫（空 --since 窗口不豁免 + 兜底对照 + 全部提交 git show）——M1 根因（轻量退出跳过兜底 = 系统性漏审）在 L2 交付门禁路径可复发。修复：L2 低价值窗口段补同一守卫句（与 L1 同构）。
+- **clamp 函数式重派生**（reviewer Medium-2）：已在 v1.0.76 闭环（`(latest) => ...` 锁内重读重判，防旧快照覆盖并发签名）。
+- **空洞回填完成**（reviewer Medium-3）：v1.0.75（0db08b4）/ style（b41d6e4）手工回填——audit-log 28 条，61→76 窗口全覆盖。
+- Low（injected* 被清 null）记录：审计者收尾 write 覆盖去重标记（协议已有"原样保留"强化，v1.0.25）——影响低（head 匹配把关新鲜度），下轮审计者协议重申。
+- 验证：66/66 通过，tsc 0。
+
 ## [1.0.76] - 2026-08-15
 
 reviewer 终审 Medium-Note/Low 处理：
