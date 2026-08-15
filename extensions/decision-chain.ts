@@ -2029,11 +2029,8 @@ export default function (pi: ExtensionAPI): void {
 						const log = readAuditLog(completedCwd);
 						const latestEntry = log[log.length - 1];
 						const sigAt = st.signature?.at ?? 0;
-						const sigRunId =
-							st.signature?.runId ?? st.auditRunId ?? "";
-						if (
-							shouldBackfillAuditLog(latestEntry, sigRunId, sigAt)
-						) {
+						const sigRunId = st.signature?.runId ?? st.auditRunId ?? "";
+						if (shouldBackfillAuditLog(latestEntry, sigRunId, sigAt)) {
 							appendAuditReport(completedCwd, {
 								verdict:
 									st.signature?.status === "blocked" ? "blocked" : "passed",

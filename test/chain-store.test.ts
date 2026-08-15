@@ -1218,24 +1218,40 @@ test("shouldBackfillAuditLog：runId 优先 + Date 容差（v1.0.61 审计者 bl
 	});
 	// runId 匹配（正常落盘：先报告后签名 Date 早于签名）→ 不补写
 	assert.equal(
-		shouldBackfillAuditLog(entry("run-1", "2026-08-15T10:00:00Z"), "run-1", 1786800000000),
+		shouldBackfillAuditLog(
+			entry("run-1", "2026-08-15T10:00:00Z"),
+			"run-1",
+			1786800000000,
+		),
 		false,
 		"runId 匹配 = 已落盘，不得补写（Date 早于签名也成立）",
 	);
 	// runId 不同（豁免/未落盘）→ 补写
 	assert.equal(
-		shouldBackfillAuditLog(entry("run-0", "2026-08-15T10:00:00Z"), "run-1", 1786800000000),
+		shouldBackfillAuditLog(
+			entry("run-0", "2026-08-15T10:00:00Z"),
+			"run-1",
+			1786800000000,
+		),
 		true,
 		"runId 不同 = 未落盘，补写",
 	);
 	// runId 缺失：Date 在容差内（5min）→ 不补写
 	assert.equal(
-		shouldBackfillAuditLog(entry("", "2026-08-15T10:02:00Z"), "", 1786788300000),
+		shouldBackfillAuditLog(
+			entry("", "2026-08-15T10:02:00Z"),
+			"",
+			1786788300000,
+		),
 		false,
 	);
 	// runId 缺失：Date 超容差 → 补写
 	assert.equal(
-		shouldBackfillAuditLog(entry("", "2026-08-15T10:00:00Z"), "", 1786788600000),
+		shouldBackfillAuditLog(
+			entry("", "2026-08-15T10:00:00Z"),
+			"",
+			1786788600000,
+		),
 		true,
 	);
 	// 无条目 → 补写
