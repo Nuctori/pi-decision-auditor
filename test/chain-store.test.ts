@@ -652,9 +652,9 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	// 排除 passed-with-warning 超时降级签名，防竞态文案失实）+ runId 身份校验
 	// （signature.runId === auditRunId，与 isAuditCompleted 同语义，防并发 run 误触发）
 	assert.ok(
-		src.includes(
-			'st.signature.status === "passed" || st.signature.status === "blocked"',
-		) && src.includes("st.signature.runId === st.auditRunId"),
+		src.includes('st.signature.status === "passed"') &&
+			src.includes('st.signature.status === "blocked"') &&
+			src.includes("st.signature.runId === st.auditRunId"),
 		"failed 纠正判据必须收窄：status 白名单（passed/blocked）+ runId 身份校验",
 	);
 	// v1.0.44：交付通道澄清——审计者 prompt 明确"发现 blocker 不需要 contact_supervisor，

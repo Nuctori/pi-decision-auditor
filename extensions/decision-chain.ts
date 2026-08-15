@@ -1796,7 +1796,8 @@ export default function (pi: ExtensionAPI): void {
 					st.signature &&
 					st.auditStartedAt &&
 					st.signature.at >= st.auditStartedAt &&
-					(st.signature.status === "passed" || st.signature.status === "blocked");
+					(st.signature.status === "passed" ||
+						st.signature.status === "blocked");
 				const sigOwned =
 					!st.signature?.runId ||
 					st.signature.runId === st.auditRunId ||
