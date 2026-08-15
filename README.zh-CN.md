@@ -166,6 +166,7 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 | `PI_PAIR_PROCESS_LOG=0` | 开 | 关闭意图信号过程日志（CI 跑分基线） |
 | `PI_PAIR_PROJECT_ROOT` | — | 显式指定单一权威项目根（跨盘符/复杂场景）；默认从 cwd 向上自动探测 |
 | `PI_PAIR_LANG=en` | 中文 | TUI 审计状态语言：`en` 切英文，默认中文（与现有 UI 文案一致） |
+| `PI_PAIR_AUDITOR_MODEL` | — | 审计者 run 的模型覆盖（如 `deepseek-v4-pro` / `glm-5.2`）。规避 provider 流中断导致"审计已完成却标 failed"（v1.0.44）；未设置 = 继承主会话模型 |
 
 ## 决策链格式
 

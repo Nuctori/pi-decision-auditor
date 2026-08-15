@@ -176,6 +176,12 @@ const inFlightAudits = new Map<
 >();
 const AUDITOR_AGENT = "pi-pair.decision-auditor";
 
+/** 审计者 run 的模型覆盖（v1.0.44）：deepseek-v4-flash 流式输出有
+ *  "Stream ended without finish_reason" 中断史（provider 侧瞬时错误）→ 审计者 run
+ *  内容完整却标 failed，用户观感"审计没收尾"。设 PI_PAIR_AUDITOR_MODEL 可指定
+ *  更稳的模型（如 deepseek-v4-pro / glm-5.2）；未设置则继承主会话模型（原行为）。 */
+const AUDITOR_MODEL = process.env.PI_PAIR_AUDITOR_MODEL?.trim() || undefined;
+
 /** cwd 是否有进行中的审计（含 TTL 过期清理）。TTL 用单调钟（performance.now）——
  *  墙钟跳变（NTP 校时/用户改时钟）会让 Date.now 差值早过期（并发双审计）或晚过期
  *  （审计停摆）——FP 审计 low：内存锁 TTL 不受墙钟影响。 */
@@ -197,6 +203,9 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 	);
 	lines.push(
 		"【窗口约束】常规轮你在 agent_end 之后异步运行（主 agent 已结束本轮，不阻塞等待你）——本轮产物已完整（不会有后续产物），直接给结论；发现 blocker 就给可操作的 blockers。交付轮（本轮 git HEAD 变化）主 agent 经后台轮询等你的签名（不阻塞），此时尽快收尾：若审计超时，主 agent 会降级放行并把你的 blockers 注入下轮。",
+	);
+	lines.push(
+		"【交付通道（v1.0.44 澄清）】发现 blocker **不需要** contact_supervisor——扩展会在你签名后经 async-complete 立即 sendUserMessage 交付 blockers 给主 agent（不等下轮注入）；contact_supervisor 仅用于需要即时裁决/澄清的场景（推理存疑、链矛盾需主会话补数据）。**签名即交付**：放心写 blockers。",
 	);
 	lines.push(
 		"【state 写入纪律（最高优先，事故教训：2026-08-13 reviewer 实证审查期间 signatureConvLine 3139→3159 被并发改写——审计者 write 全量覆盖了 extension 并发推进的字段）】state.json 是共享文件（extension 与审计者子进程并发读写）。每次 write 前**必须 read 最新内容**；write 的 content = **最新原文 + 只修改你负责的字段**（中间态：auditFindings/inFlight；推进：convExtractedLine；收尾：signature/lastAuditedId/lastAuditAt/signatureConvLine；**gatedHead 是扩展的门禁基线字段，无论何时都必须原样保留**——v1.0.24 实证：审计者收尾写曾把 gatedHead 字段整个丢掉，导致热重载后修复提交再被吞；**injectedSignatureAt/injectedInterimAt 是扩展的跨会话注入去重标记，同样原样保留**（v1.0.25：丢则审计结论在每个新会话重复注入——「新会话还有泄露」报障根因）；**blockedStreak 是扩展的 A2 连续 blocked 计数域，同样原样保留**（v1.0.42 实证：误写 blockedStreak=2 触发 streak 2→3 提前 A2 降级——blockers 虽保留但降级时机失真）），**其他字段原样保留**——禁止全量覆盖任何你没在最新 read 里见过的字段；write 后**立即 read 验证**你的字段生效且其他字段未被你的 write 改动；若 read 发现你负责的字段已被 extension 或他人推进（值 > 你 read 时的值）→ 基于最新值继续，绝不回退覆盖。**宁可中间态多写，不可覆盖他人字段**。",
@@ -950,6 +959,8 @@ export default function (pi: ExtensionAPI): void {
 						task,
 						async: true,
 						context: "fresh",
+						// v1.0.44：模型覆盖（PI_PAIR_AUDITOR_MODEL）——同 agent_end spawn
+						...(AUDITOR_MODEL ? { model: AUDITOR_MODEL } : {}),
 					},
 					900_000, // client 超时
 				);
@@ -1438,6 +1449,9 @@ export default function (pi: ExtensionAPI): void {
 							task,
 							async: true,
 							context: "fork",
+							// v1.0.44：模型覆盖（PI_PAIR_AUDITOR_MODEL）——deepseek-v4-flash
+							// 流中断史导致审计者 run 内容完整却标 failed（见 AUDITOR_MODEL 注释）
+							...(AUDITOR_MODEL ? { model: AUDITOR_MODEL } : {}),
 						},
 						900_000,
 					);
@@ -1741,7 +1755,9 @@ export default function (pi: ExtensionAPI): void {
 	// R5 持续交付：审计者完成（async-complete）时若已写 blocked signature → 立即交付主 agent
 	// （sendUserMessage followUp，不等下轮注入）——blocker 第一时间给主 agent 处理，直到没问题
 	pi.events.on("subagent:async-complete", (data: unknown) => {
-		const env = data as { asyncId?: string; runId?: string } | null;
+		const env = data as
+			| { asyncId?: string; runId?: string; success?: boolean }
+			| null;
 		const completedId = env?.runId ?? env?.asyncId ?? "";
 		// L2 reviewer run 完成即移除（T1 补漏）：Set 只保留挂起 run，session_shutdown 有界
 		if (completedId) {
@@ -1757,9 +1773,32 @@ export default function (pi: ExtensionAPI): void {
 		}
 		// 持续交付：找到完成审计的 cwd → 若审计者已写 blocked → 立即交付主 agent
 		if (completedCwd) {
+			// v1.0.44 修复：failed 误报纠正——审计者 run 内容完整（签名已写）但进程
+			// 退出码非 0（实证：deepseek-v4-flash 流式输出 "Stream ended without
+			// finish_reason"）→ pi-subagents 按 exitCode≠0 标 failed，主 agent/用户
+			// 误判"审计没收尾"。这里先捕获 ui（stopAuditBreath 会清 cachedAuditUi），
+			// 读到签名完成后发轻 notify 纠正——不注入对话，仅消除误报观感。
+			const uiBeforeStop = cachedAuditUi;
 			stopAuditBreath(completedCwd); // 异步轮审计完成：灯灭（cwd 隔离，D2）
 			try {
 				const st = readAuditState(completedCwd);
+				// 纠正判据：事件标 failed 但签名已写且 at ≥ 本轮审计启动（= 审计实际完成）
+				if (
+					env?.success === false &&
+					st.signature &&
+					st.auditStartedAt &&
+					st.signature.at >= st.auditStartedAt &&
+					st.signature.status !== "failed"
+				) {
+					try {
+						uiBeforeStop?.notify(
+							`结对审计实际已完成（failed 通知为进程退出码误报，如 provider 流中断）——${st.signature.status}，结论已签名。`,
+							"info",
+						);
+					} catch {
+						/* print/无 UI 模式降级 */
+					}
+				}
 				if (
 					st.signature?.status === "blocked" &&
 					st.signature.blockers &&

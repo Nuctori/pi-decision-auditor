@@ -631,6 +631,31 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		src.includes("签名即推进"),
 		"审计任务收尾必须明确签名即推进（blocked 也推进 convLine，不靠 convLine 滞后）",
 	);
+	// v1.0.44：审计者 run 模型覆盖（PI_PAIR_AUDITOR_MODEL）——deepseek-v4-flash
+	// 流中断史（"Stream ended without finish_reason"）导致审计者 run 内容完整却标
+	// failed（exitCode≠0），用户观感"审计没收尾"。spawn 透传 model 可从源头减少。
+	assert.ok(
+		src.includes("PI_PAIR_AUDITOR_MODEL") &&
+			src.includes("...(AUDITOR_MODEL ? { model: AUDITOR_MODEL } : {})"),
+		"审计者 spawn 必须透传 PI_PAIR_AUDITOR_MODEL 模型覆盖（provider 流中断规避）",
+	);
+	// v1.0.44：failed 误报纠正——async-complete 事件标 failed（进程退出码非 0）但
+	// 签名实际完成（signature.at ≥ auditStartedAt）时，发轻 notify 纠正，防主 agent
+	// 误判"审计没收尾"。判据：事件 success===false + 签名已写 + 非 failed 状态。
+	assert.ok(
+		src.includes("env?.success === false") &&
+			src.includes("st.signature.at >= st.auditStartedAt") &&
+			src.includes("结对审计实际已完成"),
+		"async-complete 必须对 failed 误报（内容完整但退出码非 0）发纠正 notify",
+	);
+	// v1.0.44：交付通道澄清——审计者 prompt 明确"发现 blocker 不需要 contact_supervisor，
+	// 签名即交付"（扩展 async-complete 立即 sendUserMessage）；contact_supervisor 仅用于
+	// 即时裁决/澄清。实证：24h 审计者 0 次调用 contact_supervisor 而 blockers 全部如期交付。
+	assert.ok(
+		src.includes("签名即交付") &&
+			src.includes("contact_supervisor 仅用于需要即时裁决"),
+		"审计者任务文本必须澄清交付通道分工（blocker 签名即交付，不依赖 contact_supervisor）",
+	);
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {

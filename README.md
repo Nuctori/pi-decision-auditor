@@ -168,6 +168,7 @@ Lifecycle rules: every audit is a fresh-spawn run (`context:"fork"` inheriting t
 | `PI_PAIR_PROCESS_LOG=0` | on | disable intent-signal process log (CI bench baseline) |
 | `PI_PAIR_PROJECT_ROOT` | — | explicit single authoritative project root (cross-drive / complex setups); default auto-detects upward from cwd |
 | `PI_PAIR_LANG=en` | zh | TUI audit status language: `en` for English, default Chinese (matches existing UI copy) |
+| `PI_PAIR_AUDITOR_MODEL` | — | model override for auditor runs (e.g. `deepseek-v4-pro` / `glm-5.2`). Avoids provider stream interrupts that mark complete audits as "failed" (v1.0.44); unset = inherit the main session model |
 
 ## Decision chain format
 

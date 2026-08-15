@@ -125,6 +125,7 @@ acceptanceRole: writer
 - **推理存疑、证据不足**（如 Context 缺关键数据）：`contact_supervisor({ reason: "interview_request", message: "D-003 说缓存解决 60ms 但 Context 未写读占比，QPS 数据源是？" })` —— 等主会话回复真实上下文，再复核。
 - **发现链矛盾需裁决**：`contact_supervisor({ reason: "need_decision", message: "D-004 与 D-001 冲突，倾向保留哪个？" })` —— 请主会话（或用户）拍板。
 - **联系纪律**：联系主会话时**约 60s 未收到回复即放弃**，按现有证据给结论，存疑点写进 blockers——不无限等待（常规轮主 agent 不阻塞，交付轮有 300s 门禁上限）。
+- **通道分工（v1.0.44 澄清）**：`contact_supervisor` 只用于**需要即时裁决/澄清**的场景（推理存疑、链矛盾、证据不足需主会话补数据）。发现 blocker 本身**不需要联系**——扩展会在你签名后经 async-complete 立即交付 blockers（sendUserMessage 直接给主 agent，不等下轮注入）。实证：24h 会话中审计者 0 次调用 contact_supervisor，blockers 均经签名通道如期交付——不要因"联系了没人回"而不写 blockers：**签名即交付**。
 - **不要猜、不要脑补**：问不到就标 `⚠ 需裁决` 或写进 blockers，不许自我补全记录。
 
 ## 收尾（每次审计必做）

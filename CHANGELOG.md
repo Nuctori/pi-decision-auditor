@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.44] - 2026-08-15
+
+24h 会话审计实证驱动的三修（用户报障：中途审计"没在工作"的观感 + 结果审计 failed 收不了尾 + 审计者从不 contact_supervisor）：
+
+- **failed 误报纠正（async-complete）**：审计者 run 内容完整（签名+报告都落盘）但 pi-subagents 按 `exitCode===0 && !interrupted && !timedOut` 判定 success → deepseek-v4-flash 流式输出中断（`Stream ended without finish_reason`）时 run 标 failed → 用户/主 agent 看到 "Background task failed: pi-pair.decision-auditor" 误判审计没收尾（24h 实证：14:14 之后 13/13 个审计者 run 通知全 failed，尽管内容完整）。扩展 async-complete 处理加纠正判据：事件 `success===false` 但 `signature.at ≥ auditStartedAt`（签名实际完成）→ 轻 notify 纠正（不注入对话）。
+- **审计者模型覆盖（PI_PAIR_AUDITOR_MODEL）**：spawn 审计者时透传 model 参数（agent_end 与 /pair-audit 两处），从源头规避 provider 流中断；未设置则继承主会话模型（原行为零变化）。
+- **交付通道澄清（agent prompt + 审计任务文本）**：实证 24h 审计者 0 次调用 contact_supervisor，而 blockers 全部经签名 + async-complete sendUserMessage 通道如期交付——prompt 明确**通道分工**：contact_supervisor 仅用于需要即时裁决/澄清的场景；发现 blocker 直接签名即交付（扩展立即 sendUserMessage），不因"联系了没人回"而不写 blockers。
+- 测试：接线守卫 +3 组断言（模型透传 / failed 误报纠正判据 / 通道分工文本），57/57 通过，tsc 0 错误。
+
 ## [1.0.43] - 2026-08-15
 
 v1.0.42 审计者 blocker（一致性/完备性维度）：注释与 prompt 文本过时残留（与 v1.0.41 blocker 同类模式）：
