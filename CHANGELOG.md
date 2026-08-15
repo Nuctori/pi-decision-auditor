@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.72] - 2026-08-15
+
+审计者 blocker（v1.0.71 blockersKey 与写入侧 clean 不对称——多空白重复补写）：
+
+- **判定 key 与写入侧对称**（审计者 blocker）：v1.0.71 的 `JSON.stringify(sort)` 比较原始文本，但 appendAuditReport 落盘时 blockers 经 `clean(join(" | "), 1000)`（压缩空白+截断）——多空白/超长 blocker 补写后恒不等 → 每轮重复补写（v1.0.61 同型污染）。修复：`normalizedBlockers` = join → clean → split → sort → JSON，比较基于落盘形式（v1.0.70~71 两版 key 变换均为非对称缺陷的终结）。
+- **D-075 入链**（decision_add）：判定 key 与写入侧 clean 对称决策。
+- 测试：多空白对称场景（条目 clean 后 vs sig 原始多空白 → 相等不补），65/65 通过，tsc 0。
+
 ## [1.0.71] - 2026-08-15
 
 reviewer 终审 Low 处理（blockers 比较健壮性）：

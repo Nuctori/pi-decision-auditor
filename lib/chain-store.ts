@@ -494,19 +494,27 @@ export function shouldBackfillAuditLog(
 		(h === sigHead || sigHead.startsWith(h) || h.startsWith(sigHead));
 	const verdictMatched = (v: string): boolean =>
 		v === sigVerdict || (sigVerdict === "passed" && v === "low-value");
-	// v1.0.71（reviewer Low）：blockers 内容比较必须顺序无关 + 分隔符安全——
-	// " | " join 顺序敏感（不同来源顺序不同 → 误判新结论重复补写）且分隔符冲突
-	// （sig blocker 文本含 " | " 时撞 key → 真实新结论被抑制，lossy 方向）。
-	// sort + JSON.stringify：顺序无关，且 JSON 不会拆分含分隔符的文本。
-	const blockersKey = (b: string[]): string =>
-		JSON.stringify([...b].sort());
+	// v1.0.72（审计者 blocker）：比较 key 必须与写入侧 clean 对称——appendAuditReport
+	// 落盘时 blockers 经 `clean(join(" | "), 1000)`（压缩空白 + 截断），若判定侧比较原始
+	// 文本，多空白/超长 blocker 补写后恒不等 → 每轮重复补写（v1.0.61 同型污染）。
+	// 对称变换：join(" | ") → clean → split(" | ") → sort → JSON。含分隔符文本在
+	// 写入侧本就被拆分，比较侧同变换后一致（无重复补写）。
+	const normalizedBlockers = (b: string[]): string => {
+		const clean = (s: string): string =>
+			s.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim().slice(0, 1000);
+		const joined = clean(b.join(" | "));
+		return JSON.stringify(
+			joined === "" ? [] : joined.split(" | ").map((x) => x.trim()).sort(),
+		);
+	};
 	return !entries.some(
 		(e) =>
 			(sigRunId && e.runId === sigRunId) ||
 			(headMatch(e.head) &&
 				verdictMatched(e.verdict) &&
 				(sigVerdict !== "blocked" ||
-					blockersKey(e.blockers) === blockersKey(sigBlockers))),
+					normalizedBlockers(e.blockers) ===
+						normalizedBlockers(sigBlockers))),
 	);
 }
 

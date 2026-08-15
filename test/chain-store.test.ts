@@ -1355,6 +1355,18 @@ test("shouldBackfillAuditLog：存在性 + verdict + blockers 判别（v1.0.70�
 		true,
 		"含分隔符的 blocker 文本不得撞 key（JSON 不拆分文本）",
 	);
+	// v1.0.72（审计者 blocker）：多空白对称——判定侧与写入侧 clean 同变换后相等
+	assert.equal(
+		shouldBackfillAuditLog(
+			[entry("", "H", "blocked", ["a b c"])], // 条目侧（clean 后）
+			"",
+			"H",
+			"blocked",
+			["a  b   c"], // sig 侧（原始多空白）
+		),
+		false,
+		"多空白必须对称归一（v1.0.61 同型重复补写防线）",
+	);
 	// v1.0.68：空 head 条目不匹配任意签名 → 补写
 	assert.equal(
 		shouldBackfillAuditLog([entry("", "")], "", "sighead1", "passed", []),
