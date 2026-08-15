@@ -239,6 +239,9 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 		"**若本轮纯咨询**（如技术对比问答、信息查询，无决策无产物）：**快速退出**——用 write 更新 state.json：inFlight=false、convExtractedLine 推进到当前对话行总数（只数 `## 👤`/`## 🤖` 行，不是文件行号）、auditFindings=['本轮纯咨询，无审计对象']，**不写 signature 不注入任何价值点**（用户零感知）。退出后立即停止。",
 	);
 	lines.push(
+		"**若本轮产物为低价值窗口**（v1.0.45 收敛纪律）：产物仅文档/格式改动（.md/CHANGELOG/README/package.json 版本号等，无代码逻辑改动）**且窗口内无新决策**——**轻量退出**：按收尾流程签名 passed（inFlight=false、convExtractedLine/signatureConvLine 推进），auditFindings=['本轮仅文档/格式改动，无审计对象']，**不做五维度进攻**（文档内容一致性核对可 1-2 行概述）。这是对抗式审计的主动收敛：低风险产物不值得全量成本，价值 = 首轮全量 + 修复轮核验。**注意**：若文档改动实际隐含行为/设计决策（如 CHANGELOG 描述功能、README 改架构说明），不得轻量退出——照常全量审计。",
+	);
+	lines.push(
 		"**若有决策性工作或产物**：继续以下步骤——提取决策入链 + 审决策/产物质量 + 签名。",
 	);
 	lines.push("【第一步：提取增量决策入链】");
@@ -287,7 +290,9 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 	lines.push(
 		'【上轮缺口核对（修复轮必做）】读 state.json 的 signature：若 status==="blocked" 且 blockers 非空，先逐个核对上轮 blockers 在本轮产物中是否仍成立——已修复的明确标注已解决、从结论中移除；仍成立的**重报**（修复轮不得因产物演进而漏掉未修复缺口）。',
 	);
-	lines.push("");
+	lines.push(
+		"【修复轮收敛纪律（v1.0.45，防审计无限唤起）】本轮若为修复轮（上轮 blocked 后再次被唤起）——**立场收窄：只核验上轮 blockers 是否闭环，不扩大范围主动寻找新问题**。新发现仅限两类：① blocker 级缺陷（会导致数据丢失/状态损坏/安全问题的真缺陷）→ 照常 blocked；② 其余一切（Low/Note/风格/可改进项）→ 写入 auditFindings 供下轮参考，**不升级为 blocker**。修复轮的核心价值是验证修复、推动收敛，不是制造下一轮修复。对抗式立场只在首轮/新交付全量审计时启用。",
+	);
 	lines.push(
 		"【blockers 可操作规范（防 diff 漂移）】每条 blocker 必须含：① 文件路径 ② 审计基线行号（你读到的当前行号）③ 问题描述——描述必须**独立于行号成立**（下一轮修复时产物可能已演进，行号会漂移，描述是重定位锚点）。blockers 末尾附审计基线：git HEAD 全哈希 + 未提交文件列表（用 `git rev-parse HEAD` 与 `git status --porcelain` 获取），供主 agent 判断基线是否已漂移。",
 	);

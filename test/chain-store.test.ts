@@ -665,6 +665,21 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 			src.includes("contact_supervisor 仅用于需要即时裁决"),
 		"审计者任务文本必须澄清交付通道分工（blocker 签名即交付，不依赖 contact_supervisor）",
 	);
+	// v1.0.45：审计唤起收敛纪律——① 低价值窗口（仅文档/格式且无新决策）轻量退出
+	// 不五维度进攻；② 修复轮立场收窄（只核验 blockers，Low/Note 不升级 blocker）。
+	// 语义判断在审计者 AI 侧（扩展触发逻辑零改动，门禁"提交=必审"保留）。
+	assert.ok(
+		src.includes("低价值窗口") &&
+			src.includes("轻量退出") &&
+			src.includes("不做五维度进攻"),
+		"审计任务必须含低价值窗口轻量退出分支（文档/格式改动不触发全量进攻）",
+	);
+	assert.ok(
+		src.includes("修复轮收敛纪律") &&
+			src.includes("不扩大范围主动寻找新问题") &&
+			src.includes("不升级为 blocker"),
+		"审计任务必须含修复轮收敛纪律（只核验 blockers，Low/Note 不升级 blocker——防无限唤起）",
+	);
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {
