@@ -771,6 +771,15 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		agentSrc.includes("全量重建禁令") && agentSrc.includes("decision_add"),
 		"审计者 agent 捕获协议必须同步 decision_add 优先 + 重建禁令",
 	);
+	// v1.0.51：泛化发现行格式强制（解析器-写者对不齐类别风险缓解，48d/50 两次实证）
+	assert.ok(
+		src.includes("行格式必须严格保持"),
+		"审计任务必须强制泛化发现行格式（- 场景: X | 路径: Y | 来源: Z 单行）",
+	);
+	assert.ok(
+		agentSrc.includes("行格式必须严格保持"),
+		"审计者 agent 协议必须同步泛化发现行格式强制",
+	);
 });
 
 test("appendAuditReport：append-only + 字段渲染 + 与 chain 同目录", () => {
