@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.54] - 2026-08-15
+
+reviewer 终审 Low/Note 处理（无 Blocker）：
+
+- **任务文本重复 push 修复**（reviewer Low-1）：`buildIncrementalAuditTask` 「两个实证盲区维度」段两行重复（编号 3、3）——删除第二行；接线守卫基于 includes 无法捕获重复，本类回归靠评审（教训：重复行守卫可选加计数断言，暂不）。
+- **pair_gaps 回抄风险标注**（reviewer Note-1）：沉淀协议注明「不要直接回抄 pair_gaps 工具输出（其展示带 `[audit]` 前缀，非沉积格式，须按标准格式重写）」。
+- **发布门禁固化**（reviewer Medium-1 残余）：`npm run verify`（tsc + test 以 exit code 门禁，杜绝 v1.0.52 `grep | &&` 误放行模式）；发布流程先 verify 后提交。
+- 验证：60/60 通过，tsc 0。
+
 ## [1.0.53] - 2026-08-15
 
 v1.0.52 发布缺陷补发（测试门禁在 grep 匹配 fail 行时误放行——发布纪律教训：发布命令必须用 exit code 门禁，不得 grep 输出判断）：

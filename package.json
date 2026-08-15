@@ -1,6 +1,6 @@
 {
   "name": "pi-pair",
-  "version": "1.0.53",
+  "version": "1.0.54",
   "description": "Pair decision audit for pi coding agent: fresh-spawn pair auditor, real-artifact gating, delivery gate, decision chain capture (English README + 中文文档)",
   "license": "MIT",
   "author": "Nuctori",
@@ -33,6 +33,7 @@
   ],
   "scripts": {
     "test": "tsx --test test/chain-store.test.ts",
+    "verify": "tsc --noEmit && tsx --test test/chain-store.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
