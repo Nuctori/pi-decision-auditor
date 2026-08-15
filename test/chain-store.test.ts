@@ -1232,13 +1232,23 @@ test("shouldBackfillAuditLog：存在性检查 + verdict 判别（v1.0.69 同 he
 	});
 	// runId 匹配（正常落盘）→ 不补写
 	assert.equal(
-		shouldBackfillAuditLog([entry("run-1", "h")], "run-1", "sighead1", "passed"),
+		shouldBackfillAuditLog(
+			[entry("run-1", "h")],
+			"run-1",
+			"sighead1",
+			"passed",
+		),
 		false,
 		"runId 匹配 = 已落盘，不补写",
 	);
 	// runId 不同 + head 不匹配 → 补写
 	assert.equal(
-		shouldBackfillAuditLog([entry("run-0", "h")], "run-1", "sighead1", "passed"),
+		shouldBackfillAuditLog(
+			[entry("run-0", "h")],
+			"run-1",
+			"sighead1",
+			"passed",
+		),
 		true,
 		"runId 不同且 head 不匹配 = 未落盘，补写",
 	);
@@ -1266,23 +1276,13 @@ test("shouldBackfillAuditLog：存在性检查 + verdict 判别（v1.0.69 同 he
 	);
 	// v1.0.69 同 head 双轮塌缩：同 head 不同 verdict（修复轮 blocked→passed，HEAD 未变）→ 补写
 	assert.equal(
-		shouldBackfillAuditLog(
-			[entry("", "H", "blocked")],
-			"",
-			"H",
-			"passed",
-		),
+		shouldBackfillAuditLog([entry("", "H", "blocked")], "", "H", "passed"),
 		true,
 		"同 head 不同 verdict（修复轮新结论）必须补写——v1.0.65 回归防线",
 	);
 	// 同 head 同 verdict → 不补写（幂等）
 	assert.equal(
-		shouldBackfillAuditLog(
-			[entry("", "H", "blocked")],
-			"",
-			"H",
-			"blocked",
-		),
+		shouldBackfillAuditLog([entry("", "H", "blocked")], "", "H", "blocked"),
 		false,
 		"同 head 同 verdict = 已记录，不补写",
 	);
