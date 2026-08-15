@@ -1789,19 +1789,20 @@ export default function (pi: ExtensionAPI): void {
 				// ② status 白名单仅 passed/blocked——排除 passed-with-warning（门禁 300s
 				//    超时降级签名 at=降级时刻 ≥ auditStartedAt 恒成立，竞态窗口下误触发
 				//    「实际已完成」文案失实；reviewer Low#1）
-				// ③ runId 身份校验（signature.runId === auditRunId，isAuditCompleted 同语义）
-				//    ——并发/多实例下 run A 失败、run B 完成时，A 的 async-complete 不误触
-				//    （reviewer Low#2）
+				// 纠正判据③ runId 身份校验（reviewer Note#1 严格化）：
+				// 签名带 runId（新流程）→ 只认事件 completedId 与签名 runId 直接比对——
+				// 同 cwd 多实例交叉（A run 失败、B run 完成写签名、auditRunId 共享槽被
+				// B 覆盖）时 A 的 async-complete 不触发"退出码误报"纠正（状态真实但因果错位）；
+				// 签名无 runId（旧签名/手动写）→ 兼容语义：auditRunId 空或事件 run 即槽值。
 				const sigCompleted =
 					st.signature &&
 					st.auditStartedAt &&
 					st.signature.at >= st.auditStartedAt &&
 					(st.signature.status === "passed" ||
 						st.signature.status === "blocked");
-				const sigOwned =
-					!st.signature?.runId ||
-					st.signature.runId === st.auditRunId ||
-					!st.auditRunId;
+				const sigOwned = st.signature?.runId
+					? st.signature.runId === completedId
+					: !st.auditRunId || completedId === st.auditRunId;
 				if (env?.success === false && sigCompleted && sigOwned) {
 					const doneStatus = st.signature?.status ?? "passed";
 					try {
