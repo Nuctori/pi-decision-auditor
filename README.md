@@ -65,6 +65,8 @@ Requires **pi-subagents** (spawns the auditor). See [Installation](#installation
 - [Components](#components)
 - [Audit protocol](#audit-protocol)
 - [Tools](#tools)
+- [Full flow (decisions → proof → gaps)](#full-flow-decisions--proof--gaps)
+- [Proof chain & generalization discovery](#proof-chain--generalization-discovery)
 - [Environment](#environment)
 - [Decision chain format](#decision-chain-format)
 - [Design notes](#design-notes)
@@ -164,6 +166,37 @@ Lifecycle rules: every audit is a fresh-spawn run (`context:"fork"` inheriting t
 | `decision_signoff` | sign after audit passes (use the tool, avoid hand-writing state.json) |
 | `pair_gaps` | query proof gaps (deterministic reconciliation: unreviewed decisions / interrupted holes / unclosed blockers / unaudited artifacts) and generalization gaps (recent N findings + frequent-path stats; semantic matching left to the caller) — shared by auditor and main session, read-only, no spawn |
 | `/pair-audit` | manual full/targeted/`--diff` audit |
+
+## Full flow (decisions → proof → gaps)
+
+```text
+User decision chain (user_decision_add, the requirement root — your decisions/corrections,
+  injected across sessions, propagated to subagents)
+  │ adopted as
+  ▼
+Agent decision chain (chain.md, append-only D-NNN: Context/Decision/Rationale/Alternatives/Supersedes)
+  │ captured by the auditor (independently from convlog, not from main-agent self-report)
+  │ + adversarial multi-dimensional audit
+  ▼
+Proof chain (audit-log.md, AUDIT-<epoch> entries: Verdict/Head/Window/Blockers/RunId/Date —
+  report before signature; the extension appends `interrupted` on gate timeout; Head = git artifact baseline)
+  ▼
+Proof gaps (mechanical reconciliation)          Generalization findings (divergent-verification
+  unreviewed decisions / interrupted holes        path findings sink into `### 泛化发现`:
+  unclosed blockers / unaudited artifacts         scene | path | source)
+        │  pair_gaps query                        │ review (last 10, semantic match)
+        ▼                                         ▼
+  fix-loop closure (blockers → fix → re-audit)    Generalization gaps = accountable objects
+        │                                         after sink: recurrence / frequently-unadopted (≥2×)
+        │                                         — mechanically decidable
+        │                                         │ reuse (main agent greps before work)
+        │                                         │ → adopt → back-reference
+        └────────────────┬────────────────────────┘
+                         ▼
+                new chain entry (D-NNN+1) → next proof round
+```
+
+**The core unification: generalization problems become proof problems.** A generalization gap is semantic by nature ("the main agent never considered path P for this scene" — not mechanically decidable); but once it **sinks** into a generalization-finding entry (scene | path | source), it becomes an accountable object — whether the path was adopted (any chain reference), whether it recurred (artifact evidence), whether it is frequent (≥2× count) are all **mechanically decidable**. Sinking is the mechanism that converts semantic gaps into proof gaps: you cannot prove "the main agent never thought of it", but you can prove "the path was given, adopted or not, hit or not".
 
 ## Proof chain & generalization discovery
 
