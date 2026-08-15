@@ -418,7 +418,10 @@ export function parseAuditLog(raw: string): AuditLogEntry[] {
 	let m: RegExpExecArray | null;
 	while ((m = headRe.exec(raw)) !== null) {
 		const start = m.index + m[0].length;
-		const next = raw.indexOf("\n## ", start);
+		// 条目分隔必须匹配真实条目头 `## AUDIT-<ts>:`——审计者报告正文含
+		// `## 审计报告（范围…）` 标题，用泛化的 `\n## ` 会把正文标题误当条目边界
+		// （v1.0.48 实证：findings 恒 0，泛化发现永远解析不到）
+		const next = raw.indexOf("\n## AUDIT-", start);
 		const block = next === -1 ? raw.slice(start) : raw.slice(start, next);
 		const field = (k: string): string => {
 			const fm = block.match(new RegExp(`^\\s*- ${k}: (.*)$`, "m"));

@@ -932,7 +932,7 @@ test("queryGaps：证明缺口对账 + 泛化发现聚合（pair_gaps 数据层�
 	);
 	gaps = queryGaps(dir);
 	assert.equal(gaps.proofGaps.interruptedHole, true);
-	// ⑤ 泛化发现解析（审计者 write 格式）——手写含泛化 section 的条目
+	// ⑤ 泛化发现解析（审计者真实输出格式——正文含 `## 审计报告` 标题，48 实证曾误当条目边界）
 	const logPath = auditLogPath(dir);
 	const extra = `
 ## AUDIT-9999999999000: passed
@@ -942,6 +942,9 @@ test("queryGaps：证明缺口对账 + 泛化发现聚合（pair_gaps 数据层�
 - Blockers: 无
 - RunId: run-3
 - Date: 2026-08-15T04:00:00Z
+
+## 审计报告（范围: D-003）
+- D-003: 一致 ✓
 
 ### 泛化发现
 - 场景: 并发资源分配碰撞 | 路径: 全局位图分配 > 相对偏移 | 来源: blocker-1
@@ -954,7 +957,7 @@ test("queryGaps：证明缺口对账 + 泛化发现聚合（pair_gaps 数据层�
 	assert.equal(
 		gaps.generalization.recentFindings.length,
 		2,
-		"泛化发现必须被解析",
+		"泛化发现必须被解析（正文含 ## 审计报告 标题不得截断条目）",
 	);
 	assert.equal(gaps.generalization.recentFindings[0].scene, "并发资源分配碰撞");
 	assert.equal(
@@ -963,6 +966,10 @@ test("queryGaps：证明缺口对账 + 泛化发现聚合（pair_gaps 数据层�
 	);
 	assert.equal(gaps.generalization.recentFindings[0].source, "blocker-1");
 	assert.equal(gaps.latestAudit?.verdict, "passed");
+	assert.ok(
+		gaps.latestAudit?.body.includes("审计报告（范围: D-003）"),
+		"body 必须含报告标题（条目未被正文标题截断）",
+	);
 	// ⑥ 高频路径（同路径两条 → ≥2 次）
 	const extra2 = `
 ## AUDIT-9999999999001: passed
