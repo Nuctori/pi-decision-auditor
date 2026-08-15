@@ -574,6 +574,29 @@ export function backfillAuditLogIfNeeded(
 	return true;
 }
 
+/** 未来签名 at 钳制（v1.0.74，reviewer M2 根因）：审计者 LLM 写 at 时手动换算 epoch
+ *  常错 +10~11min（本地/UTC 混淆实证）→ 下轮审计 `--since=at` 窗口起点在未来 →
+ *  窗口恒空 → 覆盖完全依赖兜底交叉对照（M1 实证兜底可被轻量退出跳过）→ 系统性漏审。
+ *  检测 at 超未来 5min → 钳制为当前时间并落盘（审计者下轮读 state 时已是修正值）。
+ *  返回是否钳制。 */
+export function clampFutureSignatureAt(cwd: string, st?: AuditState): boolean {
+	const state = st ?? readAuditState(cwd);
+	const sig = state.signature;
+	if (!sig || !sig.at) return false;
+	if (sig.at <= Date.now() + 5 * 60 * 1000) return false;
+	try {
+		const ok = patchAuditState(cwd, { signature: { ...sig, at: Date.now() } });
+		if (ok) {
+			console.warn(
+				`[pi-pair] 签名 at 未来时间钳制（审计者换算错误，+${Math.round((sig.at - Date.now()) / 60000)}min）: ${auditStatePath(cwd)}`,
+			);
+		}
+		return ok;
+	} catch {
+		return false;
+	}
+}
+
 export interface GapQueryResult {
 	latestAudit: AuditLogEntry | null;
 	proofGaps: {

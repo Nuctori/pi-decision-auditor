@@ -16,6 +16,7 @@ import {
 	auditLogPath,
 	auditStatePath,
 	backfillAuditLogIfNeeded,
+	clampFutureSignatureAt,
 	chainPath,
 	clampConvExtractedLine,
 	convLogLineCount,
@@ -245,7 +246,7 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 		"**若本轮纯咨询**（如技术对比问答、信息查询，无决策无产物）：**快速退出**——用 write 更新 state.json：inFlight=false、convExtractedLine 推进到当前对话行总数（只数 `## 👤`/`## 🤖` 行，不是文件行号）、auditFindings=['本轮纯咨询，无审计对象']，**不写 signature 不注入任何价值点**（用户零感知）。退出后立即停止。",
 	);
 	lines.push(
-		"**若本轮产物为低价值窗口**（v1.0.45 收敛纪律）：产物仅文档/格式改动（.md/CHANGELOG/README/package.json 版本号等，无代码逻辑改动）**且窗口内无新决策**——**轻量退出**：按收尾流程签名 passed（inFlight=false、convExtractedLine/signatureConvLine 推进），auditFindings=['本轮仅文档/格式改动，无审计对象']，**不做五维度进攻**（文档内容一致性核对可 1-2 行概述）。这是对抗式审计的主动收敛：低风险产物不值得全量成本，价值 = 首轮全量 + 修复轮核验。**注意**：若文档改动实际隐含行为/设计决策（如 CHANGELOG 描述功能、README 改架构说明），不得轻量退出——照常全量审计。**修复轮守卫（v1.0.46，reviewer Medium）**：上轮 signature.status==='blocked' 且 blockers 非空时**不得轻量退出**——先执行【上轮缺口核对】核验 blockers 闭环（修复提交恰为纯文档是常见型：blocker 是'CHANGELOG 缺记'类文档问题时修复即文档提交，轻量退出会绕过'仍成立必重报'不变量），核验后再签名。",
+		"**若本轮产物为低价值窗口**（v1.0.45 收敛纪律）：产物仅文档/格式改动（.md/CHANGELOG/README/package.json 版本号等，无代码逻辑改动）**且窗口内无新决策**——**轻量退出**：按收尾流程签名 passed（inFlight=false、convExtractedLine/signatureConvLine 推进），auditFindings=['本轮仅文档/格式改动，无审计对象']，**不做五维度进攻**（文档内容一致性核对可 1-2 行概述）。**轻量退出前置守卫（v1.0.74，reviewer M1/M2 实证：at 换算错误致空窗口 + 兜底被跳过 = 系统性漏审）**：判定'仅文档/格式'前必须① 完成窗口兜底交叉对照（HEAD≠signature.head 时 git show HEAD + 完整 git log 比对，**空 --since 窗口不豁免**——空窗口 + HEAD≠head 时默认走兜底）；② 窗口内全部提交逐个 git show 确认无代码逻辑改动（含兜底对照捕获的提交）；对照结果写进 auditFindings。**at 写法（v1.0.74，M2 根因）**：signature 的 at 必须写**当前 epoch ms（Date.now() 语义）**，不要从可读时间手动换算（LLM 换算常错 +10min → 下轮窗口起点未来 → 漏审；扩展会钳制超差 at，但正确书写优先）。**注意**：若文档改动实际隐含行为/设计决策（如 CHANGELOG 描述功能、README 改架构说明），不得轻量退出——照常全量审计。**修复轮守卫（v1.0.46，reviewer Medium）**：上轮 signature.status==='blocked' 且 blockers 非空时**不得轻量退出**——先执行【上轮缺口核对】核验 blockers 闭环（修复提交恰为纯文档是常见型：blocker 是'CHANGELOG 缺记'类文档问题时修复即文档提交，轻量退出会绕过'仍成立必重报'不变量），核验后再签名。",
 	);
 	lines.push(
 		"**若有决策性工作或产物**：继续以下步骤——提取决策入链 + 审决策/产物质量 + 签名。",
@@ -1249,6 +1250,13 @@ export default function (pi: ExtensionAPI): void {
 		try {
 			const root = projectRoot(ctx.cwd);
 			const state = readAuditState(root);
+			// v1.0.74（reviewer M2 根因）：审计者 LLM 换算 at 常错 +10min → 下轮窗口起点
+			// 未来 → 系统性漏审路径。每轮起点钳制未来签名 at（审计者 spawn 前修正落盘）。
+			try {
+				clampFutureSignatureAt(root, state);
+			} catch {
+				/* noop */
+			}
 			// v1.0.63 豁免补写轮询兜底（双保险）：事件路径（async-complete）失败时，
 			// 下轮开始自动补上一轮审计的洞（审计者 blocker 实证：v1.0.61/62 报告未落盘
 			// 且补写未生效——单点事件路径不可靠）。幂等：补写后判定覆盖不再补。

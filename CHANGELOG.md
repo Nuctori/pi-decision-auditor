@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.74] - 2026-08-15
+
+reviewer 三路终审 M1/M2 根因修复（系统性漏审路径）：
+
+- **未来签名 at 钳制**（reviewer M2 根因）：审计者 LLM 写 at 时手动换算 epoch 常错 +10~11min（本地/UTC 混淆实证）→ 下轮审计 `--since=at` 窗口起点未来 → 窗口恒空 → 覆盖完全依赖兜底交叉对照（M1 实证兜底可被轻量退出跳过）→ **系统性漏审路径**。修复：`clampFutureSignatureAt`（lib，at 超未来 5min → 钳制为当前时间落盘 + warn），before_agent_start 每轮起点接线（审计者 spawn 前读到修正值）。
+- **轻量退出前置守卫**（reviewer M1）：判定'仅文档/格式'前必须完成兜底交叉对照（空 --since 窗口不豁免）+ 窗口内全部提交 git show 确认——空窗口 + HEAD≠head 时默认走兜底；对照结果写 auditFindings。
+- **at 写法协议强化**（M2 根因）：任务文本 + agent 协议——at 必须写当前 epoch ms（Date.now() 语义），禁止从可读时间手动换算。
+- **空洞回填**（reviewer N1/N2）：v1.0.70（ef4c295）/ v1.0.71（3469809，blocked 含 blockers）/ v1.0.72（3951be6）手工回填——audit-log 24 条，"61→70 全覆盖"表述修正。
+- **D-077 入链**（reviewer 三路 Low）：D-075/D-076 refines D-072 声明（引用完整性补全）。
+- 验证：65/65 通过，tsc 0。
+
 ## [1.0.73] - 2026-08-15
 
 reviewer 终审 Medium（泄漏型幂等回归——存在性检查与写入侧 blockers 不同源）：
