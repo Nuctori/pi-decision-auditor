@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.66] - 2026-08-15
+
+reviewer Medium 根因修复（v1.0.65 门方案永久丢弃上轮待补条目）——补写判定三代理缺陷终结：
+
+- **补写判定重构为存在性检查**（D-072）：shouldBackfillAuditLog 改为"audit-log 是否已有该签名条目"（head 前缀匹配兼容回填短哈希 + runId 匹配），与 inFlight/auditStartedAt/时间**无关**——v1.0.61（sigAt 恒真）、v1.0.62（auditStartedAt 兜底）、v1.0.65（双门丢弃上轮待补）三次代理缺陷的本质解：存在性是判定本质，时间/审计状态是代理。上轮漏补可补（Medium 实证修复），幂等由存在性天然保证。
+- **unauditedArtifacts 前缀匹配**（reviewer Low-4）：回填条目短哈希 vs 当前 HEAD 全哈希的严格比较恒真 → 产物未审假阳性；改 `head.startsWith(latest.head)`（全哈希相等、短哈希为前缀）。
+- **空洞回填**：v1.0.60（3420f8e，interrupted 降级）/ v1.0.63（fd1220d）/ v1.0.64（c70ad46，blocked）手工回填——audit-log 15 条，61→65 窗口全部覆盖。
+- **测试重构**：shouldBackfillAuditLog 5 场景（runId 匹配/不匹配/head 精确/短哈希前缀/空）+ backfill 6 场景（⑥⑦ 改为"in-flight/陈旧签名也补 + 幂等"——Medium 修复行为锁定）。
+- 验证：65/65 通过，tsc 0。
+
 ## [1.0.65] - 2026-08-15
 
 reviewer 终审 High（轮询路径陈旧签名重复补写，v1.0.61 同型污染）：

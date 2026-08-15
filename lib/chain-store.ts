@@ -475,23 +475,43 @@ export function readAuditLog(cwd: string): AuditLogEntry[] {
  *  事件路径（async-complete）与轮询路径（before_agent_start）共用——事件丢失/匹配失败时
  *  下轮开始自动补上一轮的洞（审计者 blocker 实证：v1.0.61/62 报告未落盘且补写未生效，
  *  单点事件路径不可靠）。幂等：补写后最新条目 runId/Date 覆盖判定 → 不再补。 */
+/** 豁免补写判定（v1.0.66 重构，替代 v1.0.61~65 的 Date/审计状态方案）：
+ *  存在性检查——audit-log 中是否已有该签名的条目（head 前缀匹配兼容回填短哈希 +
+ *  runId 匹配），与 inFlight/auditStartedAt/最新条目时间无关：
+ *  - 幂等：已存在（含回填/正常落盘）→ 不补，天然免疫 v1.0.61 恒真、v1.0.63 陈旧签名、
+ *    v1.0.65 inFlight 门丢弃上轮待补（reviewer Medium 实证：新审计开始后 auditStartedAt
+ *    更新，上轮签名被双门永久跳过）三类缺陷；
+ *  - runId 恒空环境（本仓库实证）走 head 匹配——回填条目 head 短哈希用前缀双向匹配。 */
+export function shouldBackfillAuditLog(
+	entries: AuditLogEntry[],
+	sigRunId: string,
+	sigHead: string,
+): boolean {
+	if (entries.length === 0) return true; // 从未落盘 → 补写
+	const headMatch = (h: string): boolean =>
+		!!sigHead &&
+		(h === sigHead || sigHead.startsWith(h) || h.startsWith(sigHead));
+	return !entries.some(
+		(e) => (sigRunId && e.runId === sigRunId) || headMatch(e.head),
+	);
+}
+
+/** 豁免补写统一入口（v1.0.63）：检测签名已写但 audit-log 无对应条目 → 原子补写元数据。
+ *  事件路径（async-complete）与轮询路径（before_agent_start）共用——事件丢失/匹配失败时
+ *  下轮开始自动补上一轮的洞（审计者 blocker 实证：v1.0.61/62 报告未落盘且补写未生效，
+ *  单点事件路径不可靠）。幂等：补写后存在性判定覆盖 → 不再补（v1.0.66：存在性检查
+ *  替代 inFlight/auditStartedAt 门——门方案会永久丢弃新审计开始前的待补条目，
+ *  reviewer Medium 实证：v1.0.63/64 窗口结论无条目且被双门永远跳过）。 */
 export function backfillAuditLogIfNeeded(cwd: string, st?: AuditState): boolean {
 	const state = st ?? readAuditState(cwd);
 	const sig = state.signature;
 	if (!sig || (sig.status !== "passed" && sig.status !== "blocked")) {
 		return false; // failed/passed-with-warning 不补（非审计者真实结论）
 	}
-	// v1.0.65 新鲜度门（reviewer High）：轮询路径必须与事件路径 sigCompleted 对称——
-	// ① in-flight 时 signature 是上轮陈旧值（新审计结论未知）→ 不补，否则每轮为
-	// 陈旧签名重复补写（v1.0.61 同型污染：blocker 复活 + 假修复轮 + 真实结论延迟）；
-	// ② 签名早于本轮审计开始 = 陈旧签名（sig.at >= auditStartedAt 同 sigCompleted 语义）
-	if (state.inFlight) return false;
-	if (!state.auditStartedAt || sig.at < state.auditStartedAt) return false;
 	const log = readAuditLog(cwd);
-	const latest = log[log.length - 1];
 	const sigRunId = sig.runId ?? state.auditRunId ?? "";
-	if (!shouldBackfillAuditLog(latest, sigRunId, state.auditStartedAt)) {
-		return false; // 已落盘
+	if (!shouldBackfillAuditLog(log, sigRunId, sig.head ?? "")) {
+		return false; // 已有该签名条目（含回填/正常落盘）
 	}
 	appendAuditReport(cwd, {
 		verdict: sig.status === "blocked" ? "blocked" : "passed",
@@ -499,28 +519,11 @@ export function backfillAuditLogIfNeeded(cwd: string, st?: AuditState): boolean 
 		window:
 			"（豁免补写：audit-log ≥30KB 审计者未落盘，扩展原子补写元数据）",
 		blockers: sig.blockers ?? [],
-		// reviewer Medium（v1.0.64）：runId 必须与判定同源（sig.runId ?? auditRunId）——
-		// 签名无 runId 但 auditRunId 非空时，补写条目 runId="" 与判定 sigRunId 不匹配
-		// → 下轮判定恒真 → 每轮重复补写污染证明链（v1.0.61 同型复发路径）
+		// v1.0.64：runId 与判定同源（sig.runId ?? auditRunId）——幂等匹配的基础
 		runId: sigRunId,
 		body: "扩展补写元数据条目（审计结论见 state.json signature/blockers，泛化发现在 gaps.md）。",
 	});
 	return true;
-}
-
-/** 豁免补写判定（v1.0.61，审计者 blocker）：runId 优先——审计者正常落盘的报告带
- *  runId（= auditRunId），且先报告后签名使其 Date 恒早于签名时刻——纯 Date 判定
- *  恒真会每轮重复补写冗余元数据（证明链污染）。runId 缺失走 auditStartedAt 兜底：
- *  本轮审计开始前落库的条目 = 前轮条目 → 补写（reviewer Low：sigAt-5min 容差在
- *  连续豁免轮 <5min 间隔时会漏补写——auditStartedAt 比较无此边缘）。 */
-export function shouldBackfillAuditLog(
-	latestEntry: AuditLogEntry | null,
-	sigRunId: string,
-	auditStartedAt: number,
-): boolean {
-	if (!latestEntry) return true; // 从未落盘 → 补写
-	if (sigRunId) return latestEntry.runId !== sigRunId;
-	return new Date(latestEntry.date).getTime() < auditStartedAt;
 }
 
 export interface GapQueryResult {
@@ -577,7 +580,12 @@ export function queryGaps(
 		interruptedHole: latest?.verdict === "interrupted",
 		unclosedBlockers: latest?.verdict === "blocked" ? latest.blockers : [],
 		unauditedArtifacts:
-			head !== null && (latest === null || head !== latest.head),
+			// v1.0.66（reviewer Low-4）：latest.head 可能为短哈希（手工回填条目）——
+			// 严格不等比较恒真 → 产物未审假阳性。改前缀匹配（全哈希相等、短哈希为前缀）。
+			head !== null &&
+			(latest === null ||
+				!latest.head ||
+				!head.startsWith(latest.head)),
 	};
 	// 泛化缺口（数据聚合）：数据源 = gaps.md（v1.0.60 独立文件）+
 	// audit-log 存量 findings（迁移前兼容）——audit-log ≥30KB 豁免不殃及泛化通道

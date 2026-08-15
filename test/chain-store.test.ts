@@ -1218,60 +1218,48 @@ test("queryGaps：gaps.md 数据源合并（v1.0.60 泛化通道不依赖 audit-
 	assert.equal(gaps.generalization.frequentPaths[0].count, 2);
 });
 
-test("shouldBackfillAuditLog：runId 优先 + Date 容差（v1.0.61 审计者 blocker）", () => {
-	const entry = (runId: string, date: string) => ({
+test("shouldBackfillAuditLog：存在性检查（v1.0.66 重构，替代 Date/审计状态方案）", () => {
+	const entry = (runId: string, head: string) => ({
 		id: "AUDIT-1",
 		verdict: "passed",
-		head: "h",
+		head,
 		window: "w",
 		blockers: [],
 		runId,
-		date,
+		date: "2026-08-15T10:00:00Z",
 		body: "",
 		findings: [],
 	});
-	// runId 匹配（正常落盘：先报告后签名 Date 早于签名）→ 不补写
+	// runId 匹配（正常落盘）→ 不补写
+	assert.equal(
+		shouldBackfillAuditLog([entry("run-1", "h")], "run-1", "sighead1"),
+		false,
+		"runId 匹配 = 已落盘，不补写",
+	);
+	// runId 不同 + head 不匹配 → 补写
+	assert.equal(
+		shouldBackfillAuditLog([entry("run-0", "h")], "run-1", "sighead1"),
+		true,
+		"runId 不同且 head 不匹配 = 未落盘，补写",
+	);
+	// head 精确匹配（全哈希）→ 不补写
 	assert.equal(
 		shouldBackfillAuditLog(
-			entry("run-1", "2026-08-15T10:00:00Z"),
-			"run-1",
-			1786800000000,
+			[entry("", "abcdef1234567890abcdef1234567890abcdef12")],
+			"",
+			"abcdef1234567890abcdef1234567890abcdef12",
 		),
 		false,
-		"runId 匹配 = 已落盘，不得补写（Date 早于签名也成立）",
+		"head 精确匹配 = 已落盘，不补写",
 	);
-	// runId 不同（豁免/未落盘）→ 补写
+	// head 前缀匹配（回填条目短哈希）→ 不补写
 	assert.equal(
-		shouldBackfillAuditLog(
-			entry("run-0", "2026-08-15T10:00:00Z"),
-			"run-1",
-			1786800000000,
-		),
-		true,
-		"runId 不同 = 未落盘，补写",
-	);
-	// runId 缺失：Date 早于本轮审计开始 = 前轮条目 → 补写（auditStartedAt 兜底）
-	assert.equal(
-		shouldBackfillAuditLog(
-			entry("", "2026-08-15T10:02:00Z"),
-			"",
-			1786788300000,
-		),
-		true,
-		"无 runId + 前轮条目 = 补写",
-	);
-	// runId 缺失：Date 晚于本轮审计开始（同轮已落盘，如审计者先写报告）→ 不补写
-	assert.equal(
-		shouldBackfillAuditLog(
-			entry("", "2026-08-15T10:06:00Z"),
-			"",
-			1786788300000,
-		),
+		shouldBackfillAuditLog([entry("", "abcdef12")], "", "abcdef1234567890abcdef1234567890abcdef12"),
 		false,
-		"无 runId + 同轮落盘 = 不补写",
+		"回填短哈希条目按前缀匹配 = 已落盘，不补写",
 	);
 	// 无条目 → 补写
-	assert.equal(shouldBackfillAuditLog(null, "run-1", 1786800000000), true);
+	assert.equal(shouldBackfillAuditLog([], "run-1", "h"), true);
 });
 
 test("backfillAuditLogIfNeeded：双保险补写入口（v1.0.63）", () => {
@@ -1339,30 +1327,39 @@ test("backfillAuditLogIfNeeded：双保险补写入口（v1.0.63）", () => {
 		false,
 		"同源 runId 幂等：不得每轮重复补写（v1.0.61 同型复发防线）",
 	);
-	// ⑥ in-flight 不补（reviewer High v1.0.65）：新审计进行中签名是上轮陈旧值
+	// ⑥ in-flight 也补（v1.0.66 存在性语义：in-flight 时 state.signature 是上轮签名，
+	// audit-log 无其条目 → 补写 = 上轮漏补恢复——reviewer Medium 修复的行为）；幂等防重复
 	const dir5 = tmpDir();
-	recordSignature(dir5, { status: "blocked" }, "head5"); // 陈旧签名（上轮）
+	recordSignature(dir5, { status: "blocked" }, "head5"); // 上轮签名
 	const s5 = readAuditState(dir5);
-	s5.inFlight = true; // 新审计 in-flight
+	s5.inFlight = true; // 新审计 in-flight（上轮结论尚未补写）
 	s5.auditStartedAt = new Date("2026-08-15T10:05:00Z").getTime();
 	assert.equal(
 		backfillAuditLogIfNeeded(dir5, s5),
-		false,
-		"in-flight 时陈旧签名不得补写（否则每轮重复污染证明链）",
+		true,
+		"in-flight 时上轮未补条目必须补写（Medium 修复：门方案会永久丢弃）",
 	);
-	// ⑦ 陈旧签名（sig.at < auditStartedAt）不补：签名早于本轮审计开始 = 上轮结论
+	const s5b = readAuditState(dir5);
+	s5b.inFlight = true;
+	assert.equal(
+		backfillAuditLogIfNeeded(dir5, s5b),
+		false,
+		"补写后幂等：in-flight 重复调用不补（防 v1.0.65 High 重复污染回归）",
+	);
+	// ⑦ 陈旧签名（at < auditStartedAt）+ 无条目 → 补写（存在性语义与审计状态无关）；幂等
 	const dir6 = tmpDir();
 	recordSignature(dir6, { status: "passed" }, "head6");
 	const s6 = readAuditState(dir6);
 	s6.inFlight = false;
-	// 审计开始晚于签名 = 签名是上轮结论（陈旧）；11:00Z 早于当前签名时间，
-	// 须用未来时间构造 at < auditStartedAt
-	s6.auditStartedAt = new Date("2026-08-15T23:00:00Z").getTime();
+	s6.auditStartedAt = new Date("2026-08-15T23:00:00Z").getTime(); // 审计开始晚于签名
 	assert.equal(
 		backfillAuditLogIfNeeded(dir6, s6),
-		false,
-		"陈旧签名（at < auditStartedAt）不得补写（与事件路径 sigCompleted 对称）",
+		true,
+		"陈旧签名（at < auditStartedAt）无条目也补写（存在性检查与时间无关）",
 	);
+	const s6b = readAuditState(dir6);
+	s6b.auditStartedAt = new Date("2026-08-15T23:00:00Z").getTime();
+	assert.equal(backfillAuditLogIfNeeded(dir6, s6b), false, "补写后幂等");
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {
