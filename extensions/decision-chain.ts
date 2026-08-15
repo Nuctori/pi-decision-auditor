@@ -25,6 +25,7 @@ import {
 	hasUncommittedChanges,
 	IN_FLIGHT_TTL_MS,
 	isAuditCompleted,
+	isPlaceholderFinding,
 	listEntries,
 	parseChain,
 	processPath,
@@ -603,18 +604,9 @@ function findingsObserverTick(ui: ExtensionUIContext, root: string): void {
 		idleTicks.delete(root);
 		const json = JSON.stringify(st.auditFindings);
 		const last = st.auditFindings[st.auditFindings.length - 1];
-		const isPlaceholder =
-			!last ||
-			last.startsWith("审计开始") ||
-			last === PURE_CHAT_PLACEHOLDER ||
-			last.includes("审计未触发");
+		const isPlaceholder = !last || isPlaceholderFinding(last);
 		// 计数排除占位（reviewer Low-3：审计开始占位不算发现）
-		const realCount = st.auditFindings.filter(
-			(f) =>
-				!f.startsWith("审计开始") &&
-				f !== PURE_CHAT_PLACEHOLDER &&
-				!f.includes("审计未触发"),
-		).length;
+		const realCount = st.auditFindings.filter((f) => !isPlaceholderFinding(f)).length;
 		if (realCount > 0) findingsCount.set(root, realCount);
 		if (json !== lastFindingsJson.get(root) && !isPlaceholder) {
 			lastFindingsJson.set(root, json);
@@ -657,6 +649,7 @@ function stopFindingsObserver(root?: string | null): void {
 			findingsObservers.delete(root);
 			findingsCount.delete(root);
 			lastFindingsJson.delete(root);
+			idleTicks.delete(root); // reviewer Low：残留计数会让下轮首个 tick 误自停
 		}
 		return;
 	}
@@ -664,6 +657,7 @@ function stopFindingsObserver(root?: string | null): void {
 	findingsObservers.clear();
 	findingsCount.clear();
 	lastFindingsJson.clear();
+	idleTicks.clear();
 }
 
 export default function (pi: ExtensionAPI): void {

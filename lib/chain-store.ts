@@ -1305,7 +1305,19 @@ export function clampConvExtractedLine(cwd: string): number {
 }
 
 /** 纯咨询轮审计者写入的 findings 占位——不算真实中间态（跨会话注入过滤用，防零注入承诺被打破）。 */
+/** 纯咨询轮审计者写入的 findings 占位——不算真实中间态（跨会话注入过滤用，防零注入承诺被打破）。 */
 export const PURE_CHAT_PLACEHOLDER = "本轮纯咨询，无审计对象";
+
+/** 占位/流程性 auditFindings 判定（reviewer Note-2：三处过滤规则统一，防漂移）。
+ *  审计开始占位、纯咨询占位、spawn 失败占位均不算价值点（不注入/不计数/不 notify）。 */
+export function isPlaceholderFinding(f: string): boolean {
+	return (
+		f.startsWith("审计开始") ||
+		f === PURE_CHAT_PLACEHOLDER ||
+		f.includes("审计未触发") ||
+		f.includes("审计触发失败")
+	);
+}
 
 /**
  * 中间态注入判据（B1 行为级测试目标，从扩展 handler 抽出的纯函数）：
@@ -1326,9 +1338,7 @@ export function shouldInjectInterimFindings(
 	if (state.auditFindings.length === 0 || injectedAt === state.auditStartedAt) {
 		return false;
 	}
-	const hasReal = state.auditFindings.some(
-		(f) => f !== PURE_CHAT_PLACEHOLDER && !f.startsWith("审计开始"),
-	);
+	const hasReal = state.auditFindings.some((f) => !isPlaceholderFinding(f));
 	if (!hasReal) return false;
 	return state.inFlight === true || state.signature === null;
 }

@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.57] - 2026-08-15
+
+reviewer 复核修复（idleTicks 残留 Low + 占位规则三处漂移 Note）：
+
+- **idleTicks 残留清理**（reviewer Low）：stopFindingsObserver 的 root 分支与全清分支补 `idleTicks.delete/clear`——残留计数会让下轮新审计首个 tick 即自停（Low-2 防护以重启形态被击穿）。一行级修复 + 语义回归测试。
+- **占位判定统一 helper**（reviewer Note-2）：`isPlaceholderFinding` 导出（lib/chain-store.ts）——观察器 / 超时降级 realFindings / 中间态注入判据三处漂移规则合并（审计开始 / 纯咨询 / 审计未触发 / 审计触发失败）；行为测试 6 断言（含真实核实/收尾反例）。测试新增"审计触发失败"覆盖（includes 宽匹配盲区实证）。
+- 验证：61/61 通过，tsc 0。
+
 ## [1.0.56] - 2026-08-15
 
 v1.0.55 reviewer 复核修复（Medium-1 回归 + Low ×2 + Note ×2）：

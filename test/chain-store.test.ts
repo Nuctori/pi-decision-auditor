@@ -20,6 +20,7 @@ import {
 	auditLogPath,
 	auditReportPath,
 	writeAuditReport,
+	isPlaceholderFinding,
 	chainPath,
 	clampConvExtractedLine,
 	convLogLineCount,
@@ -1094,6 +1095,15 @@ test("queryGaps：证明缺口对账 + 泛化发现聚合（pair_gaps 数据层�
 		0,
 		"混合时区不得误报已审决策为未审（+08:00 vs Z 比较）",
 	);
+});
+
+test("isPlaceholderFinding：占位判定统一规则（v1.0.57 三处漂移合并）", () => {
+	assert.equal(isPlaceholderFinding("审计开始：窗口…"), true, "审计开始占位");
+	assert.equal(isPlaceholderFinding("本轮纯咨询，无审计对象"), true, "纯咨询占位");
+	assert.equal(isPlaceholderFinding("审计未触发：spawn 失败，下轮重试"), true, "spawn 失败占位");
+	assert.equal(isPlaceholderFinding("审计触发失败：spawn 失败，下轮重试"), true, "触发失败占位");
+	assert.equal(isPlaceholderFinding("核实 1 ✓：窗口提交全部独立审阅"), false, "真实核实");
+	assert.equal(isPlaceholderFinding("收尾：决策提取 D-030"), false, "真实收尾");
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {
