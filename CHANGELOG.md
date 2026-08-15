@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.56] - 2026-08-15
+
+v1.0.55 reviewer 复核修复（Medium-1 回归 + Low ×2 + Note ×2）：
+
+- **呼吸灯秒数回归修复**（reviewer Medium-1）：v1.0.55 编辑误删 `auditBreathStart = Date.now()` 赋值（const 0 残留）→ secs 显示 epoch 秒（17 亿）。修复：恢复赋值 + `let` 声明 + 删重复 setStatus——可观察性主打功能自身先被审出回归，证明链闭环实证。
+- **观察器误自停防护**（reviewer Low-2）：findingsObserverTick 单次 `inFlight=false` 即自停——readAuditState 瞬时读失败返回 DEFAULT（inFlight 恒 false）会永久丢失本轮可观察性。修复：连续 3 次才自停（idleTicks 计数）。
+- **计数排除占位**（reviewer Low-3）：`已发现 N 项` 用数组全长（含『审计开始』占位）→ 过滤占位后计数（与超时路径同规则）。
+- **F-10 自愈同停观察器**（reviewer Note-4）：setStatus 抛错自愈路径补 stopFindingsObserver。
+- **D-064 入链**（reviewer Note-5）：结对可观察性用户要求（decision_add 路径）。
+- 验证：60/60 通过，tsc 0。
+
 ## [1.0.55] - 2026-08-15
 
 结对可观察性（用户实证：审计运行中 119s 完全黑盒，不知道结对在干什么）：

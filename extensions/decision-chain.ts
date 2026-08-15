@@ -495,7 +495,7 @@ const AUDIT_BREATH_FRAMES = ["-", "\\", "|", "/"];
 // 缓存 ui 引用：async-complete 回调无 ctx（只有 data），需在 spawn 时保存
 let cachedAuditUi: ExtensionUIContext | null = null;
 let auditBreathTimer: ReturnType<typeof setInterval> | null = null;
-const auditBreathStart = 0;
+let auditBreathStart = 0;
 let auditBreathCwd: string | null = null; // cwd 隔离：多实例并发审计时只灭自己的灯（D2）
 
 function auditStatusText(secs: number, findings: number): string {
@@ -515,6 +515,7 @@ function auditStatusText(secs: number, findings: number): string {
 function startAuditBreath(ui: ExtensionUIContext, cwd: string): void {
 	cachedAuditUi = ui;
 	auditBreathCwd = cwd;
+	auditBreathStart = Date.now();
 	try {
 		ui.setStatus(AUDIT_STATUS_KEY, auditStatusText(0, 0));
 	} catch {
@@ -546,6 +547,7 @@ function startAuditBreath(ui: ExtensionUIContext, cwd: string): void {
 				auditBreathTimer = null;
 			}
 			cachedAuditUi = null;
+			stopFindingsObserver(auditBreathCwd ?? undefined); // F-10 自愈：观察器同停（reviewer Note-4）
 			auditBreathCwd = null;
 		}
 	}, 1000);
@@ -581,14 +583,24 @@ function stopAuditBreath(cwd?: string): void {
 const findingsObservers = new Map<string, ReturnType<typeof setInterval>>();
 const lastFindingsJson = new Map<string, string>();
 const findingsCount = new Map<string, number>();
+/** 连续读到 inFlight=false 的次数（Low-2：防瞬时读失败误自停） */
+const idleTicks = new Map<string, number>();
 
 function findingsObserverTick(ui: ExtensionUIContext, root: string): void {
 	try {
 		const st = readAuditState(root);
+		// 连续 3 次 inFlight=false 才自停（reviewer Low-2：瞬时读失败返回 DEFAULT
+		// 时 inFlight 恒 false，单次即停会永久丢失本轮可观察性）
 		if (!st.inFlight) {
-			stopFindingsObserver(root); // 审计完成：观察器自停（常规轮异步无 async-complete 兜底）
+			const n = (idleTicks.get(root) ?? 0) + 1;
+			if (n >= 3) {
+				stopFindingsObserver(root); // 审计完成：观察器自停
+				return;
+			}
+			idleTicks.set(root, n);
 			return;
 		}
+		idleTicks.delete(root);
 		const json = JSON.stringify(st.auditFindings);
 		const last = st.auditFindings[st.auditFindings.length - 1];
 		const isPlaceholder =
@@ -596,7 +608,14 @@ function findingsObserverTick(ui: ExtensionUIContext, root: string): void {
 			last.startsWith("审计开始") ||
 			last === PURE_CHAT_PLACEHOLDER ||
 			last.includes("审计未触发");
-		if (!isPlaceholder) findingsCount.set(root, st.auditFindings.length);
+		// 计数排除占位（reviewer Low-3：审计开始占位不算发现）
+		const realCount = st.auditFindings.filter(
+			(f) =>
+				!f.startsWith("审计开始") &&
+				f !== PURE_CHAT_PLACEHOLDER &&
+				!f.includes("审计未触发"),
+		).length;
+		if (realCount > 0) findingsCount.set(root, realCount);
 		if (json !== lastFindingsJson.get(root) && !isPlaceholder) {
 			lastFindingsJson.set(root, json);
 			const clip = last.length > 60 ? last.slice(0, 60) + "…" : last;
