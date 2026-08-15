@@ -1520,11 +1520,19 @@ test("clampFutureSignatureAt：未来 at 钳制（v1.0.74 阈值语义锁定）"
 	);
 	// 缺 at / 无签名 → noop
 	patchAuditState(dir, { signature: null });
-	assert.equal(clampFutureSignatureAt(dir, readAuditState(dir)), false, "无签名 noop");
+	assert.equal(
+		clampFutureSignatureAt(dir, readAuditState(dir)),
+		false,
+		"无签名 noop",
+	);
 	patchAuditState(dir, {
 		signature: { status: "passed", at: 0, head: "head3" },
 	});
-	assert.equal(clampFutureSignatureAt(dir, readAuditState(dir)), false, "缺 at noop");
+	assert.equal(
+		clampFutureSignatureAt(dir, readAuditState(dir)),
+		false,
+		"缺 at noop",
+	);
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {
