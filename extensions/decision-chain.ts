@@ -495,12 +495,17 @@ const AUDIT_BREATH_FRAMES = ["-", "\\", "|", "/"];
 // 缓存 ui 引用：async-complete 回调无 ctx（只有 data），需在 spawn 时保存
 let cachedAuditUi: ExtensionUIContext | null = null;
 let auditBreathTimer: ReturnType<typeof setInterval> | null = null;
-let auditBreathStart = 0;
+const auditBreathStart = 0;
 let auditBreathCwd: string | null = null; // cwd 隔离：多实例并发审计时只灭自己的灯（D2）
 
-function auditStatusText(secs: number): string {
+function auditStatusText(secs: number, findings: number): string {
 	const frame =
 		AUDIT_BREATH_FRAMES[Math.floor(secs) % AUDIT_BREATH_FRAMES.length];
+	if (findings > 0) {
+		return UI_LANG === "en"
+			? `${frame} pair audit in progress (${secs}s) · ${findings} findings`
+			: `${frame} 结对审计进行中（${secs}s）· 已发现 ${findings} 项`;
+	}
 	return UI_LANG === "en"
 		? `${frame} pair audit in progress (${secs}s)`
 		: `${frame} 结对审计进行中（${secs}s）`;
@@ -510,17 +515,23 @@ function auditStatusText(secs: number): string {
 function startAuditBreath(ui: ExtensionUIContext, cwd: string): void {
 	cachedAuditUi = ui;
 	auditBreathCwd = cwd;
-	auditBreathStart = Date.now();
 	try {
-		ui.setStatus(AUDIT_STATUS_KEY, auditStatusText(0));
+		ui.setStatus(AUDIT_STATUS_KEY, auditStatusText(0, 0));
 	} catch {
 		/* print/无 UI 模式降级 */
 	}
+	startFindingsObserver(ui, cwd);
 	if (auditBreathTimer) clearInterval(auditBreathTimer);
 	auditBreathTimer = setInterval(() => {
 		const secs = Math.round((Date.now() - auditBreathStart) / 1000);
 		try {
-			cachedAuditUi?.setStatus(AUDIT_STATUS_KEY, auditStatusText(secs));
+			cachedAuditUi?.setStatus(
+				AUDIT_STATUS_KEY,
+				auditStatusText(
+					secs,
+					auditBreathCwd ? (findingsCount.get(auditBreathCwd) ?? 0) : 0,
+				),
+			);
 		} catch {
 			// F-10（v1.0.28 双审计）：setStatus 抛错 = ui 已失效（会话异常结束/
 			// teardown 中断，timer 无 session_shutdown 清理）——继续每秒空转写 stale
@@ -553,6 +564,7 @@ function stopAuditBreath(cwd?: string): void {
 		clearInterval(auditBreathTimer);
 		auditBreathTimer = null;
 	}
+	stopFindingsObserver(auditBreathCwd ?? undefined);
 	try {
 		cachedAuditUi?.setStatus(AUDIT_STATUS_KEY, undefined);
 	} catch {
@@ -560,6 +572,79 @@ function stopAuditBreath(cwd?: string): void {
 	}
 	cachedAuditUi = null;
 	auditBreathCwd = null;
+}
+
+// ---- 结对可观察性（v1.0.55）：审计运行中轮询 findings 增量，轻量 notify + 呼吸灯摘要 ----
+// 审计者边审边写 auditFindings（中间态交付），此前只在被杀/下轮注入——运行中黑盒
+// （用户实证：119s 完全不知道结对在干什么）。20s 轮询 state.json：有新条目 → notify
+// （价值点，非流程噪音——符合"价值可观察、流程隐藏"）；审计完成（inFlight=false）→ 自停。
+const findingsObservers = new Map<string, ReturnType<typeof setInterval>>();
+const lastFindingsJson = new Map<string, string>();
+const findingsCount = new Map<string, number>();
+
+function findingsObserverTick(ui: ExtensionUIContext, root: string): void {
+	try {
+		const st = readAuditState(root);
+		if (!st.inFlight) {
+			stopFindingsObserver(root); // 审计完成：观察器自停（常规轮异步无 async-complete 兜底）
+			return;
+		}
+		const json = JSON.stringify(st.auditFindings);
+		const last = st.auditFindings[st.auditFindings.length - 1];
+		const isPlaceholder =
+			!last ||
+			last.startsWith("审计开始") ||
+			last === PURE_CHAT_PLACEHOLDER ||
+			last.includes("审计未触发");
+		if (!isPlaceholder) findingsCount.set(root, st.auditFindings.length);
+		if (json !== lastFindingsJson.get(root) && !isPlaceholder) {
+			lastFindingsJson.set(root, json);
+			const clip = last.length > 60 ? last.slice(0, 60) + "…" : last;
+			try {
+				ui.notify(
+					UI_LANG === "en" ? `pair audit: ${clip}` : `结对审计中：${clip}`,
+					"info",
+				);
+			} catch {
+				/* print/无 UI 模式降级 */
+			}
+		}
+	} catch {
+		/* noop */
+	}
+}
+
+function startFindingsObserver(ui: ExtensionUIContext, root: string): void {
+	stopFindingsObserver(root);
+	try {
+		lastFindingsJson.set(
+			root,
+			JSON.stringify(readAuditState(root).auditFindings ?? []),
+		);
+	} catch {
+		lastFindingsJson.set(root, "[]");
+	}
+	const t = setInterval(() => findingsObserverTick(ui, root), 20_000);
+	t.unref?.();
+	findingsObservers.set(root, t);
+	findingsObserverTick(ui, root); // 立即一次：已有 findings 时马上可见
+}
+
+function stopFindingsObserver(root?: string | null): void {
+	if (root) {
+		const t = findingsObservers.get(root);
+		if (t) {
+			clearInterval(t);
+			findingsObservers.delete(root);
+			findingsCount.delete(root);
+			lastFindingsJson.delete(root);
+		}
+		return;
+	}
+	for (const t of findingsObservers.values()) clearInterval(t);
+	findingsObservers.clear();
+	findingsCount.clear();
+	lastFindingsJson.clear();
 }
 
 export default function (pi: ExtensionAPI): void {

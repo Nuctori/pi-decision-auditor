@@ -795,6 +795,23 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		agentSrc.includes("链一致性（v1.0.52）") && agentSrc.includes("原语语义聚类"),
 		"审计者 agent 协议必须同步链一致性 + 原语聚类",
 	);
+	// v1.0.55：结对可观察性（findings 观察器接线——运行中黑盒修复）
+	assert.ok(
+		src.includes("startFindingsObserver") &&
+			src.includes("findingsObserverTick") &&
+			src.includes("20_000"),
+		"必须含 findings 观察器（20s 轮询中间态，运行中可观察）",
+	);
+	assert.ok(
+		src.includes("startFindingsObserver(ui, cwd)") &&
+			src.includes("stopFindingsObserver(auditBreathCwd"),
+		"观察器必须随呼吸灯生命周期启停（start 接线 + stop 汇聚）",
+	);
+	// v1.0.55b：pair_gaps 回抄禁令双点同步（reviewer Low——任务文本 + agent 协议）
+	assert.ok(
+		agentSrc.includes("不要直接回抄 pair_gaps"),
+		"agent 协议沉淀段必须同步回抄禁令（双点同步纪律，v1.0.52→53 事故同类）",
+	);
 });
 
 test("appendAuditReport：append-only + 字段渲染 + 与 chain 同目录", () => {
