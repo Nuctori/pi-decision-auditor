@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.50] - 2026-08-15
+
+修复轮（审计者 blocker + reviewer 双路复核：parseAuditLog 解析与真实写者对不齐 / 时区比较误报）：
+
+- **泛化发现 section 头放宽**（审计者 blocker，48d 同源复发）：parseAuditLog 只认 `### 泛化发现`，审计者实际输出 `**泛化发现（…）**：` 粗体形态 → findings 恒空。修复：匹配 `/^#{0,3}\s*\*{0,2}\s*泛化发现/m`（兼容两种形态）；测试补 `**泛化发现**` 真实形态 + 完整复现（5 条目含 appendAuditReport 与手写混排，findings 全解析）。
+- **决策未审时区比较修复**（reviewer Medium-1）：chain.md 审计者手写 `+08:00` 本地时区 vs audit-log `toISOString` UTC `Z`——字符串比较把本地小时当 UTC 比，真实数据误报 12 条已审决策为未审。修复：`new Date().getTime()` epoch ms 比较；测试补混合时区场景（+08:00 vs Z 不误报）。
+- **测试断言残留**（reviewer Blocker）：queryGaps 测试 ⑦ 自相矛盾（`[3]` 正确断言后残留 `[0]` 旧断言）→ 测试红 59/60。修复：删残留断言。
+- **agent 文件围栏失衡**（reviewer Medium-3）：`decision-auditor.md` L148 悬空 ``` + L185 未闭合吞文件末行。修复：删悬空围栏、输出格式块补语言标注。
+- **Low 清理**：appendAuditReport 重复 throw 死代码删除；`slice(-0)` limit=0 边界；README `End is end` 标点恢复；CHANGELOG 48b 重复行删除；临时验证脚本清理。
+- **证明链补全**：D-059（泛化发现四环）/ D-060（pair_gaps 工具）/ D-061（chain.md 重建禁令）经 decision_add 入链（50KB 禁令下主 agent 追加路径）。
+- 验证：60/60 通过，tsc 0。
+
 ## [1.0.49] - 2026-08-15
 
 parseAuditLog 条目分隔修复（审计者实证 blocker：报告正文的 `## 审计报告（范围…）` 标题被 `indexOf("\n## ")` 误当条目边界 → body 截断、**泛化发现 findings 恒 0**，pair_gaps 的 generalization 查询在真实数据上落空）：
@@ -24,7 +36,6 @@ state.json 截断损坏自愈（algeff 实证：审计者 write 工具截断写�
 - **读侧自愈**：readAuditState 损坏分支改为「截断补全（raw + `}` 可解析才写回）→ .corrupt 备份恢复（最新 1 份，原子写回）→ 都失败才落 warn + DEFAULT」。损坏窗口内不再持续报错：一次恢复尝试（进程内按 cwd 记忆，防 2s 门禁轮询重复扫描）。
 - **根因**：审计者子进程的 write 工具是截断写（无 tmp+rename 能力），被 SIGKILL 落在写中途 = state.json 截断。扩展侧自愈是唯一可行缓解（与 convlog 截断风险同族）。
 - 重构：readAuditState 主体解析抽为 `parseAuditState`（恢复路径共用，行为等价）；`atomicWriteState` 原子写回。
-- 测试：读侧自愈 3 场景（截断补全 / 备份恢复 / 恢复失败落 DEFAULT），59/59 通过，tsc 0 错误。
 - 测试：读侧自愈 3 场景（截断补全 / 备份恢复 / 恢复失败落 DEFAULT），59/59 通过，tsc 0 错误。
 
 ## [1.0.48c] - 2026-08-15

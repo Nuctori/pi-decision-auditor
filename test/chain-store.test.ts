@@ -991,6 +991,68 @@ test("queryGaps：证明缺口对账 + 泛化发现聚合（pair_gaps 数据层�
 		"全局位图分配 > 相对偏移",
 	);
 	assert.equal(gaps.generalization.frequentPaths[0].count, 2);
+	// ⑦ 泛化发现 section 头兼容审计者实际写出形态 `**泛化发现（…）**：`（48d 实证：只认 `###` 恒空）
+	const extra3 = `
+## AUDIT-9999999999002: passed
+- Verdict: passed
+- Head: fffd
+- Window: D-005
+- Blockers: 无
+- RunId: run-5
+- Date: 2026-08-15T06:00:00Z
+
+**泛化发现（发散核实路径型产出，48c 协议）**：
+- 场景: 时区混合 | 路径: 统一转 epoch ms 比较 | 来源: reviewer Medium-1
+`;
+	fs.appendFileSync(logPath, `\n${extra3}\n`, "utf-8");
+	gaps = queryGaps(dir, { limit: 5 });
+	assert.equal(
+		gaps.generalization.recentFindings.length,
+		4,
+		"同文件累积 4 条（⑤2 + ⑥1 + ⑦1）",
+	);
+	assert.equal(
+		gaps.generalization.recentFindings[3].path,
+		"统一转 epoch ms 比较",
+		"**泛化发现** 形态必须被解析（写者对不齐盲区复发防护）",
+	);
+	// ⑧ 混合时区不误报（reviewer Medium-1）：chain 决策 `+08:00` vs audit-log `Z`——
+	// 字符串比较会把本地小时当 UTC 比（已审决策误报未审），epoch ms 比较正确
+	const dir2 = tmpDir();
+	const tLocal = new Date("2026-08-15T20:00:00+08:00"); // = 12:00Z
+	appendDecision(
+		dir2,
+		{
+			summary: "本地时区决策",
+			context: "ctx",
+			decision: "dec",
+			rationale: "rat",
+		},
+		tLocal,
+	); // 手写为 +08:00 形态：模拟审计者 write
+	const rawChain = readRaw(dir2).replace(
+		tLocal.toISOString(),
+		"2026-08-15T20:00:00+08:00",
+	);
+	fs.writeFileSync(chainPath(dir2), rawChain, "utf-8");
+	appendAuditReport(
+		dir2,
+		{
+			verdict: "passed",
+			head: "abc",
+			window: "D-001",
+			blockers: [],
+			runId: "r",
+			body: "ok",
+		},
+		new Date("2026-08-15T13:00:00Z"), // 审计晚于决策（12:00Z）
+	);
+	gaps = queryGaps(dir2);
+	assert.equal(
+		gaps.proofGaps.unreviewedDecisions.length,
+		0,
+		"混合时区不得误报已审决策为未审（+08:00 vs Z 比较）",
+	);
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {

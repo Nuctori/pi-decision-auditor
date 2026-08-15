@@ -389,9 +389,6 @@ export function appendAuditReport(
 	throw new Error(
 		`appendAuditReport 并发冲突（3 次重试仍失败）: ${file} — 报告未落盘`,
 	);
-	throw new Error(
-		`appendAuditReport 并发冲突（3 次重试仍失败）: ${file} — 报告未落盘`,
-	);
 }
 
 // ---- 缺口查询（pair_gaps 工具的数据层）----
@@ -428,12 +425,15 @@ export function parseAuditLog(raw: string): AuditLogEntry[] {
 			return fm ? fm[1].trim() : "";
 		};
 		const findings: AuditLogEntry["findings"] = [];
-		const gapStart = block.indexOf("### 泛化发现");
-		if (gapStart !== -1) {
-			const gapBlock = block.slice(gapStart);
-			const gapHeadRe = /^- 场景: (.+) \| 路径: (.+) \| 来源: (.+)$/gm;
+		// 泛化发现 section 头匹配须兼容实际写者输出形态：协议模板 `### 泛化发现` 与
+		// 审计者实际写出的 `**泛化发现（…）**：`（48d 实证：只认 `###` 时 findings 恒空）
+		const gapHeadRe = /^#{0,3}\s*\*{0,2}\s*泛化发现/m;
+		const gapMatch = gapHeadRe.exec(block);
+		if (gapMatch) {
+			const gapBlock = block.slice(gapMatch.index);
+			const findingRe = /^- 场景: (.+) \| 路径: (.+) \| 来源: (.+)$/gm;
 			let gm: RegExpExecArray | null;
-			while ((gm = gapHeadRe.exec(gapBlock)) !== null) {
+			while ((gm = findingRe.exec(gapBlock)) !== null) {
 				findings.push({
 					scene: gm[1].trim(),
 					path: gm[2].trim(),
@@ -509,7 +509,14 @@ export function queryGaps(
 	const chainEntries = parseChain(readRaw(cwd));
 	const unreviewedDecisions = latest
 		? chainEntries
-				.filter((e) => e.date && e.date > latest.date)
+				.filter(
+					(e) =>
+						e.date &&
+						// 时区混合比较（reviewer Medium-1）：chain.md 审计者手写为本地时区
+						// （`+08:00`），audit-log 为 toISOString UTC（`Z`）——字符串比较
+						// 把本地小时当 UTC 比，已审决策被误报未审。统一转 epoch ms。
+						new Date(e.date).getTime() > new Date(latest.date).getTime(),
+				)
 				.map((e) => ({ id: e.id, summary: e.summary, date: e.date }))
 		: chainEntries.map((e) => ({ id: e.id, summary: e.summary, date: e.date }));
 	const head = gitHead(cwd);
@@ -530,7 +537,7 @@ export function queryGaps(
 	for (const e of entries) {
 		for (const f of e.findings) allFindings.push({ ...f, audit: e.id });
 	}
-	const recentFindings = allFindings.slice(-limit);
+	const recentFindings = limit > 0 ? allFindings.slice(-limit) : [];
 	const counts = new Map<string, number>();
 	for (const f of allFindings)
 		counts.set(f.path, (counts.get(f.path) ?? 0) + 1);
