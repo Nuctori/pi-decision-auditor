@@ -780,6 +780,21 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		agentSrc.includes("行格式必须严格保持"),
 		"审计者 agent 协议必须同步泛化发现行格式强制",
 	);
+	// v1.0.52：链一致性检查 + 原语语义聚类（隔壁 AI 建议审计后的降级落地）
+	assert.ok(
+		src.includes("链一致性检查") &&
+			src.includes("悬空引用") &&
+			src.includes("临时假设标注"),
+		"审计任务必须含链一致性检查（悬空引用/传递一致性/临时假设 Confidence 降级）",
+	);
+	assert.ok(
+		src.includes("原语语义聚类") && src.includes("局部最优陷阱"),
+		"泛化复查必须含原语语义聚类（跨场景模式识别）",
+	);
+	assert.ok(
+		agentSrc.includes("链一致性（v1.0.52）") && agentSrc.includes("原语语义聚类"),
+		"审计者 agent 协议必须同步链一致性 + 原语聚类",
+	);
 });
 
 test("appendAuditReport：append-only + 字段渲染 + 与 chain 同目录", () => {
