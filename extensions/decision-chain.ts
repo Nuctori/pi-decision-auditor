@@ -1755,9 +1755,11 @@ export default function (pi: ExtensionAPI): void {
 	// R5 持续交付：审计者完成（async-complete）时若已写 blocked signature → 立即交付主 agent
 	// （sendUserMessage followUp，不等下轮注入）——blocker 第一时间给主 agent 处理，直到没问题
 	pi.events.on("subagent:async-complete", (data: unknown) => {
-		const env = data as
-			| { asyncId?: string; runId?: string; success?: boolean }
-			| null;
+		const env = data as {
+			asyncId?: string;
+			runId?: string;
+			success?: boolean;
+		} | null;
 		const completedId = env?.runId ?? env?.asyncId ?? "";
 		// L2 reviewer run 完成即移除（T1 补漏）：Set 只保留挂起 run，session_shutdown 有界
 		if (completedId) {
