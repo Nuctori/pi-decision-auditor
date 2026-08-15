@@ -15,6 +15,7 @@ import {
 	appendProcessSignal,
 	auditLogPath,
 	auditStatePath,
+	backfillAuditLogIfNeeded,
 	chainPath,
 	clampConvExtractedLine,
 	convLogLineCount,
@@ -39,7 +40,6 @@ import {
 	renderEntry,
 	resetForSessionStart,
 	resolveProjectRoot,
-	shouldBackfillAuditLog,
 	shouldClearStaleLock,
 	shouldInjectInterimFindings,
 	shouldInjectSignatureFindings,
@@ -1249,6 +1249,14 @@ export default function (pi: ExtensionAPI): void {
 		try {
 			const root = projectRoot(ctx.cwd);
 			const state = readAuditState(root);
+			// v1.0.63 豁免补写轮询兜底（双保险）：事件路径（async-complete）失败时，
+			// 下轮开始自动补上一轮审计的洞（审计者 blocker 实证：v1.0.61/62 报告未落盘
+			// 且补写未生效——单点事件路径不可靠）。幂等：补写后判定覆盖不再补。
+			try {
+				backfillAuditLogIfNeeded(root, state);
+			} catch {
+				/* noop：补写失败不影响注入 */
+			}
 			// 跨会话注入去重（v1.0.25，用户报障「为什么新会话还有泄露」）：
 			// injectedSignatureAt/injectedInterimAt 持久化到 state.json——同一签名/中间态
 			// 只注入一次（审计完成后首个 turn / followUp 场景），之后所有新会话不再重复弹出；
@@ -2019,34 +2027,12 @@ export default function (pi: ExtensionAPI): void {
 				const sigOwned = st.signature?.runId
 					? st.signature.runId === completedId
 					: !st.auditRunId || completedId === st.auditRunId;
-				// v1.0.60 豁免补写：审计者按 audit-log ≥30KB 豁免未落盘报告 →
-				// 扩展原子补写元数据条目（write 全量重建压缩风险由 tmp+rename 消除，
-				// v1.0.48 interrupted 补写同模式）；判定 = shouldBackfillAuditLog
-				// （v1.0.61：runId 优先——正常落盘报告带 runId 且先报告后签名 Date 恒早于
-				// 签名，纯 Date 判定恒真会每轮重复补写污染证明链；runId 缺失走 5min 容差）
+				// v1.0.63 豁免补写统一入口（事件路径）：审计者按 audit-log ≥30KB 豁免未落盘 →
+				// 扩展原子补写元数据（v1.0.60 同模式）；判定见 shouldBackfillAuditLog。
+				// 事件路径失败（匹配/版本）由 before_agent_start 轮询兜底（双保险）。
 				if (sigCompleted && sigOwned) {
 					try {
-						const log = readAuditLog(completedCwd);
-						const latestEntry = log[log.length - 1];
-						const sigRunId = st.signature?.runId ?? st.auditRunId ?? "";
-						if (
-							shouldBackfillAuditLog(
-								latestEntry,
-								sigRunId,
-								st.auditStartedAt ?? 0,
-							)
-						) {
-							appendAuditReport(completedCwd, {
-								verdict:
-									st.signature?.status === "blocked" ? "blocked" : "passed",
-								head: st.signature?.head ?? "",
-								window:
-									"（v1.0.60 豁免：audit-log ≥30KB 审计者未落盘，扩展补写元数据）",
-								blockers: st.signature?.blockers ?? [],
-								runId: st.signature?.runId ?? "",
-								body: "扩展补写元数据条目（审计结论见 state.json signature/blockers，泛化发现在 gaps.md）。",
-							});
-						}
+						backfillAuditLogIfNeeded(completedCwd, st);
 					} catch {
 						/* noop：补写失败不阻塞交付 */
 					}

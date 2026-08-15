@@ -22,7 +22,9 @@ import {
 	auditLogPath,
 	auditReportPath,
 	writeAuditReport,
+	backfillAuditLogIfNeeded,
 	isPlaceholderFinding,
+	readAuditLog,
 	chainPath,
 	clampConvExtractedLine,
 	convLogLineCount,
@@ -833,14 +835,20 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	);
 	// v1.0.61：补写判定 runId 优先（审计者 blocker——Date 判定恒真重复补写）
 	assert.ok(
-		src.includes("shouldBackfillAuditLog(") &&
-			src.includes("st.auditStartedAt ?? 0"),
-		"豁免补写必须用 shouldBackfillAuditLog（runId 优先 + auditStartedAt 兜底）",
+		src.includes("backfillAuditLogIfNeeded"),
+		"豁免补写必须走统一入口（lib shouldBackfillAuditLog：runId 优先 + auditStartedAt 兜底）",
 	);
 	// v1.0.62：agent 协议双点同步（reviewer Medium-High——v1.0.52→53 事故同类）
 	assert.ok(
 		agentSrc.includes("扩展会在审计完成时用 appendAuditReport"),
 		"agent 协议必须同步 v1.0.60 豁免语义（禁止 write 触碰 + 扩展原子补写）",
+	);
+	// v1.0.63：补写双保险（事件 + 轮询）
+	assert.ok(
+		(src.includes("backfillAuditLogIfNeeded(completedCwd, st)") ? 1 : 0) +
+			(src.includes("backfillAuditLogIfNeeded(root, state)") ? 1 : 0) >=
+			2,
+		"补写必须双保险：async-complete 事件路径 + before_agent_start 轮询兜底",
 	);
 });
 
@@ -1264,6 +1272,46 @@ test("shouldBackfillAuditLog：runId 优先 + Date 容差（v1.0.61 审计者 bl
 	);
 	// 无条目 → 补写
 	assert.equal(shouldBackfillAuditLog(null, "run-1", 1786800000000), true);
+});
+
+test("backfillAuditLogIfNeeded：双保险补写入口（v1.0.63）", () => {
+	const dir = tmpDir();
+	// ① 签名已写但 audit-log 无条目 → 补写
+	recordSignature(dir, { status: "passed" }, "head1");
+	const s1 = readAuditState(dir);
+	assert.equal(backfillAuditLogIfNeeded(dir, s1), true, "未落盘必须补写");
+	const entries1 = readAuditLog(dir);
+	assert.equal(entries1.length, 1);
+	assert.equal(entries1[0].verdict, "passed");
+	// ② 幂等：再调不补
+	assert.equal(backfillAuditLogIfNeeded(dir, readAuditState(dir)), false, "已补写不重复");
+	// ③ failed 签名不补
+	const dir2 = tmpDir();
+	recordSignature(dir2, { status: "failed" }, "head2");
+	assert.equal(
+		backfillAuditLogIfNeeded(dir2, readAuditState(dir2)),
+		false,
+		"failed 不补（非审计者真实结论）",
+	);
+	// ④ 审计者已正常落盘（runId 匹配）→ 不补
+	const dir3 = tmpDir();
+	appendAuditReport(
+		dir3,
+		{
+			verdict: "passed",
+			head: "h",
+			window: "w",
+			blockers: [],
+			runId: "run-9",
+			body: "ok",
+		},
+		new Date("2026-08-15T10:00:00Z"),
+	);
+	recordSignature(dir3, { status: "passed", runId: "run-9" }, "head3");
+	const s3 = readAuditState(dir3);
+	s3.auditRunId = "run-9";
+	s3.auditStartedAt = new Date("2026-08-15T10:05:00Z").getTime();
+	assert.equal(backfillAuditLogIfNeeded(dir3, s3), false, "runId 匹配已落盘不补");
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {

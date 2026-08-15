@@ -471,6 +471,34 @@ export function readAuditLog(cwd: string): AuditLogEntry[] {
 	}
 }
 
+/** 豁免补写统一入口（v1.0.63）：检测本轮审计签名已写但 audit-log 未覆盖 → 原子补写元数据。
+ *  事件路径（async-complete）与轮询路径（before_agent_start）共用——事件丢失/匹配失败时
+ *  下轮开始自动补上一轮的洞（审计者 blocker 实证：v1.0.61/62 报告未落盘且补写未生效，
+ *  单点事件路径不可靠）。幂等：补写后最新条目 runId/Date 覆盖判定 → 不再补。 */
+export function backfillAuditLogIfNeeded(cwd: string, st?: AuditState): boolean {
+	const state = st ?? readAuditState(cwd);
+	const sig = state.signature;
+	if (!sig || (sig.status !== "passed" && sig.status !== "blocked")) {
+		return false; // failed/passed-with-warning 不补（非审计者真实结论）
+	}
+	const log = readAuditLog(cwd);
+	const latest = log[log.length - 1];
+	const sigRunId = sig.runId ?? state.auditRunId ?? "";
+	if (!shouldBackfillAuditLog(latest, sigRunId, state.auditStartedAt ?? 0)) {
+		return false; // 已落盘
+	}
+	appendAuditReport(cwd, {
+		verdict: sig.status === "blocked" ? "blocked" : "passed",
+		head: sig.head ?? "",
+		window:
+			"（豁免补写：audit-log ≥30KB 审计者未落盘，扩展原子补写元数据）",
+		blockers: sig.blockers ?? [],
+		runId: sig.runId ?? "",
+		body: "扩展补写元数据条目（审计结论见 state.json signature/blockers，泛化发现在 gaps.md）。",
+	});
+	return true;
+}
+
 /** 豁免补写判定（v1.0.61，审计者 blocker）：runId 优先——审计者正常落盘的报告带
  *  runId（= auditRunId），且先报告后签名使其 Date 恒早于签名时刻——纯 Date 判定
  *  恒真会每轮重复补写冗余元数据（证明链污染）。runId 缺失走 auditStartedAt 兜底：
