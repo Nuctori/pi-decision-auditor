@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.59] - 2026-08-15
+
+reviewer 终审 Low/Note 处理（v1.0.58 全闭环后）：
+
+- **PURE_CHAT_PLACEHOLDER 死 import 删除**（reviewer Low）：v1.0.58 超时过滤并入 helper 后唯一使用点消失，tsconfig 未开 noUnusedLocals 故 tsc 不报——清理。
+- **audit-log ≥ 30KB 落盘豁免**（reviewer Note-2 根因修复）：v1.0.57 窗口 blocked 审计未落盘 AUDIT 条目（37KB 文件 write 全量重建压缩风险，审计者临时豁免）→ 协议固化：≥ 30KB 只落盘元数据条目（无正文），结论经 blockers/auditFindings 交付——write 全量重建压缩风险与 chain.md 50KB 禁令同族，防未来空洞。
+- **tag 树缩进修正提交**（reviewer Note-3）：v1.0.58 超时路径缩进异常（工作区已修，随本版提交使 tag 与工作区一致）。
+- 验证：61/61 通过，tsc 0。
+
 ## [1.0.58] - 2026-08-15
 
 审计者 + reviewer 双路同源 blocker 修复（"声称三处统一"只兑现两处）：

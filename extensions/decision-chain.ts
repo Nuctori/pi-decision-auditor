@@ -29,7 +29,6 @@ import {
 	listEntries,
 	parseChain,
 	processPath,
-	PURE_CHAT_PLACEHOLDER,
 	readAuditState,
 	readProcess,
 	readRaw,
@@ -309,7 +308,7 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 	lines.push("");
 	lines.push("【输出】逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 产物总评。");
 	lines.push(
-		`【报告落盘（证明链，先报告后签名）】写 signature **之前**，先把本轮审计报告 append 到 \`${auditLogPath(cwd)}\`（与 chain 同目录策略；write 纪律同 chain.md：read 全文 → content = 原文完整内容 + 新条目，一个字符不少，禁止整体重写）。条目格式：\`## AUDIT-<epoch ms>: <passed|blocked|low-value>\`，字段 Verdict / Head（= \`git rev-parse HEAD\` 全哈希）/ Window（审计窗口概述：决策范围+提交+未提交文件）/ Blockers（无则'无'）/ RunId（= state.json 的 auditRunId）/ Date（ISO），空行后附正文 = 你的审计输出（目标推导+独立核实+逐条判定+总评，多行原样；末尾按【泛化发现与复查】附泛化 section，无则省略）。真实审计必写；轻量退出写 \`low-value\` 简短条目；纯咨询**不写**（零噪音）。写完报告再写签名——报告是证明链主体，签名是结论；先报告后签名保证你被杀时报告仍在。`,
+		`【报告落盘（证明链，先报告后签名）】写 signature **之前**，先把本轮审计报告 append 到 \`${auditLogPath(cwd)}\`（与 chain 同目录策略；write 纪律同 chain.md：read 全文 → content = 原文完整内容 + 新条目，一个字符不少，禁止整体重写）。条目格式：\`## AUDIT-<epoch ms>: <passed|blocked|low-value>\`，字段 Verdict / Head（= \`git rev-parse HEAD\` 全哈希）/ Window（审计窗口概述：决策范围+提交+未提交文件）/ Blockers（无则'无'）/ RunId（= state.json 的 auditRunId）/ Date（ISO），空行后附正文 = 你的审计输出（目标推导+独立核实+逐条判定+总评，多行原样；末尾按【泛化发现与复查】附泛化 section，无则省略）。真实审计必写；轻量退出写 \`low-value\` 简短条目；纯咨询**不写**（零噪音）。**audit-log ≥ 30KB 落盘豁免（v1.0.59，37KB 实证同类压缩风险）**：文件 ≥ 30KB 时禁止 write 全量重建——只落盘元数据条目（Verdict/Head/Window/Blockers/RunId/Date，无正文），完整结论经 blockers/auditFindings 交付；下轮审计者收尾时若有能力补正文再补。写完报告再写签名——报告是证明链主体，签名是结论；先报告后签名保证你被杀时报告仍在。`,
 	);
 	lines.push(
 		"【证明缺口自查（顺手，不额外 spawn）】写报告前用 read 对账（gap 分析是 AI 能力，不依赖工具）：① chain.md 中 Date 晚于 audit-log 最新条目 Date 的 D-NNN = 决策未审，报告正文记录（非本轮窗口的存量缺口，仅记录不升级）；② audit-log 最近条目为 interrupted（上轮超时降级）→ 本轮报告注明『上轮中断，本轮补填』；③ blocked 后无新条目 = 上轮缺口未闭环，修复轮按【上轮缺口核对】核验即可。",
@@ -1869,9 +1868,9 @@ export default function (pi: ExtensionAPI): void {
 						// 超时：不再 600s 协商黑洞——降级放行；blockers 用审计者已确认的
 						// findings（价值点），无 findings 才给流程提示（D-021）
 						const timeoutState = readAuditState(root);
-							const realFindings = timeoutState.auditFindings.filter(
-								(f) => !isPlaceholderFinding(f),
-							);
+						const realFindings = timeoutState.auditFindings.filter(
+							(f) => !isPlaceholderFinding(f),
+						);
 						// 证明链补写（v1.0.48）：审计者超时未签名 → 扩展补写 interrupted 报告条目，
 						// 防该轮在 audit-log 无记录（证明链空洞）；失败不影响降级放行
 						try {
