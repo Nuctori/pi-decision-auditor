@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.47] - 2026-08-15
+
+v1.0.46 交付 reviewer 复核（Medium-1 + Note-3 可修项）修复：
+
+- **Medium-1：L2 守卫缺失**——D-052 声称"L2 同步同一纪律"，实际修复轮守卫只在 L1（:242），L2 轻量退出分支（:391）无守卫子句。修复：L2 镜像同一守卫（blocked 且 blockers 非空 → 不得轻量退出，先核验闭环）——交付门禁路径纵深防御，兑现"与 L1 同构"承诺。
+- **Note-3：审计者 agent 工具白名单含未加载 ctx_\***——`agents/decision-auditor.md` 声明 `ctx_read, ctx_grep, ctx_find, ctx_ls` 但运行时严格 allowlist 拒绝（未加载 lean-ctx 扩展）→ **审计者 run 全量 exitCode=1**（今日 3 次审计全部先标 failed，靠 v1.0.44 failed 纠正兜底）——这是用户原始报障"结果审计经常 low 收不了尾"的又一根因。修复：从白名单移除 ctx_*（审计者实际用 read/grep/find/ls/bash 完成工作，无能力损失）。
+- **Note-2（D-052 记录卫生）**：留给下轮审计处理（链 append-only 纪律，审计者职责）。
+- 测试：接线守卫 +2 组断言（L2 守卫镜像 / ctx_* 移除），57/57 通过，tsc 0 错误。
+
 ## [1.0.46] - 2026-08-15
 
 v1.0.45 双路 reviewer 复核（Medium + 3 Note）修复：

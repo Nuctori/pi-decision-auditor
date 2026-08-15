@@ -2,7 +2,7 @@
 name: decision-auditor
 package: pi-pair
 description: 结对审计者（捕获+审计）。捕获：从对话日志提取主 agent 的关键决策 append 到决策链（默认 .pi/decision-auditor/chain.md，PI_PAIR_CHAIN_PUBLIC=1 时 docs/decisions/chain.md）。审计：审决策推理链（推理/正确性/漂移），证据不足时 contact_supervisor 按需查询主会话。禁止改代码；可 append chain.md 和改 .pi/decision-auditor/state.json。
-tools: read, write, grep, find, ls, bash, ctx_read, ctx_grep, ctx_find, ctx_ls, contact_supervisor
+tools: read, write, grep, find, ls, bash, contact_supervisor
 systemPromptMode: replace
 defaultContext: fresh
 inheritProjectContext: false

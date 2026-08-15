@@ -692,6 +692,25 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 			src.includes("上轮 signature.status==='blocked'"),
 		"低价值窗口轻量退出必须含修复轮守卫（blocked 且 blockers 非空 → 先核验闭环再签名）",
 	);
+	// v1.0.46 reviewer Medium-1：L2 必须镜像同一守卫（D-052 声称同步，实现补全——纵深防御）
+	assert.ok(
+		src.includes("修复轮守卫（v1.0.46，与 L1 同构）"),
+		"L2 reviewer prompt 必须镜像修复轮守卫（与 L1 同构，防纯文档修复绕过重报不变量）",
+	);
+	// v1.0.46 reviewer Note-3：审计者 agent 工具白名单不得声明未加载扩展的 ctx_*
+	// （运行时严格 allowlist 拒绝 → 审计者 run 全量 exitCode=1 → 每次先标 failed，
+	//  用户原始报障"结果审计收不了尾"的又一根因——v1.0.44 纠正仅是兜底）
+	const agentSrc = fs.readFileSync(
+		path.join(process.cwd(), "agents", "decision-auditor.md"),
+		"utf-8",
+	);
+	assert.ok(
+		!agentSrc.includes("ctx_read") &&
+			!agentSrc.includes("ctx_grep") &&
+			!agentSrc.includes("ctx_find") &&
+			!agentSrc.includes("ctx_ls"),
+		"审计者 agent 工具白名单不得含 ctx_*（未加载扩展，运行时拒绝致 run exitCode=1）",
+	);
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {
