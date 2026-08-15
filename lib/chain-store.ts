@@ -471,10 +471,6 @@ export function readAuditLog(cwd: string): AuditLogEntry[] {
 	}
 }
 
-/** 豁免补写统一入口（v1.0.63）：检测本轮审计签名已写但 audit-log 未覆盖 → 原子补写元数据。
- *  事件路径（async-complete）与轮询路径（before_agent_start）共用——事件丢失/匹配失败时
- *  下轮开始自动补上一轮的洞（审计者 blocker 实证：v1.0.61/62 报告未落盘且补写未生效，
- *  单点事件路径不可靠）。幂等：补写后最新条目 runId/Date 覆盖判定 → 不再补。 */
 /** 豁免补写判定（v1.0.66 重构，替代 v1.0.61~65 的 Date/审计状态方案）：
  *  存在性检查——audit-log 中是否已有该签名的条目（head 前缀匹配兼容回填短哈希 +
  *  runId 匹配），与 inFlight/auditStartedAt/最新条目时间无关：
@@ -502,7 +498,10 @@ export function shouldBackfillAuditLog(
  *  单点事件路径不可靠）。幂等：补写后存在性判定覆盖 → 不再补（v1.0.66：存在性检查
  *  替代 inFlight/auditStartedAt 门——门方案会永久丢弃新审计开始前的待补条目，
  *  reviewer Medium 实证：v1.0.63/64 窗口结论无条目且被双门永远跳过）。 */
-export function backfillAuditLogIfNeeded(cwd: string, st?: AuditState): boolean {
+export function backfillAuditLogIfNeeded(
+	cwd: string,
+	st?: AuditState,
+): boolean {
 	const state = st ?? readAuditState(cwd);
 	const sig = state.signature;
 	if (!sig || (sig.status !== "passed" && sig.status !== "blocked")) {
@@ -516,8 +515,7 @@ export function backfillAuditLogIfNeeded(cwd: string, st?: AuditState): boolean 
 	appendAuditReport(cwd, {
 		verdict: sig.status === "blocked" ? "blocked" : "passed",
 		head: sig.head ?? "",
-		window:
-			"（豁免补写：audit-log ≥30KB 审计者未落盘，扩展原子补写元数据）",
+		window: "（豁免补写：audit-log ≥30KB 审计者未落盘，扩展原子补写元数据）",
 		blockers: sig.blockers ?? [],
 		// v1.0.64：runId 与判定同源（sig.runId ?? auditRunId）——幂等匹配的基础
 		runId: sigRunId,
@@ -583,9 +581,7 @@ export function queryGaps(
 			// v1.0.66（reviewer Low-4）：latest.head 可能为短哈希（手工回填条目）——
 			// 严格不等比较恒真 → 产物未审假阳性。改前缀匹配（全哈希相等、短哈希为前缀）。
 			head !== null &&
-			(latest === null ||
-				!latest.head ||
-				!head.startsWith(latest.head)),
+			(latest === null || !latest.head || !head.startsWith(latest.head)),
 	};
 	// 泛化缺口（数据聚合）：数据源 = gaps.md（v1.0.60 独立文件）+
 	// audit-log 存量 findings（迁移前兼容）——audit-log ≥30KB 豁免不殃及泛化通道

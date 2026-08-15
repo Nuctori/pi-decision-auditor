@@ -1254,7 +1254,11 @@ test("shouldBackfillAuditLog：存在性检查（v1.0.66 重构，替代 Date/�
 	);
 	// head 前缀匹配（回填条目短哈希）→ 不补写
 	assert.equal(
-		shouldBackfillAuditLog([entry("", "abcdef12")], "", "abcdef1234567890abcdef1234567890abcdef12"),
+		shouldBackfillAuditLog(
+			[entry("", "abcdef12")],
+			"",
+			"abcdef1234567890abcdef1234567890abcdef12",
+		),
 		false,
 		"回填短哈希条目按前缀匹配 = 已落盘，不补写",
 	);
