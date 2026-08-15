@@ -493,7 +493,10 @@ export function backfillAuditLogIfNeeded(cwd: string, st?: AuditState): boolean 
 		window:
 			"（豁免补写：audit-log ≥30KB 审计者未落盘，扩展原子补写元数据）",
 		blockers: sig.blockers ?? [],
-		runId: sig.runId ?? "",
+		// reviewer Medium（v1.0.64）：runId 必须与判定同源（sig.runId ?? auditRunId）——
+		// 签名无 runId 但 auditRunId 非空时，补写条目 runId="" 与判定 sigRunId 不匹配
+		// → 下轮判定恒真 → 每轮重复补写污染证明链（v1.0.61 同型复发路径）
+		runId: sigRunId,
 		body: "扩展补写元数据条目（审计结论见 state.json signature/blockers，泛化发现在 gaps.md）。",
 	});
 	return true;

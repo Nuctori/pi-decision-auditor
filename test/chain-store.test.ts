@@ -1320,6 +1320,24 @@ test("backfillAuditLogIfNeeded：双保险补写入口（v1.0.63）", () => {
 		false,
 		"runId 匹配已落盘不补",
 	);
+	// ⑤ 签名无 runId + auditRunId 非空：补写条目 runId 与判定同源 → 幂等（reviewer Medium v1.0.64）
+	const dir4 = tmpDir();
+	recordSignature(dir4, { status: "passed" }, "head4"); // 签名无 runId
+	const s4 = readAuditState(dir4);
+	s4.auditRunId = "run-4"; // 但 auditRunId 非空（auditRunId 落盘失败模式的实证场景）
+	s4.auditStartedAt = new Date("2026-08-15T10:05:00Z").getTime();
+	assert.equal(backfillAuditLogIfNeeded(dir4, s4), true, "首次补写");
+	const entries4 = readAuditLog(dir4);
+	assert.equal(
+		entries4[0].runId,
+		"run-4",
+		"补写条目 runId 必须与判定同源（sig.runId ?? auditRunId）",
+	);
+	assert.equal(
+		backfillAuditLogIfNeeded(dir4, readAuditState(dir4)),
+		false,
+		"同源 runId 幂等：不得每轮重复补写（v1.0.61 同型复发防线）",
+	);
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {

@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.64] - 2026-08-15
+
+reviewer 终审 Medium（幂等缺陷，v1.0.61 同型复发路径）：
+
+- **补写条目 runId 与判定同源**（reviewer Medium）：backfillAuditLogIfNeeded 补写 `runId: sig.runId ?? ""` vs 判定 `sigRunId = sig.runId ?? state.auditRunId ?? ""` 来源不一致——签名无 runId 但 auditRunId 非空时（auditRunId 落盘失败模式的实证场景），首次补写条目 runId="" 与下次判定 sigRunId 不匹配 → 每轮重复补写污染证明链。修复：`runId: sigRunId`（与判定同源）。
+- **测试补场景⑤**（reviewer Low）：签名无 runId + auditRunId 非空的幂等边缘——同源 runId 断言 + 重复调用不补（v1.0.61 同型复发防线）。
+- **D-070/D-071 入链**（decision_add）：补写双保险决策 + 否决形式化路线决策（用户要求审计隔壁 3 条深化建议，判定不落地——实证校准/原语聚类/工程反射已覆盖）。
+- 验证：65/65 通过，tsc 0。
+
 ## [1.0.63] - 2026-08-15
 
 审计者 blocker（v1.0.61/62 报告未落盘且补写未生效——证明链空洞，豁免协议第一次完整走查即暴露补写通道失效）：
