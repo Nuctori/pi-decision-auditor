@@ -1284,7 +1284,11 @@ test("backfillAuditLogIfNeeded：双保险补写入口（v1.0.63）", () => {
 	assert.equal(entries1.length, 1);
 	assert.equal(entries1[0].verdict, "passed");
 	// ② 幂等：再调不补
-	assert.equal(backfillAuditLogIfNeeded(dir, readAuditState(dir)), false, "已补写不重复");
+	assert.equal(
+		backfillAuditLogIfNeeded(dir, readAuditState(dir)),
+		false,
+		"已补写不重复",
+	);
 	// ③ failed 签名不补
 	const dir2 = tmpDir();
 	recordSignature(dir2, { status: "failed" }, "head2");
@@ -1311,7 +1315,11 @@ test("backfillAuditLogIfNeeded：双保险补写入口（v1.0.63）", () => {
 	const s3 = readAuditState(dir3);
 	s3.auditRunId = "run-9";
 	s3.auditStartedAt = new Date("2026-08-15T10:05:00Z").getTime();
-	assert.equal(backfillAuditLogIfNeeded(dir3, s3), false, "runId 匹配已落盘不补");
+	assert.equal(
+		backfillAuditLogIfNeeded(dir3, s3),
+		false,
+		"runId 匹配已落盘不补",
+	);
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {
