@@ -527,7 +527,8 @@ export function queryGaps(
 		unauditedArtifacts:
 			head !== null && (latest === null || head !== latest.head),
 	};
-	// 泛化缺口（数据聚合）
+	// 泛化缺口（数据聚合）：数据源 = gaps.md（v1.0.60 独立文件）+
+	// audit-log 存量 findings（迁移前兼容）——audit-log ≥30KB 豁免不殃及泛化通道
 	const allFindings: Array<{
 		scene: string;
 		path: string;
@@ -536,6 +537,9 @@ export function queryGaps(
 	}> = [];
 	for (const e of entries) {
 		for (const f of e.findings) allFindings.push({ ...f, audit: e.id });
+	}
+	for (const f of readGeneralizations(cwd)) {
+		allFindings.push({ ...f, audit: "gaps.md" });
 	}
 	const recentFindings = limit > 0 ? allFindings.slice(-limit) : [];
 	const counts = new Map<string, number>();
@@ -550,6 +554,107 @@ export function queryGaps(
 		proofGaps,
 		generalization: { recentFindings, frequentPaths },
 	};
+}
+
+// ---- 泛化发现原语库（gaps.md，v1.0.60）----
+// 独立于 audit-log（≥30KB 落盘豁免不殃及泛化通道）：本文件永远小、持续沉淀。
+// 审计者每轮 append 发散核实的路径型产出（一行一条），append-only。
+
+export function generalizationPath(cwd: string): string {
+	return path.join(decisionsDir(cwd), "gaps.md");
+}
+
+const GAPS_HEADER = `# Generalization Gaps
+
+<!--
+  泛化发现原语库（v1.0.60）：审计者每轮发散核实的路径型产出沉淀于此（一行一条：
+  - 场景: X | 路径: Y | 来源: Z）。独立于 audit-log（≥30KB 豁免不殃及泛化通道——
+  本文件永远小、持续沉淀）。append-only。pair_gaps 查询数据源。
+-->
+`;
+
+export interface GeneralizationFinding {
+	scene: string;
+	path: string;
+	source: string;
+}
+
+const FINDING_RE = /^- 场景: (.+) \| 路径: (.+) \| 来源: (.+)$/gm;
+
+/** 读 gaps.md 全部泛化发现；缺失/损坏返回空数组。 */
+export function readGeneralizations(cwd: string): GeneralizationFinding[] {
+	try {
+		const raw = fs.readFileSync(generalizationPath(cwd), "utf-8");
+		const out: GeneralizationFinding[] = [];
+		let m: RegExpExecArray | null;
+		FINDING_RE.lastIndex = 0;
+		while ((m = FINDING_RE.exec(raw)) !== null) {
+			out.push({ scene: m[1].trim(), path: m[2].trim(), source: m[3].trim() });
+		}
+		return out;
+	} catch {
+		return [];
+	}
+}
+
+/** 追加泛化发现（append-only；mtime 乐观锁 + 原子写，与 appendDecision 同纪律）。
+ *  返回追加行数。 */
+export function appendGeneralization(
+	cwd: string,
+	findings: GeneralizationFinding[],
+): number {
+	if (findings.length === 0) return 0;
+	const file = generalizationPath(cwd);
+	if (!fs.existsSync(file)) {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, GAPS_HEADER, "utf-8");
+	}
+	const clean = (s: string, max: number): string =>
+		s.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const expectedMtime = auditLogMtime(file);
+		let raw: string;
+		try {
+			raw = fs.readFileSync(file, "utf-8");
+		} catch {
+			raw = GAPS_HEADER;
+		}
+		const lines = findings.map(
+			(f) =>
+				`- 场景: ${clean(f.scene, 200)} | 路径: ${clean(f.path, 300)} | 来源: ${clean(f.source, 100)}`,
+		);
+		const payload = `${raw.replace(/\r?\n$/, "")}\n\n${lines.join("\n")}\n`;
+		const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+		try {
+			fs.writeFileSync(tmp, payload, "utf-8");
+			if (expectedMtime !== null && auditLogMtime(file) !== expectedMtime) {
+				try {
+					fs.unlinkSync(tmp);
+				} catch {
+					/* noop */
+				}
+				continue; // 他写者已改 → 重读重试
+			}
+			fs.renameSync(tmp, file);
+		} catch {
+			try {
+				fs.unlinkSync(tmp);
+			} catch {
+				/* noop */
+			}
+			continue;
+		}
+		// 写后验证：内容一致且末尾行 = 本次最后一条
+		try {
+			const onDisk = fs.readFileSync(file, "utf-8");
+			if (onDisk === payload) return findings.length;
+		} catch {
+			/* 重试 */
+		}
+	}
+	throw new Error(
+		`appendGeneralization 并发冲突（3 次重试仍失败）: ${file} — 泛化发现未落盘`,
+	);
 }
 
 /** 列出条目，可选 onlyFromId（含该 id 起的新条目）。 */

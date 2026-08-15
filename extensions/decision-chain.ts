@@ -20,6 +20,7 @@ import {
 	convLogLineCount,
 	convlogForeignRuns,
 	convlogPath,
+	generalizationPath,
 	gitHead,
 	hasNewConversation,
 	hasUncommittedChanges,
@@ -29,6 +30,7 @@ import {
 	listEntries,
 	parseChain,
 	processPath,
+	readAuditLog,
 	readAuditState,
 	readProcess,
 	readRaw,
@@ -308,15 +310,15 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 	lines.push("");
 	lines.push("【输出】逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 产物总评。");
 	lines.push(
-		`【报告落盘（证明链，先报告后签名）】写 signature **之前**，先把本轮审计报告 append 到 \`${auditLogPath(cwd)}\`（与 chain 同目录策略；write 纪律同 chain.md：read 全文 → content = 原文完整内容 + 新条目，一个字符不少，禁止整体重写）。条目格式：\`## AUDIT-<epoch ms>: <passed|blocked|low-value>\`，字段 Verdict / Head（= \`git rev-parse HEAD\` 全哈希）/ Window（审计窗口概述：决策范围+提交+未提交文件）/ Blockers（无则'无'）/ RunId（= state.json 的 auditRunId）/ Date（ISO），空行后附正文 = 你的审计输出（目标推导+独立核实+逐条判定+总评，多行原样；末尾按【泛化发现与复查】附泛化 section，无则省略）。真实审计必写；轻量退出写 \`low-value\` 简短条目；纯咨询**不写**（零噪音）。**audit-log ≥ 30KB 落盘豁免（v1.0.59，37KB 实证同类压缩风险）**：文件 ≥ 30KB 时禁止 write 全量重建——只落盘元数据条目（Verdict/Head/Window/Blockers/RunId/Date，无正文），完整结论经 blockers/auditFindings 交付；下轮审计者收尾时若有能力补正文再补。写完报告再写签名——报告是证明链主体，签名是结论；先报告后签名保证你被杀时报告仍在。`,
+		`【报告落盘（证明链，先报告后签名）】写 signature **之前**，先把本轮审计报告 append 到 \`${auditLogPath(cwd)}\`（与 chain 同目录策略；write 纪律同 chain.md：read 全文 → content = 原文完整内容 + 新条目，一个字符不少，禁止整体重写）。条目格式：\`## AUDIT-<epoch ms>: <passed|blocked|low-value>\`，字段 Verdict / Head（= \`git rev-parse HEAD\` 全哈希）/ Window（审计窗口概述：决策范围+提交+未提交文件）/ Blockers（无则'无'）/ RunId（= state.json 的 auditRunId）/ Date（ISO），空行后附正文 = 你的审计输出（目标推导+独立核实+逐条判定+总评，多行原样）。真实审计必写；轻量退出写 \`low-value\` 简短条目；纯咨询**不写**（零噪音）。**audit-log ≥ 30KB 落盘豁免（v1.0.60 修正：不用 write 落盘，扩展会原子补写）**：文件 ≥ 30KB 时**禁止 write 触碰 audit-log**（全量重建压缩风险）——你只需把结论写进 state.json（signature/blockers/auditFindings），扩展会在审计完成时用 appendAuditReport（tmp+rename 原子写）补写元数据条目，证明链无空洞。写完报告再写签名——报告是证明链主体，签名是结论；先报告后签名保证你被杀时报告仍在。`,
 	);
 	lines.push(
 		"【证明缺口自查（顺手，不额外 spawn）】写报告前用 read 对账（gap 分析是 AI 能力，不依赖工具）：① chain.md 中 Date 晚于 audit-log 最新条目 Date 的 D-NNN = 决策未审，报告正文记录（非本轮窗口的存量缺口，仅记录不升级）；② audit-log 最近条目为 interrupted（上轮超时降级）→ 本轮报告注明『上轮中断，本轮补填』；③ blocked 后无新条目 = 上轮缺口未闭环，修复轮按【上轮缺口核对】核验即可。",
 	);
 	lines.push(
 		"【泛化发现与复查（v1.0.48c，pair 的多头注意力沉淀）】泛化发现 = 发散核实的路径型产出（主 agent 没想到的候选路径，非缺陷）：\n" +
-			"① **沉淀**：发散核实中发现但落不回缺口的路径（更优替代/跨域范式/边界反例的泛化形态）→ 报告正文末尾 append 『### 泛化发现』section，一行一条 `- 场景: <场景> | 路径: <路径> | 来源: <D-NNN/blocker/AUDIT-id>`；无则省略。**行格式必须严格保持 `- 场景: X | 路径: Y | 来源: Z` 单行形态（v1.0.51，解析器按此解析，偏差即静默丢失——48d/50 已两次实证对不齐）**：不要用粗体头、不要拆多行、不要改字段名；**不要直接回抄 pair_gaps 工具输出**（其展示带 `[audit]` 前缀，非沉积格式，须按标准格式重写）。能落回缺口的仍走 blockers/auditFindings 原通道，不重复。\n" +
-			"② **复查（查询泛化缺口）**：用 read 扫 audit-log **最近 10 条**报告的「### 泛化发现」与本轮场景语义比对（只扫尾部，防增长文件全量读）：场景相关且本轮踩了同类盲区 → 报告标注『泛化缺口复发』（有产物证据才升级 blocker）；场景相关未踩 → 不动作；同一路径给出 ≥2 次且决策链无采纳记录 → 标注『建议固化为审计维度』（蒸馏出口）。**原语语义聚类（v1.0.52）**：把语义相近的路径归为同一原语（如『局部最优陷阱』『防御纵深』），报告标注原语名+频次——跨场景模式识别，供主 agent 开工前检索。\n" +
+			"① **沉淀**：发散核实中发现但落不回缺口的路径（更优替代/跨域范式/边界反例的泛化形态）→ **append 到 ${generalizationPath(cwd)}（gaps.md，v1.0.60 独立原语库——audit-log ≥30KB 豁免不殃及泛化通道）**，一行一条 `- 场景: <场景> | 路径: <路径> | 来源: <D-NNN/blocker/AUDIT-id>`；无则省略。**行格式必须严格保持 `- 场景: X | 路径: Y | 来源: Z` 单行形态（v1.0.51，解析器按此解析，偏差即静默丢失——48d/50 已两次实证对不齐）**：不要用粗体头、不要拆多行、不要改字段名；**不要直接回抄 pair_gaps 工具输出**（其展示带 `[audit]` 前缀，非沉积格式，须按标准格式重写）。能落回缺口的仍走 blockers/auditFindings 原通道，不重复。\n" +
+			"② **复查（查询泛化缺口）**：用 read 扫 gaps.md **最近 10 条**泛化发现与本轮场景语义比对（只扫尾部，防增长文件全量读）：场景相关且本轮踩了同类盲区 → 报告标注『泛化缺口复发』（有产物证据才升级 blocker）；场景相关未踩 → 不动作；同一路径给出 ≥2 次且决策链无采纳记录 → 标注『建议固化为审计维度』（蒸馏出口）。**原语语义聚类（v1.0.52）**：把语义相近的路径归为同一原语（如『局部最优陷阱』『防御纵深』），报告标注原语名+频次——跨场景模式识别，供主 agent 开工前检索。\n" +
 			"③ **边界**：修复轮**不执行**复查（收敛纪律，只核验 blockers）；纯咨询/轻量退出不写泛化 section。签名语义不变——泛化发现是附加产出，不影响 passed/blocked 判定。",
 	);
 	lines.push("");
@@ -2016,6 +2018,33 @@ export default function (pi: ExtensionAPI): void {
 				const sigOwned = st.signature?.runId
 					? st.signature.runId === completedId
 					: !st.auditRunId || completedId === st.auditRunId;
+				// v1.0.60 豁免补写：审计者按 audit-log ≥30KB 豁免未落盘报告 →
+				// 扩展原子补写元数据条目（write 全量重建压缩风险由 tmp+rename 消除，
+				// v1.0.48 interrupted 补写同模式）；判定 = audit-log 最新条目 Date < 签名时间
+				if (sigCompleted && sigOwned) {
+					try {
+						const log = readAuditLog(completedCwd);
+						const latestEntry = log[log.length - 1];
+						const sigAt = st.signature?.at ?? 0;
+						if (
+							!latestEntry ||
+							new Date(latestEntry.date).getTime() < sigAt
+						) {
+							appendAuditReport(completedCwd, {
+								verdict:
+									st.signature?.status === "blocked" ? "blocked" : "passed",
+								head: st.signature?.head ?? "",
+								window:
+									"（v1.0.59 豁免：audit-log ≥30KB 审计者未落盘，扩展补写元数据）",
+								blockers: st.signature?.blockers ?? [],
+								runId: st.signature?.runId ?? "",
+								body: "扩展补写元数据条目（审计结论见 state.json signature/blockers，泛化发现在 gaps.md）。",
+							});
+						}
+					} catch {
+						/* noop：补写失败不阻塞交付 */
+					}
+				}
 				if (env?.success === false && sigCompleted && sigOwned) {
 					const doneStatus = st.signature?.status ?? "passed";
 					try {

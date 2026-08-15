@@ -17,6 +17,8 @@ import {
 	auditStateMtime,
 	auditStatePath,
 	appendAuditReport,
+	appendGeneralization,
+	readGeneralizations,
 	auditLogPath,
 	auditReportPath,
 	writeAuditReport,
@@ -27,6 +29,7 @@ import {
 	convlogForeignRuns,
 	convlogPath,
 	entriesSinceLastAudit,
+	generalizationPath,
 	gitHead,
 	hasNewConversation,
 	hasUncommittedChanges,
@@ -814,6 +817,19 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		agentSrc.includes("不要直接回抄 pair_gaps"),
 		"agent 协议沉淀段必须同步回抄禁令（双点同步纪律，v1.0.52→53 事故同类）",
 	);
+	// v1.0.60：gaps.md 独立原语库 + 豁免补写（审计者双 blocker 修复）
+	assert.ok(
+		src.includes("generalizationPath(cwd)") && src.includes("gaps.md"),
+		"审计任务必须引导泛化发现沉淀到 gaps.md（audit-log 豁免不殃及泛化通道）",
+	);
+	assert.ok(
+		src.includes("扩展会在审计完成时用 appendAuditReport"),
+		"任务文本必须说明豁免补写由扩展原子执行（write 触碰禁令）",
+	);
+	assert.ok(
+		agentSrc.includes("gaps.md") && agentSrc.includes("独立原语库"),
+		"agent 协议必须同步 gaps.md 沉淀目标",
+	);
 });
 
 test("appendAuditReport：append-only + 字段渲染 + 与 chain 同目录", () => {
@@ -1121,6 +1137,48 @@ test("isPlaceholderFinding：占位判定统一规则（v1.0.57 三处漂移合�
 		"真实核实",
 	);
 	assert.equal(isPlaceholderFinding("收尾：决策提取 D-030"), false, "真实收尾");
+});
+
+test("appendGeneralization/readGeneralizations：gaps.md 原语库（v1.0.60）", () => {
+	const dir = tmpDir();
+	// 初始为空
+	assert.deepEqual(readGeneralizations(dir), []);
+	// append 两条
+	const n1 = appendGeneralization(dir, [
+		{ scene: "并发资源分配碰撞", path: "全局位图分配 > 相对偏移", source: "blocker-1" },
+		{ scene: "API 限流", path: "令牌桶+漏桶双层", source: "D-031" },
+	]);
+	assert.equal(n1, 2);
+	assert.ok(fs.existsSync(generalizationPath(dir)));
+	let all = readGeneralizations(dir);
+	assert.equal(all.length, 2);
+	assert.equal(all[0].path, "全局位图分配 > 相对偏移");
+	// append-only：再追加一条
+	appendGeneralization(dir, [{ scene: "缓存选型", path: "本地缓存+TTL 混合", source: "AUDIT-1" }]);
+	all = readGeneralizations(dir);
+	assert.equal(all.length, 3, "append-only：旧条目保留");
+	assert.equal(all[2].scene, "缓存选型");
+	// 空 findings 不写
+	assert.equal(appendGeneralization(dir, []), 0);
+	// 与 chain 同目录（证明链同盘）
+	assert.equal(path.dirname(generalizationPath(dir)), path.dirname(chainPath(dir)));
+	// 行格式消毒：换行注入
+	appendGeneralization(dir, [{ scene: "A\nB", path: "P", source: "S" }]);
+	all = readGeneralizations(dir);
+	assert.equal(all[all.length - 1].scene, "A B", "换行必须消毒为空格");
+});
+
+test("queryGaps：gaps.md 数据源合并（v1.0.60 泛化通道不依赖 audit-log）", () => {
+	const dir = tmpDir();
+	appendGeneralization(dir, [
+		{ scene: "场景甲", path: "路径甲", source: "D-001" },
+		{ scene: "场景乙", path: "路径甲", source: "D-002" },
+	]);
+	const gaps = queryGaps(dir, { limit: 5 });
+	assert.equal(gaps.generalization.recentFindings.length, 2, "gaps.md findings 必须被聚合");
+	assert.equal(gaps.generalization.recentFindings[0].audit, "gaps.md");
+	assert.equal(gaps.generalization.frequentPaths.length, 1, "高频路径统计跨源生效");
+	assert.equal(gaps.generalization.frequentPaths[0].count, 2);
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {

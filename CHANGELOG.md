@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.60] - 2026-08-15
+
+审计者双 blocker 修复（v1.0.59 豁免协议实现矛盾 + 泛化通道断流）：
+
+- **豁免补写改扩展原子执行**（blocker-1）：审计者 write 工具无法「只落盘元数据」而不全量重建 40KB 文件（豁免初衷即避免压缩风险）——修正协议：audit-log ≥30KB 时**审计者禁止 write 触碰**，结论写 state.json；扩展在 async-complete 检测 audit-log 最新条目 Date < signature.at → `appendAuditReport` 原子补写元数据条目（tmp+rename，v1.0.48 interrupted 补写同模式）。证明链无空洞。
+- **泛化发现独立 gaps.md**（blocker-2，refines D-058）：audit-log 已 40KB 豁免即时生效，`### 泛化发现` section 从此不沉淀 → 泛化四环断流。分离：`gaps.md`（与 chain/audit-log 同目录策略，append-only，mtime 乐观锁原子写）——永远小、持续沉淀；queryGaps 数据源合并（gaps.md + audit-log 存量 findings 兼容）；pair_gaps 查询/复查/沉淀全链路切 gaps.md。
+- **D-066 入链**（decision_add 路径）：泛化发现独立 + 豁免补写决策（refines D-058——audit-log 30KB 上限使报告正文沉淀不可靠的环境变化）。
+- 测试：appendGeneralization/readGeneralizations 单测（append-only/消毒/同盘）+ queryGaps 合并源测试 + 接线守卫 +3 断言，63/63 通过，tsc 0。
+
 ## [1.0.59] - 2026-08-15
 
 reviewer 终审 Low/Note 处理（v1.0.58 全闭环后）：
