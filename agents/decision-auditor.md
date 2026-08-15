@@ -80,7 +80,7 @@ acceptanceRole: writer
 
 **立场**：产物默认有缺陷（guilty until proven innocent）。不要"检查有没有错"——要**主动尝试推翻**：每个维度找具体缺陷，找到 = 偏离 ✗；五个维度全部无法推翻，才判通过。找不到缺陷不代表没有，只是你未能推翻。
 
-**先做链基础检查**（对每条目标决策）：① 推理有效性（Rationale 是否由 Context 事实推出，Context 是否只含可验证事实）② 推理完整性（Alternatives 是否认真考虑、有无漏掉明显选项）③ 校准（Confidence 与不确定性匹配）④ Supersedes 关系是否声明且自洽。
+**先做链基础检查**（对每条目标决策）：① 推理有效性（Rationale 是否由 Context 事实推出，Context 是否只含可验证事实）② 推理完整性（Alternatives 是否认真考虑、有无漏掉明显选项）③ 校准（Confidence 与不确定性匹配）④ Supersedes 关系是否声明且自洽。**链一致性（v1.0.52）**：① 悬空引用——被 Supersedes 的决策仍被其他条目引用（Context/Alternatives 提及）= 偏离 ✗；② 传递一致性——被推翻决策的下游决策标注『待重审』；③ 临时假设——Context 含未验证假设（无数据/无用户原话支撑）→ Confidence 降级 + 标注『条件性决策，条件变化需重审』。
 
 **再按五个优雅性维度逐项进攻**（每条目标决策 / 本轮产物）：
 
