@@ -833,8 +833,14 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 	);
 	// v1.0.61：补写判定 runId 优先（审计者 blocker——Date 判定恒真重复补写）
 	assert.ok(
-		src.includes("shouldBackfillAuditLog(latestEntry, sigRunId, sigAt)"),
-		"豁免补写必须用 shouldBackfillAuditLog（runId 优先 + Date 容差）",
+		src.includes("shouldBackfillAuditLog(") &&
+			src.includes("st.auditStartedAt ?? 0"),
+		"豁免补写必须用 shouldBackfillAuditLog（runId 优先 + auditStartedAt 兜底）",
+	);
+	// v1.0.62：agent 协议双点同步（reviewer Medium-High——v1.0.52→53 事故同类）
+	assert.ok(
+		agentSrc.includes("扩展会在审计完成时用 appendAuditReport"),
+		"agent 协议必须同步 v1.0.60 豁免语义（禁止 write 触碰 + 扩展原子补写）",
 	);
 });
 
@@ -1236,23 +1242,25 @@ test("shouldBackfillAuditLog：runId 优先 + Date 容差（v1.0.61 审计者 bl
 		true,
 		"runId 不同 = 未落盘，补写",
 	);
-	// runId 缺失：Date 在容差内（5min）→ 不补写
+	// runId 缺失：Date 早于本轮审计开始 = 前轮条目 → 补写（auditStartedAt 兜底）
 	assert.equal(
 		shouldBackfillAuditLog(
 			entry("", "2026-08-15T10:02:00Z"),
 			"",
 			1786788300000,
 		),
-		false,
+		true,
+		"无 runId + 前轮条目 = 补写",
 	);
-	// runId 缺失：Date 超容差 → 补写
+	// runId 缺失：Date 晚于本轮审计开始（同轮已落盘，如审计者先写报告）→ 不补写
 	assert.equal(
 		shouldBackfillAuditLog(
-			entry("", "2026-08-15T10:00:00Z"),
+			entry("", "2026-08-15T10:06:00Z"),
 			"",
-			1786788600000,
+			1786788300000,
 		),
-		true,
+		false,
+		"无 runId + 同轮落盘 = 不补写",
 	);
 	// 无条目 → 补写
 	assert.equal(shouldBackfillAuditLog(null, "run-1", 1786800000000), true);

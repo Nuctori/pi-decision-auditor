@@ -473,16 +473,17 @@ export function readAuditLog(cwd: string): AuditLogEntry[] {
 
 /** 豁免补写判定（v1.0.61，审计者 blocker）：runId 优先——审计者正常落盘的报告带
  *  runId（= auditRunId），且先报告后签名使其 Date 恒早于签名时刻——纯 Date 判定
- *  恒真会每轮重复补写冗余元数据（证明链污染）。runId 缺失走 Date 兼容 + 5min 容差
- *  （isAuditCompleted 同语义，吸收时钟偏移）。 */
+ *  恒真会每轮重复补写冗余元数据（证明链污染）。runId 缺失走 auditStartedAt 兜底：
+ *  本轮审计开始前落库的条目 = 前轮条目 → 补写（reviewer Low：sigAt-5min 容差在
+ *  连续豁免轮 <5min 间隔时会漏补写——auditStartedAt 比较无此边缘）。 */
 export function shouldBackfillAuditLog(
 	latestEntry: AuditLogEntry | null,
 	sigRunId: string,
-	sigAt: number,
+	auditStartedAt: number,
 ): boolean {
 	if (!latestEntry) return true; // 从未落盘 → 补写
 	if (sigRunId) return latestEntry.runId !== sigRunId;
-	return new Date(latestEntry.date).getTime() < sigAt - 5 * 60 * 1000;
+	return new Date(latestEntry.date).getTime() < auditStartedAt;
 }
 
 export interface GapQueryResult {

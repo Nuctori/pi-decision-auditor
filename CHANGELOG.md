@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.62] - 2026-08-15
+
+reviewer 终审 Medium-High/Low 处理：
+
+- **agent 协议豁免语义双点同步**（reviewer Medium-High，v1.0.52→53 事故同类）：`decision-auditor.md` L148 仍是 v1.0.59 原文（"只落盘元数据条目…下轮补正文"——正是 blocker-1 指出的自相矛盾），v1.0.60 只更新任务文本 → 审计者读两份矛盾指令。修复：agent 文件同步 v1.0.60 语义（禁止 write 触碰 + 扩展原子补写）+ 接线守卫断言。
+- **补写兜底改 auditStartedAt 语义**（reviewer Low）：shouldBackfillAuditLog 空 runId 兜底从 `sigAt - 5min` 容差改为 `auditStartedAt` 比较——连续豁免轮 <5min 间隔时 5min 容差会漏补写（第二轮 latest entry = 第一轮补写条目 Date 刚过去）；auditStartedAt 比较无此边缘（本轮开始前落库 = 前轮条目）。
+- **v1.0.59 空洞手工补写**（reviewer Medium）：该窗口 blocked 审计按当时豁免协议未落盘，补写机制只对未来生效——用 appendAuditReport 补写元数据条目（AUDIT-1786804240436，head=a9b367c，双 blocker 摘要）。
+- 测试：shouldBackfillAuditLog 更新为 auditStartedAt 语义（5 场景）+ 守卫 +1 断言，64/64 通过，tsc 0。
+
 ## [1.0.61] - 2026-08-15
 
 审计者修复轮 blocker（v1.0.60 补写判定恒真）：
