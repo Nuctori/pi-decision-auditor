@@ -1218,13 +1218,13 @@ test("queryGaps：gaps.md 数据源合并（v1.0.60 泛化通道不依赖 audit-
 	assert.equal(gaps.generalization.frequentPaths[0].count, 2);
 });
 
-test("shouldBackfillAuditLog：存在性检查 + verdict 判别（v1.0.69 同 head 双轮塌缩修复）", () => {
-	const entry = (runId: string, head: string, verdict = "passed") => ({
+test("shouldBackfillAuditLog：存在性 + verdict + blockers 判别（v1.0.70）", () => {
+	const entry = (runId: string, head: string, verdict = "passed", blockers: string[] = []) => ({
 		id: "AUDIT-1",
 		verdict,
 		head,
 		window: "w",
-		blockers: [],
+		blockers,
 		runId,
 		date: "2026-08-15T10:00:00Z",
 		body: "",
@@ -1232,62 +1232,72 @@ test("shouldBackfillAuditLog：存在性检查 + verdict 判别（v1.0.69 同 he
 	});
 	// runId 匹配（正常落盘）→ 不补写
 	assert.equal(
-		shouldBackfillAuditLog(
-			[entry("run-1", "h")],
-			"run-1",
-			"sighead1",
-			"passed",
-		),
+		shouldBackfillAuditLog([entry("run-1", "h")], "run-1", "sighead1", "passed", []),
 		false,
 		"runId 匹配 = 已落盘，不补写",
 	);
 	// runId 不同 + head 不匹配 → 补写
 	assert.equal(
-		shouldBackfillAuditLog(
-			[entry("run-0", "h")],
-			"run-1",
-			"sighead1",
-			"passed",
-		),
+		shouldBackfillAuditLog([entry("run-0", "h")], "run-1", "sighead1", "passed", []),
 		true,
 		"runId 不同且 head 不匹配 = 未落盘，补写",
 	);
-	// head 精确匹配 + verdict 相同 → 不补写
+	// head 精确匹配 + verdict 相同 + blockers 相同 → 不补写
 	assert.equal(
 		shouldBackfillAuditLog(
 			[entry("", "abcdef1234567890abcdef1234567890abcdef12")],
 			"",
 			"abcdef1234567890abcdef1234567890abcdef12",
 			"passed",
+			[],
 		),
 		false,
 		"head 精确匹配且 verdict 相同 = 已落盘，不补写",
 	);
-	// head 前缀匹配（回填条目短哈希）+ verdict 相同 → 不补写
+	// head 前缀匹配（回填短哈希）+ verdict 相同 → 不补写
 	assert.equal(
 		shouldBackfillAuditLog(
 			[entry("", "abcdef12")],
 			"",
 			"abcdef1234567890abcdef1234567890abcdef12",
 			"passed",
+			[],
 		),
 		false,
 		"回填短哈希条目按前缀匹配 = 已落盘，不补写",
 	);
-	// v1.0.69 同 head 双轮塌缩：同 head 不同 verdict（修复轮 blocked→passed，HEAD 未变）→ 补写
+	// 同 head 不同 verdict（修复轮 blocked→passed，HEAD 未变）→ 补写
 	assert.equal(
-		shouldBackfillAuditLog([entry("", "H", "blocked")], "", "H", "passed"),
+		shouldBackfillAuditLog([entry("", "H", "blocked", ["a"])], "", "H", "passed", []),
 		true,
 		"同 head 不同 verdict（修复轮新结论）必须补写——v1.0.65 回归防线",
 	);
-	// 同 head 同 verdict → 不补写（幂等）
+	// 同 head 同 verdict 同 blockers → 不补写（幂等）
 	assert.equal(
-		shouldBackfillAuditLog([entry("", "H", "blocked")], "", "H", "blocked"),
+		shouldBackfillAuditLog([entry("", "H", "blocked", ["a"])], "", "H", "blocked", ["a"]),
 		false,
-		"同 head 同 verdict = 已记录，不补写",
+		"同 head 同 verdict 同 blockers = 已记录，不补写",
+	);
+	// v1.0.70 Medium：同 head 同 verdict 异 blockers（修复轮缺口演进）→ 补写
+	assert.equal(
+		shouldBackfillAuditLog([entry("", "H", "blocked", ["旧缺口"])], "", "H", "blocked", ["新缺口"]),
+		true,
+		"同 head 同 verdict 异 blockers = 新结论，必须补写（unclosedBlockers 双源漂移防线）",
+	);
+	// v1.0.70 Low：low-value 条目 + passed 签名 → 视为已记录不补（防冗余补写）
+	assert.equal(
+		shouldBackfillAuditLog([entry("", "H", "low-value")], "", "H", "passed", []),
+		false,
+		"low-value 条目对 passed 签名视为已记录（轻量退出窗口不重复补写）",
+	);
+	// v1.0.68：空 head 条目不匹配任意签名 → 补写
+	assert.equal(
+		shouldBackfillAuditLog([entry("", "")], "", "sighead1", "passed", []),
+		true,
+		"空 head 条目不得匹配（startsWith(\"\") 恒真毒化守卫）",
 	);
 	// 无条目 → 补写
-	assert.equal(shouldBackfillAuditLog([], "run-1", "h", "passed"), true);
+	assert.equal(shouldBackfillAuditLog([], "run-1", "h", "passed", []), true);
 });
 
 test("backfillAuditLogIfNeeded：双保险补写入口（v1.0.63）", () => {

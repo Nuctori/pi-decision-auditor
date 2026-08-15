@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.70] - 2026-08-15
+
+reviewer 终审 Medium/Low 处理（补写判定终态的判别维度补全）：
+
+- **blockers 判别**（reviewer Medium）：同 head 同 verdict 但 blockers 不同 = 新结论（修复轮 HEAD 未变时两轮均 blocked 但缺口演进）→ 必须补写——纯 verdict 判定吞掉次轮 → audit-log 停留 stale blockers、unclosedBlockers 双源漂移。修复：blocked 场景存在性匹配增加 blockers 内容比较。
+- **low-value 视为 passed 已记录**（reviewer Low）：轻量退出写 low-value 条目 + passed 签名，纯 verdict 比较会对已记录窗口重复补写冗余条目 → `verdictMatched` 兼容。
+- **D-074 入链**（reviewer Low）：refines D-072——存在性判定含 verdict + blockers + low-value 判别（引用完整性）。
+- **测试补全**（reviewer Note-5）：空 head 守卫直接测试 + 同 head 异 blockers 补写 + low-value 幂等——shouldBackfillAuditLog 9 场景。
+- **blockers 兜底时间窗限制**（reviewer Low-4）：注释/CHANGELOG 如实标注——兜底依赖 auditFindings 存活窗口（新审计锁获取清零），best-effort，主防线是协议必填强化。
+- 验证：65/65 通过，tsc 0。
+
 ## [1.0.69] - 2026-08-15
 
 reviewer 终审 Medium（同 head 双轮塌缩——存在性检查对 v1.0.65 的回归）：
