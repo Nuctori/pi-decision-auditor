@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.58] - 2026-08-15
+
+审计者 + reviewer 双路同源 blocker 修复（"声称三处统一"只兑现两处）：
+
+- **超时降级路径并入 helper**（双路 blocker）：L1872-1878 手写精确串过滤 → `isPlaceholderFinding(f)`——三处统一（观察器/超时/注入判据）完全兑现，CHANGELOG v1.0.57 声称与实现一致。
+- **重复 JSDoc 清理**（双路 blocker-2）：PURE_CHAT_PLACEHOLDER 注释重复两行删除。
+- **D-065 入链**（decision_add 路径）：占位判定统一 helper 决策。
+- 验证：61/61 通过，tsc 0。
+
 ## [1.0.57] - 2026-08-15
 
 reviewer 复核修复（idleTicks 残留 Low + 占位规则三处漂移 Note）：

@@ -793,7 +793,8 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		"泛化复查必须含原语语义聚类（跨场景模式识别）",
 	);
 	assert.ok(
-		agentSrc.includes("链一致性（v1.0.52）") && agentSrc.includes("原语语义聚类"),
+		agentSrc.includes("链一致性（v1.0.52）") &&
+			agentSrc.includes("原语语义聚类"),
 		"审计者 agent 协议必须同步链一致性 + 原语聚类",
 	);
 	// v1.0.55：结对可观察性（findings 观察器接线——运行中黑盒修复）
@@ -1099,10 +1100,26 @@ test("queryGaps：证明缺口对账 + 泛化发现聚合（pair_gaps 数据层�
 
 test("isPlaceholderFinding：占位判定统一规则（v1.0.57 三处漂移合并）", () => {
 	assert.equal(isPlaceholderFinding("审计开始：窗口…"), true, "审计开始占位");
-	assert.equal(isPlaceholderFinding("本轮纯咨询，无审计对象"), true, "纯咨询占位");
-	assert.equal(isPlaceholderFinding("审计未触发：spawn 失败，下轮重试"), true, "spawn 失败占位");
-	assert.equal(isPlaceholderFinding("审计触发失败：spawn 失败，下轮重试"), true, "触发失败占位");
-	assert.equal(isPlaceholderFinding("核实 1 ✓：窗口提交全部独立审阅"), false, "真实核实");
+	assert.equal(
+		isPlaceholderFinding("本轮纯咨询，无审计对象"),
+		true,
+		"纯咨询占位",
+	);
+	assert.equal(
+		isPlaceholderFinding("审计未触发：spawn 失败，下轮重试"),
+		true,
+		"spawn 失败占位",
+	);
+	assert.equal(
+		isPlaceholderFinding("审计触发失败：spawn 失败，下轮重试"),
+		true,
+		"触发失败占位",
+	);
+	assert.equal(
+		isPlaceholderFinding("核实 1 ✓：窗口提交全部独立审阅"),
+		false,
+		"真实核实",
+	);
 	assert.equal(isPlaceholderFinding("收尾：决策提取 D-030"), false, "真实收尾");
 });
 

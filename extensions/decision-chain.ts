@@ -606,7 +606,9 @@ function findingsObserverTick(ui: ExtensionUIContext, root: string): void {
 		const last = st.auditFindings[st.auditFindings.length - 1];
 		const isPlaceholder = !last || isPlaceholderFinding(last);
 		// 计数排除占位（reviewer Low-3：审计开始占位不算发现）
-		const realCount = st.auditFindings.filter((f) => !isPlaceholderFinding(f)).length;
+		const realCount = st.auditFindings.filter(
+			(f) => !isPlaceholderFinding(f),
+		).length;
 		if (realCount > 0) findingsCount.set(root, realCount);
 		if (json !== lastFindingsJson.get(root) && !isPlaceholder) {
 			lastFindingsJson.set(root, json);
@@ -1867,13 +1869,9 @@ export default function (pi: ExtensionAPI): void {
 						// 超时：不再 600s 协商黑洞——降级放行；blockers 用审计者已确认的
 						// findings（价值点），无 findings 才给流程提示（D-021）
 						const timeoutState = readAuditState(root);
-						const realFindings = timeoutState.auditFindings.filter(
-							(f) =>
-								!f.startsWith("审计开始") &&
-								f !== PURE_CHAT_PLACEHOLDER &&
-								f !== "审计未触发：spawn 失败，下轮重试" &&
-								f !== "审计触发失败：spawn 失败，下轮重试",
-						);
+							const realFindings = timeoutState.auditFindings.filter(
+								(f) => !isPlaceholderFinding(f),
+							);
 						// 证明链补写（v1.0.48）：审计者超时未签名 → 扩展补写 interrupted 报告条目，
 						// 防该轮在 audit-log 无记录（证明链空洞）；失败不影响降级放行
 						try {

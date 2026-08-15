@@ -1305,7 +1305,6 @@ export function clampConvExtractedLine(cwd: string): number {
 }
 
 /** 纯咨询轮审计者写入的 findings 占位——不算真实中间态（跨会话注入过滤用，防零注入承诺被打破）。 */
-/** 纯咨询轮审计者写入的 findings 占位——不算真实中间态（跨会话注入过滤用，防零注入承诺被打破）。 */
 export const PURE_CHAT_PLACEHOLDER = "本轮纯咨询，无审计对象";
 
 /** 占位/流程性 auditFindings 判定（reviewer Note-2：三处过滤规则统一，防漂移）。
