@@ -504,7 +504,12 @@ export function shouldBackfillAuditLog(
 			s.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim().slice(0, 1000);
 		const joined = clean(b.join(" | "));
 		return JSON.stringify(
-			joined === "" ? [] : joined.split(" | ").map((x) => x.trim()).sort(),
+			joined === ""
+				? []
+				: joined
+						.split(" | ")
+						.map((x) => x.trim())
+						.sort(),
 		);
 	};
 	return !entries.some(
@@ -513,8 +518,7 @@ export function shouldBackfillAuditLog(
 			(headMatch(e.head) &&
 				verdictMatched(e.verdict) &&
 				(sigVerdict !== "blocked" ||
-					normalizedBlockers(e.blockers) ===
-						normalizedBlockers(sigBlockers))),
+					normalizedBlockers(e.blockers) === normalizedBlockers(sigBlockers))),
 	);
 }
 
