@@ -648,6 +648,15 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 			src.includes("结对审计实际已完成"),
 		"async-complete 必须对 failed 误报（内容完整但退出码非 0）发纠正 notify",
 	);
+	// v1.0.44 reviewer Low#1/#2：纠正判据收窄——status 白名单（仅 passed/blocked，
+	// 排除 passed-with-warning 超时降级签名，防竞态文案失实）+ runId 身份校验
+	// （signature.runId === auditRunId，与 isAuditCompleted 同语义，防并发 run 误触发）
+	assert.ok(
+		src.includes(
+			'st.signature.status === "passed" || st.signature.status === "blocked"',
+		) && src.includes("st.signature.runId === st.auditRunId"),
+		"failed 纠正判据必须收窄：status 白名单（passed/blocked）+ runId 身份校验",
+	);
 	// v1.0.44：交付通道澄清——审计者 prompt 明确"发现 blocker 不需要 contact_supervisor，
 	// 签名即交付"（扩展 async-complete 立即 sendUserMessage）；contact_supervisor 仅用于
 	// 即时裁决/澄清。实证：24h 审计者 0 次调用 contact_supervisor 而 blockers 全部如期交付。

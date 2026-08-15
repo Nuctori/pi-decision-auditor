@@ -1784,17 +1784,28 @@ export default function (pi: ExtensionAPI): void {
 			stopAuditBreath(completedCwd); // 异步轮审计完成：灯灭（cwd 隔离，D2）
 			try {
 				const st = readAuditState(completedCwd);
-				// 纠正判据：事件标 failed 但签名已写且 at ≥ 本轮审计启动（= 审计实际完成）
-				if (
-					env?.success === false &&
+				// 纠正判据（v1.0.44 + reviewer Low 修复）：
+				// ① 事件标 failed 但签名已写且 at ≥ 本轮审计启动（= 审计实际完成）
+				// ② status 白名单仅 passed/blocked——排除 passed-with-warning（门禁 300s
+				//    超时降级签名 at=降级时刻 ≥ auditStartedAt 恒成立，竞态窗口下误触发
+				//    「实际已完成」文案失实；reviewer Low#1）
+				// ③ runId 身份校验（signature.runId === auditRunId，isAuditCompleted 同语义）
+				//    ——并发/多实例下 run A 失败、run B 完成时，A 的 async-complete 不误触
+				//    （reviewer Low#2）
+				const sigCompleted =
 					st.signature &&
 					st.auditStartedAt &&
 					st.signature.at >= st.auditStartedAt &&
-					st.signature.status !== "failed"
-				) {
+					(st.signature.status === "passed" || st.signature.status === "blocked");
+				const sigOwned =
+					!st.signature?.runId ||
+					st.signature.runId === st.auditRunId ||
+					!st.auditRunId;
+				if (env?.success === false && sigCompleted && sigOwned) {
+					const doneStatus = st.signature?.status ?? "passed";
 					try {
 						uiBeforeStop?.notify(
-							`结对审计实际已完成（failed 通知为进程退出码误报，如 provider 流中断）——${st.signature.status}，结论已签名。`,
+							`结对审计实际已完成（failed 通知为进程退出码误报，如 provider 流中断）——${doneStatus}，结论已签名。`,
 							"info",
 						);
 					} catch {

@@ -9,6 +9,12 @@
 - **交付通道澄清（agent prompt + 审计任务文本）**：实证 24h 审计者 0 次调用 contact_supervisor，而 blockers 全部经签名 + async-complete sendUserMessage 通道如期交付——prompt 明确**通道分工**：contact_supervisor 仅用于需要即时裁决/澄清的场景；发现 blocker 直接签名即交付（扩展立即 sendUserMessage），不因"联系了没人回"而不写 blockers。
 - 测试：接线守卫 +3 组断言（模型透传 / failed 误报纠正判据 / 通道分工文本），57/57 通过，tsc 0 错误。
 
+### v1.0.44 交付审查 reviewer 复核（无 blocker）→ 2 个 Low 顺手修
+
+- **Low#1 降级竞态文案失实**：纠正判据 status 白名单收窄为仅 `passed`/`blocked`——`passed-with-warning`（门禁 300s 超时降级签名，at=降级时刻 ≥ auditStartedAt 恒成立）在竞态窗口下会误触发「实际已完成」文案
+- **Low#2 无 runId 身份校验**：纠正判据叠加 `signature.runId === auditRunId`（isAuditCompleted 同语义）——并发/多实例下 run A 失败、run B 完成时 A 的 async-complete 不误触
+- 测试：接线守卫补 1 组断言（status 白名单 + runId 校验），57/57 通过，tsc 0 错误
+
 ## [1.0.43] - 2026-08-15
 
 v1.0.42 审计者 blocker（一致性/完备性维度）：注释与 prompt 文本过时残留（与 v1.0.41 blocker 同类模式）：
