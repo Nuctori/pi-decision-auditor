@@ -45,6 +45,7 @@ import {
 	readProcess,
 	readRaw,
 	recordSignature,
+	shouldBackfillAuditLog,
 	resetForSessionStart,
 	resolveProjectRoot,
 	shouldClearStaleLock,
@@ -830,6 +831,11 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		agentSrc.includes("gaps.md") && agentSrc.includes("独立原语库"),
 		"agent 协议必须同步 gaps.md 沉淀目标",
 	);
+	// v1.0.61：补写判定 runId 优先（审计者 blocker——Date 判定恒真重复补写）
+	assert.ok(
+		src.includes("shouldBackfillAuditLog(latestEntry, sigRunId, sigAt)"),
+		"豁免补写必须用 shouldBackfillAuditLog（runId 优先 + Date 容差）",
+	);
 });
 
 test("appendAuditReport：append-only + 字段渲染 + 与 chain 同目录", () => {
@@ -1145,7 +1151,11 @@ test("appendGeneralization/readGeneralizations：gaps.md 原语库（v1.0.60）"
 	assert.deepEqual(readGeneralizations(dir), []);
 	// append 两条
 	const n1 = appendGeneralization(dir, [
-		{ scene: "并发资源分配碰撞", path: "全局位图分配 > 相对偏移", source: "blocker-1" },
+		{
+			scene: "并发资源分配碰撞",
+			path: "全局位图分配 > 相对偏移",
+			source: "blocker-1",
+		},
 		{ scene: "API 限流", path: "令牌桶+漏桶双层", source: "D-031" },
 	]);
 	assert.equal(n1, 2);
@@ -1154,14 +1164,19 @@ test("appendGeneralization/readGeneralizations：gaps.md 原语库（v1.0.60）"
 	assert.equal(all.length, 2);
 	assert.equal(all[0].path, "全局位图分配 > 相对偏移");
 	// append-only：再追加一条
-	appendGeneralization(dir, [{ scene: "缓存选型", path: "本地缓存+TTL 混合", source: "AUDIT-1" }]);
+	appendGeneralization(dir, [
+		{ scene: "缓存选型", path: "本地缓存+TTL 混合", source: "AUDIT-1" },
+	]);
 	all = readGeneralizations(dir);
 	assert.equal(all.length, 3, "append-only：旧条目保留");
 	assert.equal(all[2].scene, "缓存选型");
 	// 空 findings 不写
 	assert.equal(appendGeneralization(dir, []), 0);
 	// 与 chain 同目录（证明链同盘）
-	assert.equal(path.dirname(generalizationPath(dir)), path.dirname(chainPath(dir)));
+	assert.equal(
+		path.dirname(generalizationPath(dir)),
+		path.dirname(chainPath(dir)),
+	);
 	// 行格式消毒：换行注入
 	appendGeneralization(dir, [{ scene: "A\nB", path: "P", source: "S" }]);
 	all = readGeneralizations(dir);
@@ -1175,10 +1190,56 @@ test("queryGaps：gaps.md 数据源合并（v1.0.60 泛化通道不依赖 audit-
 		{ scene: "场景乙", path: "路径甲", source: "D-002" },
 	]);
 	const gaps = queryGaps(dir, { limit: 5 });
-	assert.equal(gaps.generalization.recentFindings.length, 2, "gaps.md findings 必须被聚合");
+	assert.equal(
+		gaps.generalization.recentFindings.length,
+		2,
+		"gaps.md findings 必须被聚合",
+	);
 	assert.equal(gaps.generalization.recentFindings[0].audit, "gaps.md");
-	assert.equal(gaps.generalization.frequentPaths.length, 1, "高频路径统计跨源生效");
+	assert.equal(
+		gaps.generalization.frequentPaths.length,
+		1,
+		"高频路径统计跨源生效",
+	);
 	assert.equal(gaps.generalization.frequentPaths[0].count, 2);
+});
+
+test("shouldBackfillAuditLog：runId 优先 + Date 容差（v1.0.61 审计者 blocker）", () => {
+	const entry = (runId: string, date: string) => ({
+		id: "AUDIT-1",
+		verdict: "passed",
+		head: "h",
+		window: "w",
+		blockers: [],
+		runId,
+		date,
+		body: "",
+		findings: [],
+	});
+	// runId 匹配（正常落盘：先报告后签名 Date 早于签名）→ 不补写
+	assert.equal(
+		shouldBackfillAuditLog(entry("run-1", "2026-08-15T10:00:00Z"), "run-1", 1786800000000),
+		false,
+		"runId 匹配 = 已落盘，不得补写（Date 早于签名也成立）",
+	);
+	// runId 不同（豁免/未落盘）→ 补写
+	assert.equal(
+		shouldBackfillAuditLog(entry("run-0", "2026-08-15T10:00:00Z"), "run-1", 1786800000000),
+		true,
+		"runId 不同 = 未落盘，补写",
+	);
+	// runId 缺失：Date 在容差内（5min）→ 不补写
+	assert.equal(
+		shouldBackfillAuditLog(entry("", "2026-08-15T10:02:00Z"), "", 1786788300000),
+		false,
+	);
+	// runId 缺失：Date 超容差 → 补写
+	assert.equal(
+		shouldBackfillAuditLog(entry("", "2026-08-15T10:00:00Z"), "", 1786788600000),
+		true,
+	);
+	// 无条目 → 补写
+	assert.equal(shouldBackfillAuditLog(null, "run-1", 1786800000000), true);
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {

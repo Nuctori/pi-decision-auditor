@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.61] - 2026-08-15
+
+审计者修复轮 blocker（v1.0.60 补写判定恒真）：
+
+- **补写判定 runId 优先**（审计者 blocker）：async-complete 补写判定 `latestEntry.date < sigAt` 缺 runId 校验——审计者正常落盘报告 Date 恒早于签名（先报告后签名），判定恒真 → 每轮正常审计都触发重复补写冗余元数据（证明链污染）。修复：`shouldBackfillAuditLog` 纯函数（lib，可测）——runId 优先（匹配 = 已落盘不补写）；runId 缺失走 Date 兼容 + 5min 容差（isAuditCompleted 同语义）。
+- **body 文案更新**：v1.0.59 → v1.0.60 豁免版本号。
+- 测试：shouldBackfillAuditLog 5 场景（runId 匹配/不同/缺失容差内/超容差/无条目）+ 接线守卫 +1 断言，64/64 通过，tsc 0。
+
 ## [1.0.60] - 2026-08-15
 
 审计者双 blocker 修复（v1.0.59 豁免协议实现矛盾 + 泛化通道断流）：

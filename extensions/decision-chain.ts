@@ -39,6 +39,7 @@ import {
 	renderEntry,
 	resetForSessionStart,
 	resolveProjectRoot,
+	shouldBackfillAuditLog,
 	shouldClearStaleLock,
 	shouldInjectInterimFindings,
 	shouldInjectSignatureFindings,
@@ -2020,22 +2021,25 @@ export default function (pi: ExtensionAPI): void {
 					: !st.auditRunId || completedId === st.auditRunId;
 				// v1.0.60 豁免补写：审计者按 audit-log ≥30KB 豁免未落盘报告 →
 				// 扩展原子补写元数据条目（write 全量重建压缩风险由 tmp+rename 消除，
-				// v1.0.48 interrupted 补写同模式）；判定 = audit-log 最新条目 Date < 签名时间
+				// v1.0.48 interrupted 补写同模式）；判定 = shouldBackfillAuditLog
+				// （v1.0.61：runId 优先——正常落盘报告带 runId 且先报告后签名 Date 恒早于
+				// 签名，纯 Date 判定恒真会每轮重复补写污染证明链；runId 缺失走 5min 容差）
 				if (sigCompleted && sigOwned) {
 					try {
 						const log = readAuditLog(completedCwd);
 						const latestEntry = log[log.length - 1];
 						const sigAt = st.signature?.at ?? 0;
+						const sigRunId =
+							st.signature?.runId ?? st.auditRunId ?? "";
 						if (
-							!latestEntry ||
-							new Date(latestEntry.date).getTime() < sigAt
+							shouldBackfillAuditLog(latestEntry, sigRunId, sigAt)
 						) {
 							appendAuditReport(completedCwd, {
 								verdict:
 									st.signature?.status === "blocked" ? "blocked" : "passed",
 								head: st.signature?.head ?? "",
 								window:
-									"（v1.0.59 豁免：audit-log ≥30KB 审计者未落盘，扩展补写元数据）",
+									"（v1.0.60 豁免：audit-log ≥30KB 审计者未落盘，扩展补写元数据）",
 								blockers: st.signature?.blockers ?? [],
 								runId: st.signature?.runId ?? "",
 								body: "扩展补写元数据条目（审计结论见 state.json signature/blockers，泛化发现在 gaps.md）。",
