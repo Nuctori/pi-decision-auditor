@@ -13,6 +13,7 @@
 
 - **Low#1 降级竞态文案失实**：纠正判据 status 白名单收窄为仅 `passed`/`blocked`——`passed-with-warning`（门禁 300s 超时降级签名，at=降级时刻 ≥ auditStartedAt 恒成立）在竞态窗口下会误触发「实际已完成」文案
 - **Low#2 无 runId 身份校验**：纠正判据叠加 `signature.runId === auditRunId`（isAuditCompleted 同语义）——并发/多实例下 run A 失败、run B 完成时 A 的 async-complete 不误触
+- **Note#1 严格化（de31013）**：Low#2 的共享槽比对仍存同 cwd 多实例因果错位（B 完成会覆盖 auditRunId 槽）——改为**严格优先**：签名带 runId 时只认 `signature.runId === completedId`（事件 run 与签名 run 直接比对）；无 runId 旧签名走兼容语义（auditRunId 空或事件 run 即槽值）。fail-safe 方向（宁可不触发、不误触发）
 - 测试：接线守卫补 1 组断言（status 白名单 + runId 校验），57/57 通过，tsc 0 错误
 
 ## [1.0.43] - 2026-08-15
