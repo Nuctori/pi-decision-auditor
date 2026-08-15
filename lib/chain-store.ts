@@ -585,7 +585,14 @@ export function clampFutureSignatureAt(cwd: string, st?: AuditState): boolean {
 	if (!sig || !sig.at) return false;
 	if (sig.at <= Date.now() + 5 * 60 * 1000) return false;
 	try {
-		const ok = patchAuditState(cwd, { signature: { ...sig, at: Date.now() } });
+		// v1.0.76（reviewer Low）：函数式重派生 patch（v1.0.28 F-01 模式）——对象 patch
+		// 用早读快照 sig，与审计者并发签名撞 mtime 时重试仍会用旧字段覆盖新签名；
+		// 函数式在锁获取点读最新 state 合并，不覆盖并发写。
+		const ok = patchAuditState(cwd, (latest) =>
+			latest.signature && latest.signature.at > Date.now() + 5 * 60 * 1000
+				? { signature: { ...latest.signature, at: Date.now() } }
+				: null, // 最新快照已非未来（并发钳制/签名完成）→ 放弃
+		);
 		if (ok) {
 			console.warn(
 				`[pi-pair] 签名 at 未来时间钳制（审计者换算错误，+${Math.round((sig.at - Date.now()) / 60000)}min）: ${auditStatePath(cwd)}`,

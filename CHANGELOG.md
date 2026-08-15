@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.76] - 2026-08-15
+
+reviewer 终审 Medium-Note/Low 处理：
+
+- **空洞回填**（reviewer Medium-Note）：v1.0.73（1731fac）/ v1.0.74（120316c）手工回填——audit-log 26 条，61→75 窗口全覆盖（audit-log 46KB ≥30KB 豁免 + 运行时扩展版本滞后，backfill 未触发，同 algeff v1.0.47 部署滞后模式）。
+- **clamp 改函数式重派生 patch**（reviewer Low）：对象 patch 用早读快照 sig，与审计者并发签名撞 mtime 时重试仍用旧字段覆盖新签名——改 `(latest) => ...` 函数式（v1.0.28 F-01 模式），锁获取点读最新 state 合并，最新快照非未来则放弃。
+- 验证：66/66 通过，tsc 0。
+
 ## [1.0.75] - 2026-08-15
 
 reviewer/审计者 Note 处理（clampFutureSignatureAt 测试与守卫锁定）：
