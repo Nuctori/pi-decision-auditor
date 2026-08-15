@@ -18,6 +18,19 @@ description: 结对决策审计的纪律：何时用 decision_add 记录关键�
 
 **不记**：命名、格式、单文件内实现细节、已有决策的自然延伸。
 
+## subagent 决策必须转述（v1.0.48）
+
+派发 subagent（writer / reviewer / 并行任务）后，把它的**决策性选择**（方案取舍、架构决定、被采纳的审查建议）转述进你的最终回复或 `decision_add` 的 Context，并标注来源（如「来源: subagent writer run-xxx」）——subagent 的输出不进 convlog，审计者只能靠你的转述捕获它做的决策。不转述 = 该决策在证明链上消失。
+
+## 泛化路径复用（v1.0.48c，开工前查）
+
+方案取舍前，用 grep 查两处历史，避免重复踩主 agent 曾没想到的盲区：
+
+- `.pi/decision-auditor/audit-log.md`（public 模式 `docs/decisions/audit-log.md`）的 `### 泛化发现` section——审计者每轮沉淀的「主 agent 没想到的候选路径」（一行一条：场景 | 路径 | 来源）
+- `chain.md` 的 `Alternatives` 字段——被否决过的方案及其理由
+
+命中相关场景 → 主动考虑该路径（采纳与否决策时在 Context 里引用它，形成闭环）；未命中 → 正常推进。这是 AI 检索（grep/read），无独立工具。
+
 ## 记录的推理链格式（`decision_add` 参数）
 
 `Context` 必须只含**可验证事实**（带数字/来源），这是审计者校验推理有效性的锚点：

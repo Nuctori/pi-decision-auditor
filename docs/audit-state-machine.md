@@ -194,6 +194,18 @@ passed-with-warning → blockedStreak=0（降级放行即退出门禁循环）
 - 接线守卫：真实产物判定、交付标记先消费（无泄漏）、fresh spawn（无 L0/常驻 run）、
   价值点 display:true、L2 真实产物门禁、async-complete 持续交付、完成即停、中间态注入判据（inFlight===true）
 
+## 审计报告日志（audit-log.md，v1.0.48 证明链）
+
+证明链主体：每次真实审计 append 一条 `## AUDIT-<epoch ms>: <verdict>` 条目（与 chain 同目录策略：默认 `.pi/decision-auditor/audit-log.md`，`PI_PAIR_CHAIN_PUBLIC=1` 时 `docs/decisions/audit-log.md`）。
+
+- **写者**：审计者子进程（write 纪律同 chain.md：read 全文 → 原文 + 新条目）——**先报告后签名**（T2 收尾第一步，被杀时报告仍在）；扩展在交付轮超时降级时补写 `interrupted` 条目（防证明链空洞，失败不影响降级放行）。
+- **verdict**：`passed` / `blocked` / `low-value`（轻量退出，简短条目）/ `interrupted`（扩展补写：超时降级）。
+- **不写**：纯咨询轮（零噪音承诺）；spawn 失败（failed 状态，无报告可写）。
+- **条目字段**：Verdict / Head（审计基线全哈希——缺口分析锚点）/ Window（审计窗口概述）/ Blockers / RunId / Date + 正文（审计输出原样多行）。
+- **缺口自查**（审计者 AI 顺手做，无独立工具）：① chain.md 决策 Date 晚于 audit-log 最新条目 = 决策未审（记录不升级）；② 最近条目 interrupted = 本轮补填（报告注明）；③ blocked 后无新条目 = 未闭环（修复轮核验）。gap 分析是 AI 能力——数据落盘即可查，不依赖解析器。
+- **泛化发现与复查**（v1.0.48c，pair 的多头注意力沉淀）：报告正文末尾的 `### 泛化发现` section = 发散核实中「落不回缺口的路径型发现」（主 agent 没想到的候选路径，一行一条：`- 场景: X | 路径: Y | 来源: Z`，无则省略）；复查 = 收尾扫最近 10 条报告的泛化发现做语义比对（复发升级 blocker 需产物证据 / ≥2 次未采纳 → 标注蒸馏建议）。**边界**：修复轮不执行复查（收敛纪律）；纯咨询/轻量退出不写；签名语义不变（附加产出，不影响 passed/blocked）。复用侧：主 agent 方案取舍前 grep audit-log 泛化发现 + chain 的 Alternatives（SKILL 纪律，AI 检索）。
+- **并发纪律**：与 appendDecision 同模式（mtime 乐观锁 + 唯一 tmp 原子写 + rename 紧前复校验 + 末尾条目验证），append-only。
+
 ## 审计者子进程 state 字段责任表（2026-08-13 并发覆盖事故后）
 
 state.json 是共享文件（extension 与审计者子进程并发读写）。M3 修复分两层：extension 侧 writeAuditState mtime 乐观锁（冲突放弃）；审计者子进程侧【state 写入纪律】（字段级合并写——write 前 read 最新、只改自己字段、其他原样保留、write 后 read 验证）。

@@ -34,14 +34,24 @@ const HEADER = `# Decision Chain
 -->
 `;
 
-export function chainPath(cwd: string): string {
-	// 默认写 .pi/ 私有目录（不污染项目 git）；PI_PAIR_CHAIN_PUBLIC=1 才写 docs/decisions/（团队可见）
+/** 决策链/审计报告所在目录（chain + audit-log 同策略，保证证明链同盘）：
+ *  默认 .pi/ 私有目录（不污染项目 git）；PI_PAIR_CHAIN_PUBLIC=1 才写 docs/decisions/（团队可见） */
+export function decisionsDir(cwd: string): string {
 	const publicChain =
 		process.env.PI_PAIR_CHAIN_PUBLIC === "1" ||
 		process.env.PI_PAIR_CHAIN_PUBLIC === "true";
 	return publicChain
-		? path.join(cwd, "docs", "decisions", "chain.md")
-		: path.join(cwd, ".pi", "decision-auditor", "chain.md");
+		? path.join(cwd, "docs", "decisions")
+		: path.join(cwd, ".pi", "decision-auditor");
+}
+
+export function chainPath(cwd: string): string {
+	return path.join(decisionsDir(cwd), "chain.md");
+}
+
+/** 审计报告日志路径（证明链：每次真实审计 append 一条 AUDIT-<epoch> 条目）。 */
+export function auditLogPath(cwd: string): string {
+	return path.join(decisionsDir(cwd), "audit-log.md");
 }
 
 /** 仓库根标记文件/目录：存在任一即视为项目根。 */
@@ -259,6 +269,279 @@ function chainMtime(file: string): number | null {
 	}
 }
 
+// ---- 审计报告日志（证明链）----
+// 每次真实审计 append 一条 `## AUDIT-<epoch ms>: <verdict>` 条目（与 chain 同目录策略）。
+// 审计者子进程是主写者（write 纪律同 chain.md：read 全文 → 原文+新条目，一个字符不少）；
+// 扩展在交付轮超时降级时补写 interrupted 条目（防证明链空洞，失败不影响降级放行）。
+
+const AUDIT_LOG_HEADER = `# Audit Log
+
+<!--
+  审计报告日志（证明链）：每次真实审计 append 一条 \`## AUDIT-<epoch ms>: <verdict>\` 条目。
+  append-only，只追加不修改。主写者 = 审计者（先报告后签名）；扩展在超时降级时补写
+  interrupted 条目（防证明链空洞）。纯咨询轮不写（零噪音）。
+-->
+`;
+
+export interface AuditReportFields {
+	/** passed=通过；blocked=有缺口；low-value=轻量退出；interrupted=扩展补写（超时降级） */
+	verdict: "passed" | "blocked" | "low-value" | "interrupted";
+	/** 审计基线：git rev-parse HEAD 全哈希（缺口分析锚点） */
+	head: string;
+	/** 审计窗口概述（决策范围 + 提交 + 未提交文件） */
+	window: string;
+	/** 缺口列表（无则空数组） */
+	blockers: string[];
+	/** 审计者 runId（扩展补写时用 state 的 auditRunId） */
+	runId: string;
+	/** 审计报告正文（目标推导 + 独立核实 + 逐条判定 + 总评） */
+	body: string;
+}
+
+/** 确保 audit-log.md 存在（含头注释），返回路径。 */
+export function ensureAuditLog(cwd: string): string {
+	const file = auditLogPath(cwd);
+	if (!fs.existsSync(file)) {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, AUDIT_LOG_HEADER, "utf-8");
+	}
+	return file;
+}
+
+/** 读 audit-log.md 原文；缺失视为仅头注释。 */
+function readRawAuditLog(file: string): string {
+	try {
+		return fs.readFileSync(file, "utf-8");
+	} catch {
+		return AUDIT_LOG_HEADER;
+	}
+}
+
+/** audit-log.md 当前 mtime（epoch ms）；不存在返回 null。append 乐观锁用。 */
+function auditLogMtime(file: string): number | null {
+	try {
+		return fs.statSync(file).mtimeMs;
+	} catch {
+		return null;
+	}
+}
+
+/** 追加一条审计报告（append-only；返回条目 id）。
+ *  并发纪律与 appendDecision 相同：mtime 乐观锁 + 唯一 tmp 原子写 + rename 紧前复校验 +
+ *  写后验证（内容一致且末尾条目 = 本次 id）。id = AUDIT-<epoch ms>，重试轮重新生成。 */
+export function appendAuditReport(
+	cwd: string,
+	fields: AuditReportFields,
+	now: Date = new Date(),
+): string {
+	const file = ensureAuditLog(cwd);
+	const clean = (s: string, max: number): string =>
+		s.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const expectedMtime = auditLogMtime(file);
+		const raw = readRawAuditLog(file);
+		const id = `AUDIT-${Date.now()}`;
+		const lines = [
+			`## ${id}: ${fields.verdict}`,
+			`- Verdict: ${fields.verdict}`,
+			`- Head: ${clean(fields.head, 64)}`,
+			`- Window: ${clean(fields.window, 500)}`,
+			`- Blockers: ${fields.blockers.length > 0 ? clean(fields.blockers.join(" | "), 1000) : "无"}`,
+			`- RunId: ${clean(fields.runId, 64)}`,
+			`- Date: ${now.toISOString()}`,
+			"",
+		];
+		// 正文原样多行（审计输出可读性）；验证只认 `## AUDIT-` 行，不受正文影响
+		const payload = `${raw.replace(/\r?\n$/, "")}\n\n${lines.join("\n")}${fields.body}\n`;
+		const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+		try {
+			fs.writeFileSync(tmp, payload, "utf-8");
+			if (expectedMtime !== null && auditLogMtime(file) !== expectedMtime) {
+				try {
+					fs.unlinkSync(tmp);
+				} catch {
+					/* noop */
+				}
+				continue; // 他写者已改 → 重读重试
+			}
+			fs.renameSync(tmp, file);
+		} catch {
+			try {
+				fs.unlinkSync(tmp);
+			} catch {
+				/* noop */
+			}
+			continue;
+		}
+		let verified = false;
+		try {
+			const onDisk = fs.readFileSync(file, "utf-8");
+			const entries = [...onDisk.matchAll(/^## AUDIT-\d+: .+$/gm)];
+			verified =
+				onDisk === payload &&
+				entries.length > 0 &&
+				entries[entries.length - 1][0].startsWith(`## ${id}:`);
+		} catch {
+			/* 落到循环尾重试 */
+		}
+		if (verified) return id;
+	}
+	throw new Error(
+		`appendAuditReport 并发冲突（3 次重试仍失败）: ${file} — 报告未落盘`,
+	);
+	throw new Error(
+		`appendAuditReport 并发冲突（3 次重试仍失败）: ${file} — 报告未落盘`,
+	);
+}
+
+// ---- 缺口查询（pair_gaps 工具的数据层）----
+
+export interface AuditLogEntry {
+	/** AUDIT-<epoch ms> */
+	id: string;
+	verdict: string;
+	head: string;
+	window: string;
+	blockers: string[];
+	runId: string;
+	date: string;
+	/** 报告正文（含泛化发现 section） */
+	body: string;
+	/** 泛化发现：`- 场景: X | 路径: Y | 来源: Z` 行 */
+	findings: Array<{ scene: string; path: string; source: string }>;
+}
+
+/** 解析 audit-log.md 全部条目（含每个条目正文里的泛化发现 section）。 */
+export function parseAuditLog(raw: string): AuditLogEntry[] {
+	const out: AuditLogEntry[] = [];
+	const headRe = /^## (AUDIT-\d+): (.+)$/gm;
+	let m: RegExpExecArray | null;
+	while ((m = headRe.exec(raw)) !== null) {
+		const start = m.index + m[0].length;
+		const next = raw.indexOf("\n## ", start);
+		const block = next === -1 ? raw.slice(start) : raw.slice(start, next);
+		const field = (k: string): string => {
+			const fm = block.match(new RegExp(`^\\s*- ${k}: (.*)$`, "m"));
+			return fm ? fm[1].trim() : "";
+		};
+		const findings: AuditLogEntry["findings"] = [];
+		const gapStart = block.indexOf("### 泛化发现");
+		if (gapStart !== -1) {
+			const gapBlock = block.slice(gapStart);
+			const gapHeadRe = /^- 场景: (.+) \| 路径: (.+) \| 来源: (.+)$/gm;
+			let gm: RegExpExecArray | null;
+			while ((gm = gapHeadRe.exec(gapBlock)) !== null) {
+				findings.push({
+					scene: gm[1].trim(),
+					path: gm[2].trim(),
+					source: gm[3].trim(),
+				});
+			}
+		}
+		out.push({
+			id: m[1],
+			verdict: m[2].trim(),
+			head: field("Head"),
+			window: field("Window"),
+			blockers:
+				field("Blockers") === "无"
+					? []
+					: field("Blockers")
+							.split(" | ")
+							.map((s) => s.trim())
+							.filter(Boolean),
+			runId: field("RunId"),
+			date: field("Date"),
+			body: block.trim(),
+			findings,
+		});
+	}
+	return out;
+}
+
+/** 读 audit-log 并解析条目；缺失/损坏返回空数组。 */
+export function readAuditLog(cwd: string): AuditLogEntry[] {
+	try {
+		return parseAuditLog(fs.readFileSync(auditLogPath(cwd), "utf-8"));
+	} catch {
+		return [];
+	}
+}
+
+export interface GapQueryResult {
+	latestAudit: AuditLogEntry | null;
+	proofGaps: {
+		/** chain.md 中 Date 晚于最新审计 Date 的决策（未审） */
+		unreviewedDecisions: Array<{ id: string; summary: string; date: string }>;
+		/** 最近条目为 interrupted（超时降级空洞） */
+		interruptedHole: boolean;
+		/** 最近条目为 blocked 时的 blockers（未闭环，待修复轮核验） */
+		unclosedBlockers: string[];
+		/** 有 git 且（无最新审计 或 HEAD ≠ 最新审计 head）——产物未审 */
+		unauditedArtifacts: boolean;
+	};
+	generalization: {
+		/** 最近 N 条泛化发现（跨条目，按审计序尾部） */
+		recentFindings: Array<{
+			scene: string;
+			path: string;
+			source: string;
+			audit: string;
+		}>;
+		/** 同一路径出现 ≥2 次（高频未采纳候选，供蒸馏判定） */
+		frequentPaths: Array<{ path: string; count: number }>;
+	};
+}
+
+/** 查询证明缺口（确定性对账）与泛化缺口（数据聚合，语义比对由调用者 AI 判定）。
+ *  供 pair_gaps 工具与审计者自查共用；不 spawn、不写文件、纯读。 */
+export function queryGaps(
+	cwd: string,
+	opts: { limit?: number } = {},
+): GapQueryResult {
+	const limit = opts.limit ?? 10;
+	const entries = readAuditLog(cwd);
+	const latest = entries.length > 0 ? entries[entries.length - 1] : null;
+	// 证明缺口
+	const chainEntries = parseChain(readRaw(cwd));
+	const unreviewedDecisions = latest
+		? chainEntries
+				.filter((e) => e.date && e.date > latest.date)
+				.map((e) => ({ id: e.id, summary: e.summary, date: e.date }))
+		: chainEntries.map((e) => ({ id: e.id, summary: e.summary, date: e.date }));
+	const head = gitHead(cwd);
+	const proofGaps = {
+		unreviewedDecisions,
+		interruptedHole: latest?.verdict === "interrupted",
+		unclosedBlockers: latest?.verdict === "blocked" ? latest.blockers : [],
+		unauditedArtifacts:
+			head !== null && (latest === null || head !== latest.head),
+	};
+	// 泛化缺口（数据聚合）
+	const allFindings: Array<{
+		scene: string;
+		path: string;
+		source: string;
+		audit: string;
+	}> = [];
+	for (const e of entries) {
+		for (const f of e.findings) allFindings.push({ ...f, audit: e.id });
+	}
+	const recentFindings = allFindings.slice(-limit);
+	const counts = new Map<string, number>();
+	for (const f of allFindings)
+		counts.set(f.path, (counts.get(f.path) ?? 0) + 1);
+	const frequentPaths = [...counts.entries()]
+		.filter(([, n]) => n >= 2)
+		.map(([path, count]) => ({ path, count }))
+		.sort((a, b) => b.count - a.count);
+	return {
+		latestAudit: latest,
+		proofGaps,
+		generalization: { recentFindings, frequentPaths },
+	};
+}
+
 /** 列出条目，可选 onlyFromId（含该 id 起的新条目）。 */
 export function listEntries(cwd: string, onlyFromId?: string): DecisionEntry[] {
 	const entries = parseChain(readRaw(cwd));
@@ -386,77 +669,149 @@ export function writeAuditReport(cwd: string, content: string): boolean {
 	}
 }
 
-/** 读审计状态；缺失视为从未审计。 */
+/** 读侧自愈记忆：某 cwd 已做过损坏恢复尝试（成败都记——防 2s 门禁轮询反复扫描刷屏）。 */
+const corruptRecoveryTried = new Set<string>();
+
+/** 把已解析对象规范化为主流 AuditState（readAuditState 与恢复路径共用）。 */
+function parseAuditState(obj: Partial<AuditState>): AuditState {
+	return {
+		lastAuditedId:
+			typeof obj.lastAuditedId === "string" ? obj.lastAuditedId : null,
+		inFlight: obj.inFlight === true,
+		convExtractedLine:
+			typeof obj.convExtractedLine === "number" ? obj.convExtractedLine : 0,
+		lastAuditAt: typeof obj.lastAuditAt === "number" ? obj.lastAuditAt : 0,
+		signature:
+			obj.signature &&
+			typeof obj.signature === "object" &&
+			!Array.isArray(obj.signature) &&
+			(obj.signature as AuditSignature).status !== undefined
+				? {
+						status: (obj.signature as AuditSignature).status,
+						at:
+							typeof (obj.signature as AuditSignature).at === "number"
+								? (obj.signature as AuditSignature).at
+								: 0,
+						...(Array.isArray((obj.signature as AuditSignature).blockers)
+							? { blockers: (obj.signature as AuditSignature).blockers }
+							: {}),
+						...(typeof (obj.signature as AuditSignature).runId === "string"
+							? { runId: (obj.signature as AuditSignature).runId }
+							: {}),
+						...(typeof (obj.signature as AuditSignature).reason === "string"
+							? { reason: (obj.signature as AuditSignature).reason }
+							: {}),
+						...((obj.signature as AuditSignature).head !== undefined &&
+						typeof (obj.signature as AuditSignature).head === "string"
+							? {
+									head: (obj.signature as AuditSignature).head,
+								}
+							: {}),
+					}
+				: null,
+		signatureConvLine:
+			typeof obj.signatureConvLine === "number" ? obj.signatureConvLine : 0,
+		blockedStreak:
+			typeof obj.blockedStreak === "number" ? obj.blockedStreak : 0,
+		auditFindings: Array.isArray(obj.auditFindings)
+			? obj.auditFindings.filter((x) => typeof x === "string")
+			: [],
+		lastAuditDurationMs:
+			typeof obj.lastAuditDurationMs === "number" ? obj.lastAuditDurationMs : 0,
+		auditStartedAt:
+			typeof obj.auditStartedAt === "number" ? obj.auditStartedAt : 0,
+		auditRunId: typeof obj.auditRunId === "string" ? obj.auditRunId : "",
+		lastError: typeof obj.lastError === "string" ? obj.lastError : null,
+		gatedHead: typeof obj.gatedHead === "string" ? obj.gatedHead : null,
+		injectedSignatureAt:
+			typeof obj.injectedSignatureAt === "number"
+				? obj.injectedSignatureAt
+				: null,
+		injectedInterimAt:
+			typeof obj.injectedInterimAt === "number" ? obj.injectedInterimAt : null,
+	};
+}
+
+/** 原子写回修复后的 state（唯一 tmp + rename；他写者并发覆盖风险可接受——原文件本就损坏）。 */
+function atomicWriteState(cwd: string, content: string): boolean {
+	try {
+		const file = auditStatePath(cwd);
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		const tmp = `${file}.tmp-${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+		fs.writeFileSync(tmp, content, "utf-8");
+		fs.renameSync(tmp, file);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** 损坏恢复（读侧自愈，v1.0.48）：截断修复（补对象闭合 `}`——审计者 write 工具
+ *  截断写被杀半程的典型形态）→ .corrupt 备份恢复（损坏写入时扩展备份的最新 1 份）。
+ *  返回 null = 恢复失败（维持 warn + DEFAULT 行为）。 */
+function tryRecoverAuditState(cwd: string, raw: string): AuditState | null {
+	// ① 截断修复：仅当 raw + "}" 可解析（真实缺对象闭合）才写回，中间损坏不会误修
+	try {
+		const repaired = raw + "}";
+		const obj = JSON.parse(repaired) as Partial<AuditState>;
+		if (atomicWriteState(cwd, repaired)) {
+			console.warn(
+				`[pi-pair] readAuditState 截断自愈：已补全对象闭合写回 ${auditStatePath(cwd)}`,
+			);
+			return parseAuditState(obj);
+		}
+	} catch {
+		/* 非截断形态 → 走备份恢复 */
+	}
+	// ② .corrupt 备份恢复（备份也可能不可用 → 返回 null）
+	try {
+		const dir = path.dirname(auditStatePath(cwd));
+		const base = path.basename(auditStatePath(cwd));
+		const corrupts = fs
+			.readdirSync(dir, { withFileTypes: true })
+			.filter((e) => e.isFile() && e.name.startsWith(`${base}.corrupt-`))
+			.map((e) => path.join(dir, e.name))
+			.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+		if (corrupts.length > 0) {
+			const backup = fs.readFileSync(corrupts[0], "utf-8");
+			const obj = JSON.parse(backup) as Partial<AuditState>;
+			if (atomicWriteState(cwd, backup)) {
+				console.warn(
+					`[pi-pair] readAuditState 已从 .corrupt 备份恢复（可能丢最近更新）: ${auditStatePath(cwd)}`,
+				);
+				return parseAuditState(obj);
+			}
+		}
+	} catch {
+		/* 无备份/备份也损坏 → 恢复失败 */
+	}
+	return null;
+}
+
+/** 读审计状态；缺失视为从未审计。损坏时自愈（截断补全 → .corrupt 备份），
+ *  恢复失败返回默认状态并 warn（v1.0.48 读侧自愈，防损坏窗口内持续报错）。 */
 export function readAuditState(cwd: string): AuditState {
 	try {
 		const raw = fs.readFileSync(auditStatePath(cwd), "utf-8");
-		const obj = JSON.parse(raw) as Partial<AuditState>;
-		return {
-			lastAuditedId:
-				typeof obj.lastAuditedId === "string" ? obj.lastAuditedId : null,
-			inFlight: obj.inFlight === true,
-			convExtractedLine:
-				typeof obj.convExtractedLine === "number" ? obj.convExtractedLine : 0,
-			lastAuditAt: typeof obj.lastAuditAt === "number" ? obj.lastAuditAt : 0,
-			signature:
-				obj.signature &&
-				typeof obj.signature === "object" &&
-				!Array.isArray(obj.signature) &&
-				(obj.signature as AuditSignature).status !== undefined
-					? {
-							status: (obj.signature as AuditSignature).status,
-							at:
-								typeof (obj.signature as AuditSignature).at === "number"
-									? (obj.signature as AuditSignature).at
-									: 0,
-							...(Array.isArray((obj.signature as AuditSignature).blockers)
-								? { blockers: (obj.signature as AuditSignature).blockers }
-								: {}),
-							...(typeof (obj.signature as AuditSignature).runId === "string"
-								? { runId: (obj.signature as AuditSignature).runId }
-								: {}),
-							...(typeof (obj.signature as AuditSignature).reason === "string"
-								? { reason: (obj.signature as AuditSignature).reason }
-								: {}),
-							...((obj.signature as AuditSignature).head !== undefined &&
-							typeof (obj.signature as AuditSignature).head === "string"
-								? {
-										head: (obj.signature as AuditSignature).head,
-									}
-								: {}),
-						}
-					: null,
-			signatureConvLine:
-				typeof obj.signatureConvLine === "number" ? obj.signatureConvLine : 0,
-			blockedStreak:
-				typeof obj.blockedStreak === "number" ? obj.blockedStreak : 0,
-			auditFindings: Array.isArray(obj.auditFindings)
-				? obj.auditFindings.filter((x) => typeof x === "string")
-				: [],
-			lastAuditDurationMs:
-				typeof obj.lastAuditDurationMs === "number"
-					? obj.lastAuditDurationMs
-					: 0,
-			auditStartedAt:
-				typeof obj.auditStartedAt === "number" ? obj.auditStartedAt : 0,
-			auditRunId: typeof obj.auditRunId === "string" ? obj.auditRunId : "",
-			lastError: typeof obj.lastError === "string" ? obj.lastError : null,
-			gatedHead: typeof obj.gatedHead === "string" ? obj.gatedHead : null,
-			injectedSignatureAt:
-				typeof obj.injectedSignatureAt === "number"
-					? obj.injectedSignatureAt
-					: null,
-			injectedInterimAt:
-				typeof obj.injectedInterimAt === "number"
-					? obj.injectedInterimAt
-					: null,
-		};
+		return parseAuditState(JSON.parse(raw) as Partial<AuditState>);
 	} catch (err) {
 		// v1.0.28 双审计 LC-08：区分 ENOENT（首次/缺失，静默——正常路径）与损坏
 		// （JSON.parse 失败/SIGKILL 半程写）——损坏静默返回 DEFAULT 会让审计者与扩展
 		// 在损坏窗口内零告警读到默认值，直到下次写才触发 .corrupt 备份（不可观测）
 		const code = (err as NodeJS.ErrnoException | null)?.code;
 		if (code !== "ENOENT") {
+			// v1.0.48 读侧自愈：损坏时尝试恢复（每 cwd 一次，成败都记——
+			// 防 2s 门禁轮询反复扫描刷屏；手动修复后文件正常，记忆无副作用）
+			if (!corruptRecoveryTried.has(cwd)) {
+				corruptRecoveryTried.add(cwd);
+				try {
+					const raw = fs.readFileSync(auditStatePath(cwd), "utf-8");
+					const recovered = tryRecoverAuditState(cwd, raw);
+					if (recovered) return recovered;
+				} catch {
+					/* 恢复路径异常 → 落回 warn + DEFAULT */
+				}
+			}
 			try {
 				console.warn(
 					`[pi-pair] readAuditState 读取失败（损坏或不可读），返回默认状态: ${auditStatePath(cwd)} (${err instanceof Error ? err.message : String(err)})`,

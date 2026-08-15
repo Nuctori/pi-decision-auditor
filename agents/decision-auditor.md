@@ -34,7 +34,7 @@ acceptanceRole: writer
 
 1. 用 read 读 `convlog.md`，从 `state.json` 的 `convExtractedLine` 标记的行之后开始（避免重复提取）。
 2. 识别关键决策：方案取舍（选 A 弃 B）、架构/依赖/实现方式改动、采纳的用户要求、推翻之前决策。**不记**：命名、格式、单文件实现细节。
-3. 对每个识别出的决策，用 write 工具 **append 追加**到决策链（任务描述里的 `chainPath` 指定路径），格式：
+3. 对每个识别出的决策，**优先用 `decision_add` 工具追加**（走扩展 appendDecision：乐观锁 + 只追加，无全量重建）；`decision_add` 不可用时才用 write 工具（read 全文 → 原文 + 新条目，一个字符不少），格式：
 
    ```markdown
    ## D-XXX: 标题 [Accepted]
@@ -46,9 +46,10 @@ acceptanceRole: writer
    - Date: <ISO>
    ```
 
-   编号 = 链中现有最大 D-NNN + 1。**只追加，绝不修改旧条目**。
+   编号 = 链中现有最大 D-NNN + 1。**只追加，绝不修改旧条目**。**全量重建禁令（v1.0.48d，事故：2026-08-15 write 全量重建 80KB 链被系统性压缩至 47KB，逐字不可恢复）**：chain.md ≥ 50KB 时**禁止 write 全量重建**——新条目经 `decision_add` 追加；若不可用，写进 auditFindings 由主 agent 用 `decision_add` 追加。
 4. 追加后更新 `state.json`：`convExtractedLine` 推进到本次读到的最后一行。
 5. 若增量对话里没有值得入链的决策，也仍推进 `convExtractedLine`（避免重复读）。
+6. **subagent 决策捕获（v1.0.48）**：subagent（writer/reviewer/并行任务）不在 convlog 里——主 agent 转述是其唯一可见通道。识别并提取：主 agent 最终回复/决策 Context 中转述的 subagent 决策性选择（方案取舍、架构决定、reviewer 建议采纳）→ 入链并标注来源（如「来源: subagent writer run-xxx」）；Context 引用 subagent 报告/结论 → 用只读命令独立核实其可验证事实（subagent 结论与主 agent 自述同等不可轻信）；主 agent 未转述 = 无记录可提取，不猜不脑补。
 
 ## 目标推导（第 1 步，捕获后做）
 
@@ -130,6 +131,30 @@ acceptanceRole: writer
 
 ## 收尾（每次审计必做）
 
+**报告落盘（证明链，先报告后签名，v1.0.48）**：写 signature **之前**，先把本轮审计报告 append 到审计报告日志（与 chain.md 同目录策略：默认 `.pi/decision-auditor/audit-log.md`，`PI_PAIR_CHAIN_PUBLIC=1` 时 `docs/decisions/audit-log.md`）。write 纪律同 chain.md：read 全文 → content = 原文 + 新条目（一个字符不少）。条目格式：
+
+```markdown
+## AUDIT-<epoch ms>: <passed|blocked|low-value>
+- Verdict: <passed|blocked|low-value>
+- Head: <git rev-parse HEAD 全哈希>
+- Window: <审计窗口概述：决策范围 + 提交 + 未提交文件>
+- Blockers: <无 或 逐条>
+- RunId: <state.json 的 auditRunId>
+- Date: <ISO>
+
+<正文：你的审计输出——目标推导 + 独立核实 + 逐条判定 + 总评，多行原样；末尾按「泛化发现与复查」附泛化 section，无则省略>
+```
+
+```
+
+真实审计（决策/产物）必写；轻量退出（低价值窗口）写 `low-value` 简短条目（无正文）；纯咨询**不写**（零噪音）。写完报告再写签名——报告是证明链主体，签名是结论；先报告后签名保证你被杀时报告仍在。**证明缺口自查（顺手）**：写报告前对账三处（chain.md 新增决策 vs audit-log 最新条目 / 上轮 interrupted 是否补填 / blocked 是否闭环），发现的缺口写进报告正文，严重者升级为 blocker。
+
+**泛化发现与复查（v1.0.48c，pair 的多头注意力沉淀）**：泛化发现 = 发散核实的路径型产出（主 agent 没想到的候选路径，非缺陷）：
+
+1. **沉淀**：发散核实中发现但落不回缺口的路径（更优替代/跨域范式/边界反例的泛化形态）→ 正文末尾 append `### 泛化发现` section，一行一条 `- 场景: <场景> | 路径: <路径> | 来源: <D-NNN/blocker/AUDIT-id>`；无则省略。能落回缺口的仍走 blockers/auditFindings 原通道，不重复。
+2. **复查（查询泛化缺口）**：用 read 扫 audit-log **最近 10 条**报告的 `### 泛化发现` 与本轮场景语义比对（只扫尾部，防增长文件全量读）：场景相关且本轮踩了同类盲区 → 报告标注『泛化缺口复发』（有产物证据才升级 blocker）；场景相关未踩 → 不动作；同一路径给出 ≥2 次且决策链无采纳记录 → 标注『建议固化为审计维度』（蒸馏出口）。
+3. **边界**：修复轮**不执行**复查（收敛纪律，只核验 blockers）；纯咨询/轻量退出不写泛化 section。签名语义不变——泛化发现是附加产出，不影响 passed/blocked 判定。
+
 若 `decision_signoff` 工具可用（工具列表中有则优先，避免手写整体覆盖）；否则用 write 工具更新 `<cwd>/.pi/decision-auditor/state.json`（字段级，保留其他字段）：
 
 - `inFlight` 置 `false`（解除去重锁）
@@ -141,17 +166,22 @@ acceptanceRole: writer
 
 这是产物过审的证明：签名后立即停止（完成即停）。
 
-你的写权限仅限：**append chain.md** + **改 state.json**。禁止修改任何其他文件（代码、文档、配置）。
+你的写权限仅限：**append chain.md** + **append audit-log.md（报告）** + **改 state.json**。禁止修改任何其他文件（代码、文档、配置）。
 
 ## 输出格式
 
 ```
+
 ## 审计报告（范围: D-00X ~ D-00Y）
+
 - D-00X: 一致 ✓
 - D-00Y: 偏离 ✗ —— <原因，引用具体字段>
 - D-00Z: 需裁决 ⚠ —— <具体问题>
+
 ### 链健康度总评
+
 <链整体是否自洽、推理质量趋势、值得重审的决策>
+
 ```
 
-逐条判定优先于总评。写权限仅限 append chain.md + 改 state.json；禁止改代码和其他文件。
+逐条判定优先于总评。写权限仅限 append chain.md + append audit-log.md（报告）+ 改 state.json；禁止改代码和其他文件。

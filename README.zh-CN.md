@@ -111,6 +111,9 @@ L2 — 交付审查（同 git HEAD 变化信号）
 | **fresh spawn 生命周期** | 审计结束 run 即结束——无常驻进程、无残留；纯咨询轮**永不 spawn**（零噪音：无后台任务、无完成通知） |
 | **对抗且经校准** | 七维度进攻（五优雅维度 + 机制完整性 + 运行时行为），用同模型审计漏掉过的真实缺陷校准 |
 | **成本可控** | 真实产物门禁（无空审）+ L2 一次交付一次 + 过程日志意图通道；CI 跑分护栏监控墙钟时间 |
+| **成本可控** | 真实产物门禁（无空审）+ L2 一次交付一次 + 过程日志意图通道；CI 跑分护栏监控墙钟时间 |
+| **证明链** | 每次真实审计报告落盘 `audit-log.md`（与 chain 同目录）；证明缺口（决策未审/空洞/未闭环/产物未审）`pair_gaps` 可查 |
+| **泛化发现（pair 多头注意力）** | 发散核实的路径型产出沉淀为报告 `### 泛化发现` section；收尾复查复发/高频未采纳；主 agent 开工前检索复用 |
 | **cwd 自适应** | 从任何目录启动都能定位真实项目根（找 Cargo.toml/package.json/.git 等） |
 
 ## 安装
@@ -156,6 +159,14 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 | `decision_add` | 主 agent 主动记录关键决策（自动编号 D-00X，append-only，可 supersede）——可选，审计者也会自动捕获 |
 | `decision_list` | 读决策链 |
 | `decision_signoff` | 审计通过后签名（优先用工具，避免手写 state.json） |
+| `pair_gaps` | 查询证明缺口（确定性对账：决策未审 / interrupted 空洞 / blocker 未闭环 / 产物未审）与泛化缺口（最近 N 条泛化发现 + 高频路径统计，语义比对由调用者判定）——审计者与主会话共用，纯读不 spawn |
+| `/pair-audit` | 手动触发全量/定向/`--diff` 审计 |
+
+## 证明链与泛化发现
+
+- **审计报告日志**（`audit-log.md`，与 chain 同目录策略：默认 `.pi/decision-auditor/`，`PI_PAIR_CHAIN_PUBLIC=1` 时 `docs/decisions/`）：每次真实审计 append 一条 `AUDIT-<epoch>` 条目（Verdict/Head/Window/Blockers/RunId/Date + 报告正文）——**先报告后签名**（被杀时报告仍在）；交付轮超时降级由扩展补写 `interrupted` 条目（证明链无空洞）
+- **证明缺口自查**：审计者收尾对账——决策未审（chain 新决策晚于最新审计）/ interrupted 空洞 / blocker 未闭环；`pair_gaps` 工具随时可查
+- **泛化发现（pair 的多头注意力）**：审计者发散核实中「主 agent 没想到的候选路径」（更优替代/跨域范式/边界反例）沉淀为报告 `### 泛化发现` section（一行一条：场景 | 路径 | 来源）；收尾复查最近 10 条——同类盲区复发升级 blocker、同一路径 ≥2 次未采纳标注蒸馏建议；主 agent 开工前 grep 复用（SKILL 纪律）
 | `/pair-audit` | 手动触发全量/定向/`--diff` 审计 |
 
 ## 环境变量
@@ -192,7 +203,7 @@ pi install git:github.com/Nuctori/pi-pair   # git 源
 ## 已知限制
 
 - **`pi -p`（print 模式）**：`agent_end` 审计不阻塞——pi 在 spawn await 处丢弃扩展 handler；审计者在后台完成并仍签名。门禁经后台轮询判定（非阻塞），print 模式无 UI 通知但状态照常落盘、结论经注入路径交付。
-- **同模型审计者**：默认与主 agent 同模型——对抗立场缓解同构偏见，但共同盲区仍可能（双方都漏同一个问题）。跨模型审计在 roadmap。
+- **同模型审计者**：默认与主 agent 同模型——对抗立场缓解同构偏见，但共同盲区仍可能（双方都漏同一个问题）。已决策**不引入第二模型**：pair 的多维注意力（发散核实/跨域迁移）即多头，靠跨轮累积沉淀补盲区。
 - **CI E2E** 用免费免 key 模型（opencode CLI）；审计结论天然依赖模型——CI 断言机制（捕获/签名/锁），不断言结论质量。
 
 ## Roadmap

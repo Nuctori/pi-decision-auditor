@@ -16,6 +16,8 @@ import {
 	appendProcessSignal,
 	auditStateMtime,
 	auditStatePath,
+	appendAuditReport,
+	auditLogPath,
 	auditReportPath,
 	writeAuditReport,
 	chainPath,
@@ -33,6 +35,7 @@ import {
 	needsSignoff,
 	parseChain,
 	processPath,
+	queryGaps,
 	readAuditState,
 	readConvTail,
 	readProcess,
@@ -711,6 +714,276 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 			!agentSrc.includes("ctx_ls"),
 		"审计者 agent 工具白名单不得含 ctx_*（未加载扩展，运行时拒绝致 run exitCode=1）",
 	);
+	// v1.0.48：证明链（报告落盘 + subagent 转述捕获 + 缺口自查 + 超时补写）
+	assert.ok(
+		src.includes("auditLogPath(cwd)"),
+		"审计任务必须注入 audit-log 路径（报告落盘指令）",
+	);
+	assert.ok(
+		src.includes("subagent 决策捕获"),
+		"审计任务必须含 subagent 转述捕获指令（subagent 决策经主 agent 转述入链）",
+	);
+	assert.ok(
+		src.includes("证明缺口自查"),
+		"审计任务必须含证明缺口自查指令（决策未审/interrupted 补填/blocker 闭环）",
+	);
+	assert.ok(
+		src.includes('verdict: "interrupted"'),
+		"超时降级必须补写 interrupted 报告（证明链无空洞）",
+	);
+	assert.ok(
+		agentSrc.includes("audit-log.md") && agentSrc.includes("先报告后签名"),
+		"审计者 agent 收尾协议必须含报告落盘（先报告后签名）",
+	);
+	// v1.0.48c：泛化发现（pair 多头注意力沉淀 + 查询 + 复用纪律）
+	assert.ok(
+		src.includes("泛化发现与复查") && src.includes("### 泛化发现"),
+		"审计任务必须含泛化发现沉淀指令（发散核实路径型产出的出口）",
+	);
+	assert.ok(
+		src.includes("泛化缺口复发") && src.includes("建议固化为审计维度"),
+		"泛化复查必须含复发检测与蒸馏出口（查询泛化缺口）",
+	);
+	assert.ok(
+		src.includes("修复轮**不执行**复查"),
+		"泛化复查必须排除修复轮（收敛纪律，不制造无限唤起）",
+	);
+	assert.ok(
+		agentSrc.includes("泛化发现与复查"),
+		"审计者 agent 收尾协议必须含泛化发现与复查",
+	);
+	// v1.0.48d：pair_gaps 工具注册 + chain.md 全量重建禁令
+	assert.ok(
+		src.includes('name: "pair_gaps"'),
+		"必须注册 pair_gaps 工具（查询证明/泛化缺口）",
+	);
+	assert.ok(
+		src.includes("queryGaps(root, { limit:"),
+		"pair_gaps 必须调 queryGaps 数据层",
+	);
+	assert.ok(
+		src.includes("优先用 decision_add 工具追加") &&
+			src.includes("全量重建禁令") &&
+			src.includes("50KB"),
+		"审计任务必须含 decision_add 优先 + 50KB 全量重建禁令（长链压缩事故防护）",
+	);
+	assert.ok(
+		agentSrc.includes("全量重建禁令") && agentSrc.includes("decision_add"),
+		"审计者 agent 捕获协议必须同步 decision_add 优先 + 重建禁令",
+	);
+});
+
+test("appendAuditReport：append-only + 字段渲染 + 与 chain 同目录", () => {
+	const dir = tmpDir();
+	const id1 = appendAuditReport(dir, {
+		verdict: "passed",
+		head: "abc123",
+		window: "D-001 + 2 commits",
+		blockers: [],
+		runId: "run-1",
+		body: "目标推导：加缓存。逐条判定：D-001 ✓",
+	});
+	assert.ok(
+		id1.startsWith("AUDIT-"),
+		`id 必须为 AUDIT-<epoch ms>，实际 ${id1}`,
+	);
+	assert.ok(fs.existsSync(auditLogPath(dir)), "audit-log.md 必须被创建");
+	// 与 chain 同目录（证明链同盘）
+	assert.equal(path.dirname(auditLogPath(dir)), path.dirname(chainPath(dir)));
+	const id2 = appendAuditReport(dir, {
+		verdict: "blocked",
+		head: "def456",
+		window: "D-002",
+		blockers: ["extensions/a.ts:12 缺守卫"],
+		runId: "run-2",
+		body: "偏离 ✗",
+	});
+	assert.notEqual(id2, id1, "id 必须唯一（epoch ms 粒度）");
+	const raw = fs.readFileSync(auditLogPath(dir), "utf-8");
+	// append-only：两条都在且先写在前
+	assert.ok(raw.indexOf(id1) < raw.indexOf(id2), "旧条目必须保留且先写在前");
+	assert.ok(raw.includes(`## ${id2}: blocked`), "标题行必须含 verdict");
+	assert.ok(raw.includes("- Head: def456"), "Head 字段必须渲染");
+	assert.ok(
+		raw.includes("- Blockers: extensions/a.ts:12 缺守卫"),
+		"blockers 必须渲染",
+	);
+	assert.ok(raw.includes("- Blockers: 无"), "空 blockers 必须渲染为'无'");
+	assert.ok(raw.includes("- RunId: run-2"), "RunId 字段必须渲染");
+	assert.ok(raw.includes("偏离 ✗"), "正文必须原样保留");
+});
+
+test("readAuditState 读侧自愈：截断补全 + .corrupt 备份恢复（v1.0.48）", () => {
+	// ① 截断自愈：缺对象闭合 `}`（审计者 write 截断写被杀半程的典型形态）
+	const dir1 = tmpDir();
+	const file1 = auditStatePath(dir1);
+	fs.mkdirSync(path.dirname(file1), { recursive: true });
+	const truncated = JSON.stringify({
+		lastAuditedId: "D-031",
+		inFlight: false,
+		signature: { status: "blocked", at: 123 },
+		auditFindings: ["a", "b"],
+	}).slice(0, -1);
+	fs.writeFileSync(file1, truncated, "utf-8");
+	const s1 = readAuditState(dir1);
+	assert.equal(s1.lastAuditedId, "D-031", "截断自愈必须返回完整状态");
+	assert.equal(s1.signature?.status, "blocked");
+	assert.deepEqual(s1.auditFindings, ["a", "b"]);
+	assert.ok(
+		JSON.parse(fs.readFileSync(file1, "utf-8")),
+		"截断自愈必须写回可解析文件",
+	);
+	// ② .corrupt 备份恢复：中间损坏（补 `}` 不可解）→ 从备份恢复
+	const dir2 = tmpDir();
+	const file2 = auditStatePath(dir2);
+	fs.mkdirSync(path.dirname(file2), { recursive: true });
+	const midBroken = '{"lastAuditedId": "D-031", "inFlight": tru}';
+	fs.writeFileSync(file2, midBroken, "utf-8");
+	fs.writeFileSync(
+		path.join(path.dirname(file2), "state.json.corrupt-1786791753000"),
+		JSON.stringify({
+			lastAuditedId: "D-030",
+			inFlight: true,
+			convExtractedLine: 100,
+		}),
+		"utf-8",
+	);
+	const s2 = readAuditState(dir2);
+	assert.equal(s2.lastAuditedId, "D-030", "必须从 .corrupt 备份恢复");
+	assert.equal(s2.inFlight, true);
+	assert.equal(s2.convExtractedLine, 100);
+	// ③ 恢复失败：损坏 + 无可用备份 → DEFAULT 不抛错
+	const dir3 = tmpDir();
+	const file3 = auditStatePath(dir3);
+	fs.mkdirSync(path.dirname(file3), { recursive: true });
+	fs.writeFileSync(file3, '{"bad": [}', "utf-8");
+	const s3 = readAuditState(dir3);
+	assert.equal(s3.lastAuditedId, null, "恢复失败必须返回默认状态");
+	assert.equal(s3.inFlight, false);
+});
+
+test("queryGaps：证明缺口对账 + 泛化发现聚合（pair_gaps 数据层）", () => {
+	const dir = tmpDir();
+	// ① 无审计 → 决策未审 = 全部决策；无 git → 产物未审 false
+	appendDecision(
+		dir,
+		{
+			summary: "采用 Redis 做读缓存",
+			context: "QPS 峰值 2k",
+			decision: "引入 Redis",
+			rationale: "缓存命中 <5ms",
+		},
+		new Date("2026-08-15T00:00:00Z"),
+	);
+	let gaps = queryGaps(dir);
+	assert.equal(gaps.latestAudit, null, "无审计条目");
+	assert.equal(gaps.proofGaps.unreviewedDecisions.length, 1);
+	assert.equal(gaps.proofGaps.interruptedHole, false);
+	assert.equal(gaps.proofGaps.unauditedArtifacts, false, "无 git 不判产物未审");
+	// ② 审计后 → 决策未审清空；blocked 未闭环命中
+	const t2 = new Date("2026-08-15T01:00:00Z");
+	appendAuditReport(
+		dir,
+		{
+			verdict: "blocked",
+			head: "abc123",
+			window: "D-001",
+			blockers: ["lib/a.ts:12 缺守卫"],
+			runId: "run-1",
+			body: "偏离 ✗",
+		},
+		t2,
+	);
+	gaps = queryGaps(dir);
+	assert.equal(gaps.latestAudit?.verdict, "blocked");
+	assert.equal(
+		gaps.proofGaps.unreviewedDecisions.length,
+		0,
+		"审计覆盖后决策未审清空",
+	);
+	assert.equal(gaps.proofGaps.unclosedBlockers.length, 1);
+	assert.equal(gaps.proofGaps.unclosedBlockers[0], "lib/a.ts:12 缺守卫");
+	// ③ 审计后新决策 → 未审命中
+	appendDecision(
+		dir,
+		{
+			summary: "审计后新决策",
+			context: "新增事实",
+			decision: "新选择",
+			rationale: "新理由",
+		},
+		new Date("2026-08-15T02:00:00Z"),
+	);
+	gaps = queryGaps(dir);
+	assert.equal(gaps.proofGaps.unreviewedDecisions.length, 1);
+	assert.equal(gaps.proofGaps.unreviewedDecisions[0].id, "D-002");
+	// ④ interrupted 空洞
+	appendAuditReport(
+		dir,
+		{
+			verdict: "interrupted",
+			head: "def456",
+			window: "审计超时",
+			blockers: [],
+			runId: "run-2",
+			body: "扩展补写",
+		},
+		new Date("2026-08-15T03:00:00Z"),
+	);
+	gaps = queryGaps(dir);
+	assert.equal(gaps.proofGaps.interruptedHole, true);
+	// ⑤ 泛化发现解析（审计者 write 格式）——手写含泛化 section 的条目
+	const logPath = auditLogPath(dir);
+	const extra = `
+## AUDIT-9999999999000: passed
+- Verdict: passed
+- Head: ffff
+- Window: D-003
+- Blockers: 无
+- RunId: run-3
+- Date: 2026-08-15T04:00:00Z
+
+### 泛化发现
+- 场景: 并发资源分配碰撞 | 路径: 全局位图分配 > 相对偏移 | 来源: blocker-1
+- 场景: 区间重叠 | 路径: 半线区间验证跨层不相交 | 来源: D-031
+
+正文其余部分
+`;
+	fs.appendFileSync(logPath, `\n${extra}\n`, "utf-8");
+	gaps = queryGaps(dir, { limit: 5 });
+	assert.equal(
+		gaps.generalization.recentFindings.length,
+		2,
+		"泛化发现必须被解析",
+	);
+	assert.equal(gaps.generalization.recentFindings[0].scene, "并发资源分配碰撞");
+	assert.equal(
+		gaps.generalization.recentFindings[0].path,
+		"全局位图分配 > 相对偏移",
+	);
+	assert.equal(gaps.generalization.recentFindings[0].source, "blocker-1");
+	assert.equal(gaps.latestAudit?.verdict, "passed");
+	// ⑥ 高频路径（同路径两条 → ≥2 次）
+	const extra2 = `
+## AUDIT-9999999999001: passed
+- Verdict: passed
+- Head: fffe
+- Window: D-004
+- Blockers: 无
+- RunId: run-4
+- Date: 2026-08-15T05:00:00Z
+
+### 泛化发现
+- 场景: 另一个并发场景 | 路径: 全局位图分配 > 相对偏移 | 来源: D-004
+`;
+	fs.appendFileSync(logPath, `\n${extra2}\n`, "utf-8");
+	gaps = queryGaps(dir, { limit: 5 });
+	assert.equal(gaps.generalization.frequentPaths.length, 1);
+	assert.equal(
+		gaps.generalization.frequentPaths[0].path,
+		"全局位图分配 > 相对偏移",
+	);
+	assert.equal(gaps.generalization.frequentPaths[0].count, 2);
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {

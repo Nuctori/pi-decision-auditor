@@ -9,9 +9,11 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
+	appendAuditReport,
 	appendConv,
 	appendDecision,
 	appendProcessSignal,
+	auditLogPath,
 	auditStatePath,
 	chainPath,
 	clampConvExtractedLine,
@@ -31,6 +33,7 @@ import {
 	readProcess,
 	readRaw,
 	recordSignature,
+	queryGaps,
 	renderEntry,
 	resetForSessionStart,
 	resolveProjectRoot,
@@ -249,10 +252,13 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 		"1. 用 read 读对话日志，从 state.json 的 convExtractedLine 标记的对话行之后开始（convExtractedLine = ## 👤/## 🤖 行计数）。",
 	);
 	lines.push(
-		`2. 识别主 agent 实际做的关键决策（方案取舍/架构改动/采纳的用户要求），用 write **append** 到 ${chainPath(cwd)}（## D-XXX: 标题 [Accepted]，Context/Decision/Rationale/Alternatives/Confidence/Date，编号 = 现有最大 D-NNN+1）。不记：命名、格式、单文件实现细节。**链写入纪律（事故教训：2026-08-13 曾误用 write 覆盖致 D-001~D-013 丢失）**：写前必须用 read 读全链，write 的 content 必须 = 原文完整内容 + 新条目追加（一个字符都不能少），禁止整体重写/精简/截断；无把握时宁可不写（留 auditFindings）也不要覆盖。`,
+		`2. 识别主 agent 实际做的关键决策（方案取舍/架构改动/采纳的用户要求），**优先用 decision_add 工具追加**（走扩展 appendDecision：mtime 乐观锁 + 只追加，无全量重建）；decision_add 不可用时：read 全文 → write 原文完整内容 + 新条目（一个字符都不能少）。**全量重建禁令（v1.0.48d，事故：2026-08-15 write 全量重建 80KB 链被系统性压缩至 47KB，逐字不可恢复）**：chain.md ≥ 50KB 时**禁止 write 全量重建**——新条目经 decision_add 追加；若 decision_add 不可用，写进 auditFindings 由主 agent 用 decision_add 追加。编号 = 现有最大 D-NNN+1。不记：命名、格式、单文件实现细节。**链写入纪律（事故教训：2026-08-13 曾误用 write 覆盖致 D-001~D-013 丢失）**：必须 = 原文完整内容 + 新条目追加（一个字符都不能少），禁止整体重写/精简/截断；无把握时宁可不写（留 auditFindings）也不要覆盖。`,
 	);
 	lines.push(
 		"3. 用 write 更新 state.json：convExtractedLine 推进到当前对话行总数（单位：只数 `## 👤`/`## 🤖` 开头的行，不是文件行号；写错单位会被扩展钳制，但写对可避免重审）。无决策也推进。（按【state 写入纪律】：只改 convExtractedLine 字段，其他字段原样保留；若 read 发现 convExtractedLine 已被推进 > 你的值 → 基于最新值继续）",
+	);
+	lines.push(
+		"【subagent 决策捕获（v1.0.48）】subagent（writer/reviewer/并行任务）不在 convlog 里，主 agent 转述是其唯一可见通道：① convlog/决策条目中主 agent 转述的 subagent 决策性选择（方案取舍/架构决定/reviewer 建议采纳）→ 提取入链，Context 标注来源（如『来源: subagent writer run-xxx』）；② 链条目 Context 引用 subagent 报告/结论 → 用只读命令独立核实其可验证事实（subagent 结论与主 agent 自述同等不可轻信）；③ 主 agent 未转述 = 无记录可提取——不猜不脑补。",
 	);
 	lines.push("");
 	lines.push("【第二步：推导目标】");
@@ -278,7 +284,7 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 		"   ① 收敛核实（对账）：用 read/grep 核实产物/决策中**声明的每个事实**与代码/仓库一致（不信任记录，事实不符 = 偏离 ✗）。——这层只证明「声明的没错」。",
 	);
 	lines.push(
-		"   ② 发散核实（主动找未声明的风险——对抗式的另一半）：在目标/决策/产物三个锚点内**主动发散**，找出产物没声明但影响结果的因素。具体攻击点：a) 未声明的假设——产物依赖了什么隐含前提（数据规模/时序/权限/单写者）？前提不成立会怎样？b) 被忽略的替代方案——还有没有更简单的做法？当前选择是唯一解还是惰性解？c) 边界反例——输入/状态/并发/失败路径的极端情况产物没覆盖？d) 跨层盲区——决策链条目之间、产物与既有模式之间有没有没说破的冲突？e) 二阶效应——这个改动/决策的后续影响（维护成本/迁移/依赖）有没有被忽略？f) 跨领域知识迁移——把**其他领域/项目/范式**中同类问题的已知失败模式迁移过来审视：这个实现/决策在其他语境下犯过的错（缓存穿透/竞态/状态机遗漏/约定冲突/规模拐点）在这里会不会重演？当前方案与成熟范式（CAP/ACID/幂等/背压等）的偏差是有意取舍还是无知？**发散要可控**：每个发散点必须能落回「产物/决策的某个具体缺口」，落不回的猜想不算发现，写进 auditFindings 供参考即可。",
+		"   ② 发散核实（主动找未声明的风险——对抗式的另一半）：在目标/决策/产物三个锚点内**主动发散**，找出产物没声明但影响结果的因素。具体攻击点：a) 未声明的假设——产物依赖了什么隐含前提（数据规模/时序/权限/单写者）？前提不成立会怎样？b) 被忽略的替代方案——还有没有更简单的做法？当前选择是唯一解还是惰性解？c) 边界反例——输入/状态/并发/失败路径的极端情况产物没覆盖？d) 跨层盲区——决策链条目之间、产物与既有模式之间有没有没说破的冲突？e) 二阶效应——这个改动/决策的后续影响（维护成本/迁移/依赖）有没有被忽略？f) 跨领域知识迁移——把**其他领域/项目/范式**中同类问题的已知失败模式迁移过来审视：这个实现/决策在其他语境下犯过的错（缓存穿透/竞态/状态机遗漏/约定冲突/规模拐点）在这里会不会重演？当前方案与成熟范式（CAP/ACID/幂等/背压等）的偏差是有意取舍还是无知？**发散要可控**：能落回「产物/决策某个具体缺口」的 = 偏离 ✗（blockers）；**落不回缺口的路径型发现**（更优替代/跨域范式/边界反例的泛化形态——主 agent 没想到的候选路径，非缺陷）→ 写进报告的【泛化发现与复查】「### 泛化发现」section（一行一条）；无落点的纯猜想仍写 auditFindings 供参考。",
 	);
 	lines.push(
 		"   发散核实抓到的问题与收敛核实同等权重：找到 = 偏离 ✗（blockers 写具体可操作缺口）。",
@@ -298,12 +304,24 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 	);
 	lines.push("");
 	lines.push("【输出】逐条判定（一致 ✓ / 偏离 ✗ / 需裁决 ⚠）+ 产物总评。");
+	lines.push(
+		`【报告落盘（证明链，先报告后签名）】写 signature **之前**，先把本轮审计报告 append 到 \`${auditLogPath(cwd)}\`（与 chain 同目录策略；write 纪律同 chain.md：read 全文 → content = 原文完整内容 + 新条目，一个字符不少，禁止整体重写）。条目格式：\`## AUDIT-<epoch ms>: <passed|blocked|low-value>\`，字段 Verdict / Head（= \`git rev-parse HEAD\` 全哈希）/ Window（审计窗口概述：决策范围+提交+未提交文件）/ Blockers（无则'无'）/ RunId（= state.json 的 auditRunId）/ Date（ISO），空行后附正文 = 你的审计输出（目标推导+独立核实+逐条判定+总评，多行原样；末尾按【泛化发现与复查】附泛化 section，无则省略）。真实审计必写；轻量退出写 \`low-value\` 简短条目；纯咨询**不写**（零噪音）。写完报告再写签名——报告是证明链主体，签名是结论；先报告后签名保证你被杀时报告仍在。`,
+	);
+	lines.push(
+		"【证明缺口自查（顺手，不额外 spawn）】写报告前用 read 对账（gap 分析是 AI 能力，不依赖工具）：① chain.md 中 Date 晚于 audit-log 最新条目 Date 的 D-NNN = 决策未审，报告正文记录（非本轮窗口的存量缺口，仅记录不升级）；② audit-log 最近条目为 interrupted（上轮超时降级）→ 本轮报告注明『上轮中断，本轮补填』；③ blocked 后无新条目 = 上轮缺口未闭环，修复轮按【上轮缺口核对】核验即可。",
+	);
+	lines.push(
+		"【泛化发现与复查（v1.0.48c，pair 的多头注意力沉淀）】泛化发现 = 发散核实的路径型产出（主 agent 没想到的候选路径，非缺陷）：\n" +
+			"① **沉淀**：发散核实中发现但落不回缺口的路径（更优替代/跨域范式/边界反例的泛化形态）→ 报告正文末尾 append 『### 泛化发现』section，一行一条 `- 场景: <场景> | 路径: <路径> | 来源: <D-NNN/blocker/AUDIT-id>`；无则省略。能落回缺口的仍走 blockers/auditFindings 原通道，不重复。\n" +
+			"② **复查（查询泛化缺口）**：用 read 扫 audit-log **最近 10 条**报告的「### 泛化发现」与本轮场景语义比对（只扫尾部，防增长文件全量读）：场景相关且本轮踩了同类盲区 → 报告标注『泛化缺口复发』（有产物证据才升级 blocker）；场景相关未踩 → 不动作；同一路径给出 ≥2 次且决策链无采纳记录 → 标注『建议固化为审计维度』（蒸馏出口）。\n" +
+			"③ **边界**：修复轮**不执行**复查（收敛纪律，只核验 blockers）；纯咨询/轻量退出不写泛化 section。签名语义不变——泛化发现是附加产出，不影响 passed/blocked 判定。",
+	);
 	lines.push("");
 	lines.push(
 		`【收尾】**收尾前自查（防异步审计空洞，v1.0.37）**：head 是签名时刻 HEAD——审计运行期间落库的中间提交已含入 head，下轮 HEAD==signature.head 时兜底自查检测不到（v1.0.36 复核 Medium），须在源头补审：重新执行你建立窗口时的 \`git log --since=<窗口起点>\`（同一命令形式）与首次执行结果**比对**，新增提交（快照后落库：commit date 晚于窗口起点、早于签名时刻）逐个 \`git show\` **补审后再签名**；head 照常写签名时刻的 \`git rev-parse HEAD\`（已含补审提交，注入新鲜度检查不受影响）。写 signature **之前**先用 read 看 state.json（按【state 写入纪律】：收尾只改 signature/lastAuditedId/lastAuditAt/signatureConvLine 字段，auditFindings 保留原值不删不覆盖；若 read 发现 signatureConvLine 已被 extension 推进（> 你 read 时的值）→ 基于最新值推进，绝不回退覆盖）：若已有 signature 且 status==="passed-with-warning" **且 at ≥ 本轮 auditStartedAt**（at 是本轮内主 agent 才因交付轮超时降级——陈旧降级（上轮遗留/blockedStreak≥3）不跳过，照常签名，否则签名流永久停滞：blockers 只留 findings、下轮被替换占位抹除）→ **不再写签名**（避免覆盖降级结论，仅保留 auditFindings 后停止）。否则用 write 更新 ${auditStatePath(cwd)}：inFlight=false，lastAuditedId 推进，lastAuditAt 置当前。产物通过 → signature={status:"passed", at:<当前 epoch ms>}、signatureConvLine 推进到当前对话行总数；发现 blocker → signature={status:"blocked", at:<当前 epoch ms>, blockers:[...具体可操作缺口]}、signatureConvLine 同样推进（签名即推进——修复走 blockers 注入通道，不靠 convLine 滞后）。**signature 必须带 at 字段**（值 = lastAuditAt，epoch ms）——扩展按 signature.at ≥ auditStartedAt 判定审计完成，缺 at 会被交付轮误判为超时。**signature 必须带 head 字段**（值 = \`git rev-parse HEAD\` 输出，你审计时的产物基线全哈希，与扩展 gitHead() 同格式）——扩展按 head 与当前 HEAD 是否一致校验注入新鲜度，缺 head 时陈旧签名会在后续会话反复注入（跨会话泄露，v1.0.24）。**signature 必须带 runId 字段**（值 = 你 read 到的 state.json 的 auditRunId）——扩展按 runId 与本次 spawn 匹配校验门禁完成身份，缺 runId 时遗留/并发审计者的签名可能劫持门禁结论（v1.0.26）。**保留本轮 auditFindings（不删）**。写完后立即停止。`,
 	);
 	lines.push(
-		"写权限仅限：append chain.md + 改 state.json。禁止修改任何其他文件。",
+		"写权限仅限：append chain.md + append audit-log.md（报告）+ 改 state.json。禁止修改任何其他文件。",
 	);
 	return lines.join("\n");
 }
@@ -892,6 +910,83 @@ export default function (pi: ExtensionAPI): void {
 					},
 				],
 				details: { signature: sig },
+			};
+		},
+	});
+
+	// ---- 工具：pair_gaps（查询证明缺口 + 泛化缺口，审计者与主会话共用）----
+	pi.registerTool({
+		name: "pair_gaps",
+		label: "Pair Gaps",
+		description:
+			"查询证明缺口（确定性对账：决策未审 / interrupted 空洞 / blocker 未闭环 / 产物未审）与泛化缺口（最近 N 条泛化发现 + 高频路径——数据聚合，语义比对由调用者判定）。纯读，不 spawn、不写文件。",
+		parameters: Type.Object({
+			scope: Type.Optional(
+				Type.Union(
+					[
+						Type.Literal("proof"),
+						Type.Literal("generalization"),
+						Type.Literal("all"),
+					],
+					{ description: "查询范围（默认 all）" },
+				),
+			),
+			limit: Type.Optional(
+				Type.Number({ description: "泛化发现返回最近 N 条（默认 10）" }),
+			),
+		}),
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			const root = projectRoot(ctx.cwd);
+			const gaps = queryGaps(root, { limit: params.limit ?? 10 });
+			const scope = params.scope ?? "all";
+			const lines: string[] = [];
+			if (scope === "proof" || scope === "all") {
+				const p = gaps.proofGaps;
+				lines.push("## 证明缺口");
+				if (gaps.latestAudit) {
+					lines.push(
+						`最新审计: ${gaps.latestAudit.id} (${gaps.latestAudit.verdict}, head=${gaps.latestAudit.head.slice(0, 8)})`,
+					);
+				} else {
+					lines.push("最新审计: 无（从未审计）");
+				}
+				lines.push(
+					`决策未审: ${p.unreviewedDecisions.length > 0 ? p.unreviewedDecisions.map((d) => `${d.id}「${d.summary.slice(0, 24)}」`).join("; ") : "无"}`,
+				);
+				lines.push(
+					`interrupted 空洞: ${p.interruptedHole ? "有（最近条目为超时降级，待补填）" : "无"}`,
+				);
+				lines.push(
+					`blocker 未闭环: ${p.unclosedBlockers.length > 0 ? `${p.unclosedBlockers.length} 条待修复轮核验` : "无"}`,
+				);
+				lines.push(
+					`产物未审: ${p.unauditedArtifacts ? "有（HEAD 或新提交晚于最新审计，待审）" : "无"}`,
+				);
+			}
+			if (scope === "generalization" || scope === "all") {
+				const g = gaps.generalization;
+				lines.push(
+					"## 泛化发现（最近 " +
+						(params.limit ?? 10) +
+						" 条，语义比对由你判定）",
+				);
+				if (g.recentFindings.length === 0) {
+					lines.push("无（audit-log 尚无泛化发现沉淀）");
+				} else {
+					for (const f of g.recentFindings) {
+						lines.push(
+							`- [${f.audit}] 场景: ${f.scene} | 路径: ${f.path} | 来源: ${f.source}`,
+						);
+					}
+				}
+				lines.push(
+					`高频路径（≥2 次，未采纳候选）: ${g.frequentPaths.length > 0 ? g.frequentPaths.map((f) => `${f.path}(${f.count}次)`).join("; ") : "无"}`,
+				);
+			}
+			const text = lines.join("\n");
+			return {
+				content: [{ type: "text", text }],
+				details: gaps,
 			};
 		},
 	});
@@ -1678,6 +1773,20 @@ export default function (pi: ExtensionAPI): void {
 								f !== "审计未触发：spawn 失败，下轮重试" &&
 								f !== "审计触发失败：spawn 失败，下轮重试",
 						);
+						// 证明链补写（v1.0.48）：审计者超时未签名 → 扩展补写 interrupted 报告条目，
+						// 防该轮在 audit-log 无记录（证明链空洞）；失败不影响降级放行
+						try {
+							appendAuditReport(root, {
+								verdict: "interrupted",
+								head,
+								window: `审计超时（${GATE_TIMEOUT_MS / 1000}s），审计者未完成签名`,
+								blockers: realFindings,
+								runId: timeoutState.auditRunId ?? "",
+								body: "扩展补写：交付轮门禁超时降级放行（passed-with-warning），审计者报告未落盘。",
+							});
+						} catch {
+							/* noop：报告补写失败不影响降级 */
+						}
 						recordSignature(
 							root,
 							{

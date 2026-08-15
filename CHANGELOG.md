@@ -1,5 +1,42 @@
 # Changelog
 
+## [1.0.48] - 2026-08-15
+
+证明链落地（用户设计讨论：审计报告落盘 → 证明缺口机械可判）:
+
+- **审计报告落盘（audit-log.md）**：每次真实审计 append 一条 `## AUDIT-<epoch ms>: <verdict>` 条目（与 chain 同目录策略：默认 `.pi/decision-auditor/audit-log.md`，`PI_PAIR_CHAIN_PUBLIC=1` 时 `docs/decisions/`）。审计者收尾**先报告后签名**（被杀时报告仍在）；扩展在交付轮超时降级时补写 `interrupted` 条目（证明链无空洞）。`lib/chain-store.ts` 新增 `decisionsDir`（chainPath 同源重构）/ `auditLogPath` / `appendAuditReport`（与 appendDecision 同乐观锁纪律：mtime + 唯一 tmp 原子写 + rename 紧前复校验 + 末尾条目验证）。证明链闭环：决策（chain.md）+ 审计（audit-log.md）+ 产物基线（Head 字段）三源对账，缺口（决策未审 / interrupted 空洞未填 / blocked 未闭环）纯机械可判。
+- **证明缺口自查（AI 能力，无独立解析器——用户决策：给 pair 的 AI 用就行）**：审计者写报告前顺手对账三处（chain.md 新决策 vs audit-log 最新条目 / 上轮 interrupted 是否补填 / blocked 是否闭环），发现写进报告正文，严重者升级为 blocker。
+- **subagent 决策捕获（转述即捕获）**：subagent 不在 convlog，主 agent 转述是唯一可见通道——审计任务文本 + agent 协议加提取规则（转述的 subagent 决策性选择入链并标注来源 run；Context 引用 subagent 报告需独立核实）；主 agent 侧 SKILL 加**转述义务**（不转述 = 该决策在证明链上消失）。
+- 测试：接线守卫 +5 组断言（报告落盘路径 / subagent 捕获 / 缺口自查 / interrupted 补写 / agent 收尾协议）+ appendAuditReport 功能测试，58/58 通过，tsc 0 错误。
+
+## [1.0.48b] - 2026-08-15
+
+state.json 截断损坏自愈（algeff 实证：审计者 write 工具截断写被杀半程 → 对象缺 `}`，readAuditState 持续报错刷屏）：
+
+- **读侧自愈**：readAuditState 损坏分支改为「截断补全（raw + `}` 可解析才写回）→ .corrupt 备份恢复（最新 1 份，原子写回）→ 都失败才落 warn + DEFAULT」。损坏窗口内不再持续报错：一次恢复尝试（进程内按 cwd 记忆，防 2s 门禁轮询重复扫描）。
+- **根因**：审计者子进程的 write 工具是截断写（无 tmp+rename 能力），被 SIGKILL 落在写中途 = state.json 截断。扩展侧自愈是唯一可行缓解（与 convlog 截断风险同族）。
+- 重构：readAuditState 主体解析抽为 `parseAuditState`（恢复路径共用，行为等价）；`atomicWriteState` 原子写回。
+- 测试：读侧自愈 3 场景（截断补全 / 备份恢复 / 恢复失败落 DEFAULT），59/59 通过，tsc 0 错误。
+- 测试：读侧自愈 3 场景（截断补全 / 备份恢复 / 恢复失败落 DEFAULT），59/59 通过，tsc 0 错误。
+
+## [1.0.48c] - 2026-08-15
+
+泛化发现（pair 的多头注意力沉淀——用户设计决策：不引入第二模型/L2，L1 的维度注意力跨轮累积）：
+
+- **泛化发现沉淀**：发散核实的路径型产出（主 agent 没想到的候选路径：更优替代/跨域范式/边界反例，落不回缺口者）→ 报告正文末尾 `### 泛化发现` section，一行一条（场景|路径|来源）。能落回缺口的仍走 blockers 原通道——不重复、不改变签名语义（附加产出）。
+- **泛化缺口复查（查询）**：审计者收尾扫 audit-log 最近 10 条泛化发现做语义比对——同类盲区复发（有产物证据才升级 blocker）/ 同一路径 ≥2 次未采纳（标注蒸馏建议）。**修复轮不执行**（收敛纪律）；纯咨询/轻量退出不写。
+- **复用纪律（主 agent）**：SKILL 加「泛化路径复用」——方案取舍前 grep audit-log 泛化发现 + chain 的 Alternatives，命中即考虑并回引（AI 检索，无独立工具）。
+- 四环闭环：沉淀（泛化发现 section）→ 复用（开工前 grep）→ 查询（收尾复查 N 条）→ 蒸馏（高频未采纳 → 固化审计维度，实证校准机制出口）。零存储层代码。
+- 测试：接线守卫 +4 组断言（泛化沉淀 / 复发+蒸馏 / 修复轮排除 / agent 协议同步），59/59 通过，tsc 0 错误。
+
+## [1.0.48d] - 2026-08-15
+
+pair_gaps 查询工具 + chain.md 全量重建禁令（审计者自身事故：write 全量重建 80KB 链被系统性压缩至 47KB，逐字不可恢复）：
+
+- **pair_gaps 查询工具**：`pair_gaps` MCP 工具（scope: proof/generalization/all + limit）——证明缺口确定性对账（决策未审 / interrupted 空洞 / blocker 未闭环 / 产物未审）+ 泛化发现数据聚合（最近 N 条 + 高频路径统计，语义比对由调用者判定）。主 agent 与审计者共用，纯读不 spawn。数据层 `queryGaps`（lib/chain-store.ts）可测。
+- **chain.md 全量重建禁令**：审计者捕获决策**优先经 decision_add 工具**（扩展 appendDecision 乐观锁 + 只追加，无全量重建）；chain.md ≥ 50KB 禁止 write 全量重建（decision_add 不可用时写 auditFindings 由主 agent 追加）。agent 协议同步。
+- 测试：queryGaps 6 场景（未审/覆盖清空/空洞/blocked 未闭环/泛化解析/高频路径）+ 接线守卫 +4 组断言（pair_gaps 注册/数据层调用/重建禁令/agent 同步），60/60 通过，tsc 0 错误。
+
 ## [1.0.47] - 2026-08-15
 
 v1.0.46 交付 reviewer 复核（Medium-1 + Note-3 可修项）修复：

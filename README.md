@@ -113,6 +113,9 @@ L2 — delivery review (same git HEAD change signal)
 | **Fresh-spawn lifecycle** | audit run ends when the audit ends — no resident process, no residue after session shutdown; pure-chat rounds never spawn (zero noise — no background task, no completion notification) |
 | **Adversarial, calibrated** | 7-dimension attack (5 elegance + mechanism integrity + runtime-mode behavior), calibrated on real defects the same-model auditor missed |
 | **Cost control** | real-artifact gating (no empty audits) + once-per-delivery L2 + process-log intent channel; CI bench regression guard on wall time |
+| **Cost control** | real-artifact gating (no empty audits) + once-per-delivery L2 + process-log intent channel; CI bench regression guard on wall time |
+| **Proof chain** | every real audit appends a report to `audit-log.md` (same dir policy as chain); proof gaps (unreviewed decisions / holes / unclosed blockers / unaudited artifacts) queryable via `pair_gaps` |
+| **Generalization discovery (pair's multi-head attention)** | divergent-verification path findings sink into the report's `### 泛化发现` section; end-of-audit review flags recurrence / frequently-unadopted paths; main agent greps before starting work |
 | **cwd adaptive** | finds the real project root from any start dir (Cargo.toml/package.json/.git etc) |
 
 ## Installation
@@ -158,7 +161,15 @@ Lifecycle rules: every audit is a fresh-spawn run (`context:"fork"` inheriting t
 | `decision_add` | main agent proactively records a key decision (auto-numbered D-00X, append-only, supersede) — optional; auditor also auto-captures |
 | `decision_list` | read the decision chain |
 | `decision_signoff` | sign after audit passes (use the tool, avoid hand-writing state.json) |
+| `decision_signoff` | sign after audit passes (use the tool, avoid hand-writing state.json) |
+| `pair_gaps` | query proof gaps (deterministic reconciliation: unreviewed decisions / interrupted holes / unclosed blockers / unaudited artifacts) and generalization gaps (recent N findings + frequent-path stats; semantic matching left to the caller) — shared by auditor and main session, read-only, no spawn |
 | `/pair-audit` | manual full/targeted/`--diff` audit |
+
+## Proof chain & generalization discovery
+
+- **Audit report log** (`audit-log.md`, same dir policy as chain: default `.pi/decision-auditor/`, `docs/decisions/` with `PI_PAIR_CHAIN_PUBLIC=1`): every real audit appends an `AUDIT-<epoch>` entry (Verdict/Head/Window/Blockers/RunId/Date + report body) — **report before signature** (survives being killed); the extension appends an `interrupted` entry on delivery-gate timeout (no holes in the proof chain)
+- **Proof-gap self-check**: the auditor reconciles at signoff — unreviewed decisions (chain entries newer than the latest audit) / interrupted holes / unclosed blockers; `pair_gaps` queries them anytime
+- **Generalization discovery (pair's multi-head attention)**: path findings the main agent never considered (better alternatives / cross-domain patterns / edge-case generalizations) sink into the report's `### 泛化发现` section (one line: scene | path | source); end-of-audit review of the last 10 findings — recurrence escalates to blocker, paths unadopted ≥2× get a distillation hint; the main agent greps before making trade-offs (SKILL discipline)
 
 ## Environment
 
@@ -194,13 +205,14 @@ Lifecycle rules: every audit is a fresh-spawn run (`context:"fork"` inheriting t
 ## Known limitations
 
 - **`pi -p` (print mode)**: `agent_end` audit does not block — pi drops the extension handler at the spawn await; the auditor completes in the background and still signs, but the gate's blocking semantics are fully effective only in interactive mode (TUI / RPC).
-- **Same-model auditor**: the auditor uses the main agent's model by default — the adversarial stance mitigates groupthink, but shared blind spots (both miss the same thing) are still possible. Cross-model auditing is on the roadmap.
+- **Same-model auditor**: the auditor uses the main agent's model by default — the adversarial stance mitigates groupthink, but shared blind spots (both miss the same thing) are still possible. Cross-model comparison is rejected by design: pair's multi-dimensional attention (divergent verification / cross-domain transfer) IS the multi-head; blind spots are compensated by cross-round accumulation into the generalization-discovery log.
 - **CI E2E** uses a free no-key model (opencode CLI); audit verdicts are model-dependent by nature — the CI asserts mechanisms (capture / signature / lock), not verdict quality.
 - **Multi-instance same-cwd**: the conversation log is keyed by cwd and shared by any pi instance running there. Since v1.0.14 every log line carries a per-instance `<!--run:<id>-->` tag and auditors only extract decisions from the tagged lines of the spawning session; untagged legacy lines count as context only. When another instance's real conversation is detected, automatic audits are skipped with a warning instead of silently mis-attributing decisions. Set `PI_PAIR_PROJECT_ROOT` to a single authoritative project root (or run from different cwds) to keep instances apart.
 
 ## Roadmap
 
-- [ ] **Cross-model auditor** (`PI_PAIR_AUDITOR_MODEL`) — break same-model groupthink at the root
+- [x] **Model override** (`PI_PAIR_AUDITOR_MODEL`) — configurable auditor model (avoids stream interrupts; cross-model comparison is rejected: pair's own multi-dimensional attention IS the "multi-head", no second model)
+- [ ] **Generalization-path distillation** — frequently-unadopted paths auto-harden into audit dimensions (empirical calibration mechanism)
 - [ ] **Benefit measurement** — audit records defect categories caught; recall/false-positive stats make "precision gain" quantitative
 - [ ] **L1 tiering** — lightweight fast audit for routine rounds, deep audit for high-risk rounds
 
