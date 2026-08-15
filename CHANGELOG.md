@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.68] - 2026-08-15
+
+reviewer 双路终审 Medium/Low 处理：
+
+- **blocked 无 blockers 兜底**（reviewer Medium-1）：v1.0.66 审计者 blocked 签名漏写 blockers 字段（只活在瞬时 auditFindings）→ 机器通道（修复轮守卫/价值注入/补写条目）全失效。修复双管：① 扩展 `backfillAuditLogIfNeeded` blocked 无 blockers 时从 auditFindings 过滤占位兜底；② 任务文本 + agent 协议强化「blockers 必填非空」（v1.0.66 实证）。
+- **空 head 毒化守卫**（reviewer Low-4）：`shouldBackfillAuditLog` headMatch 空串 `startsWith("")` 恒真 → 空 head 条目匹配任意签名抑制补写。修复：`!!h &&` 守卫。
+- **空洞回填**（reviewer Medium-2/Note）：v1.0.65（4c8b68c）/ v1.0.66（91b2ed8，blocked 含 blockers）/ v1.0.67（66eead5）手工回填——audit-log 18 条，61→67 窗口全覆盖。
+- **CHANGELOG 补 [1.0.67] 段**（reviewer Low）：v1.0.67 发布漏写 changelog 条目（约定违例）。
+- 验证：65/65 通过，tsc 0。
+
+## [1.0.67] - 2026-08-15
+
+- 删旧 JSDoc 残留（审计者 Low：v1.0.63 注释描述废弃 Date 判定，与 v1.0.66 存在性检查注释叠放）+ biome 格式化；version bump 1.0.67（含 tag 修正 force update——首推 tag 指向未 bump 提交，npm publish 拒绝后修正）。
+
 ## [1.0.66] - 2026-08-15
 
 reviewer Medium 根因修复（v1.0.65 门方案永久丢弃上轮待补条目）——补写判定三代理缺陷终结：

@@ -486,6 +486,7 @@ export function shouldBackfillAuditLog(
 	if (entries.length === 0) return true; // 从未落盘 → 补写
 	const headMatch = (h: string): boolean =>
 		!!sigHead &&
+		!!h && // v1.0.68（reviewer Low-4）：空 head 条目不得匹配任意签名（startsWith("") 恒真毒化）
 		(h === sigHead || sigHead.startsWith(h) || h.startsWith(sigHead));
 	return !entries.some(
 		(e) => (sigRunId && e.runId === sigRunId) || headMatch(e.head),
@@ -512,11 +513,18 @@ export function backfillAuditLogIfNeeded(
 	if (!shouldBackfillAuditLog(log, sigRunId, sig.head ?? "")) {
 		return false; // 已有该签名条目（含回填/正常落盘）
 	}
+	// v1.0.68（reviewer Medium-1）：blocked 签名无 blockers（审计者漏写实证）→
+	// 从 auditFindings 兜底提取（过滤占位）——机器通道（修复轮守卫/价值注入/
+	// 补写条目）依赖 blockers 字段，缺失会写出 "blocked, Blockers: 无" 误导条目
+	let blockers = sig.blockers ?? [];
+	if (sig.status === "blocked" && blockers.length === 0) {
+		blockers = state.auditFindings.filter((f) => !isPlaceholderFinding(f));
+	}
 	appendAuditReport(cwd, {
 		verdict: sig.status === "blocked" ? "blocked" : "passed",
 		head: sig.head ?? "",
 		window: "（豁免补写：audit-log ≥30KB 审计者未落盘，扩展原子补写元数据）",
-		blockers: sig.blockers ?? [],
+		blockers,
 		// v1.0.64：runId 与判定同源（sig.runId ?? auditRunId）——幂等匹配的基础
 		runId: sigRunId,
 		body: "扩展补写元数据条目（审计结论见 state.json signature/blockers，泛化发现在 gaps.md）。",
