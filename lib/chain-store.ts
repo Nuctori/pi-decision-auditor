@@ -539,23 +539,28 @@ export function backfillAuditLogIfNeeded(
 	}
 	const log = readAuditLog(cwd);
 	const sigRunId = sig.runId ?? state.auditRunId ?? "";
-	if (
-		!shouldBackfillAuditLog(
-			log,
-			sigRunId,
-			sig.head ?? "",
-			sig.status === "blocked" ? "blocked" : "passed",
-			sig.blockers ?? [],
-		)
-	) {
-		return false; // 已有该签名条目（含回填/正常落盘）
-	}
 	// v1.0.68（reviewer Medium-1）：blocked 签名无 blockers（审计者漏写实证）→
 	// 从 auditFindings 兜底提取（过滤占位）——机器通道（修复轮守卫/价值注入/
 	// 补写条目）依赖 blockers 字段，缺失会写出 "blocked, Blockers: 无" 误导条目
 	let blockers = sig.blockers ?? [];
 	if (sig.status === "blocked" && blockers.length === 0) {
 		blockers = state.auditFindings.filter((f) => !isPlaceholderFinding(f));
+	}
+	// v1.0.73（reviewer Medium）：存在性检查必须用与写入侧**同一派生值**——
+	// 此前检查传 sig.blockers ?? []（泄漏签名=空）而写入用兜底派生（非空）→
+	// normalizedBlockers(派生) === normalizedBlockers([]) 恒不等 → 每轮重复补写
+	// （before_agent_start 每 turn 触发，audit-log 无界增长）。测试⑥空 findings
+	// 恰好掩盖（派生=[] 与 sig=[] 匹配）。
+	if (
+		!shouldBackfillAuditLog(
+			log,
+			sigRunId,
+			sig.head ?? "",
+			sig.status === "blocked" ? "blocked" : "passed",
+			blockers,
+		)
+	) {
+		return false; // 已有该签名条目（含回填/正常落盘）
 	}
 	appendAuditReport(cwd, {
 		verdict: sig.status === "blocked" ? "blocked" : "passed",

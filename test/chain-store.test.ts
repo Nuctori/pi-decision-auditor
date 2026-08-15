@@ -1445,21 +1445,31 @@ test("backfillAuditLogIfNeeded：双保险补写入口（v1.0.63）", () => {
 	// ⑥ in-flight 也补（v1.0.66 存在性语义：in-flight 时 state.signature 是上轮签名，
 	// audit-log 无其条目 → 补写 = 上轮漏补恢复——reviewer Medium 修复的行为）；幂等防重复
 	const dir5 = tmpDir();
-	recordSignature(dir5, { status: "blocked" }, "head5"); // 上轮签名
+	recordSignature(dir5, { status: "blocked" }, "head5"); // 上轮签名（无 blockers 泄漏型）
 	const s5 = readAuditState(dir5);
 	s5.inFlight = true; // 新审计 in-flight（上轮结论尚未补写）
 	s5.auditStartedAt = new Date("2026-08-15T10:05:00Z").getTime();
+	s5.auditFindings = ["核实 1 ✓：窗口提交全部独立审阅", "发现：缺口 X"]; // 兜底派生源
 	assert.equal(
 		backfillAuditLogIfNeeded(dir5, s5),
 		true,
 		"in-flight 时上轮未补条目必须补写（Medium 修复：门方案会永久丢弃）",
 	);
+	const entries5 = readAuditLog(dir5);
+	assert.equal(
+		entries5[0].blockers.length,
+		2,
+		"兜底派生 blockers 必须写入条目（auditFindings 过滤占位后全部）",
+	);
+	// v1.0.73（reviewer Medium）：泄漏型幂等——存在性检查用派生值后，重复调用不补
 	const s5b = readAuditState(dir5);
 	s5b.inFlight = true;
+	s5b.auditStartedAt = new Date("2026-08-15T10:05:00Z").getTime();
+	s5b.auditFindings = ["核实 1 ✓：窗口提交全部独立审阅", "发现：缺口 X"];
 	assert.equal(
 		backfillAuditLogIfNeeded(dir5, s5b),
 		false,
-		"补写后幂等：in-flight 重复调用不补（防 v1.0.65 High 重复污染回归）",
+		"泄漏型（blocked 无 blockers + findings 派生）不得每轮重复补写（v1.0.73 防线）",
 	);
 	// ⑦ 陈旧签名（at < auditStartedAt）+ 无条目 → 补写（存在性语义与审计状态无关）；幂等
 	const dir6 = tmpDir();

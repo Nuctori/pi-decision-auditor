@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.73] - 2026-08-15
+
+reviewer 终审 Medium（泄漏型幂等回归——存在性检查与写入侧 blockers 不同源）：
+
+- **同源 blockers**（reviewer Medium）：存在性检查传 `sig.blockers ?? []`（泄漏签名=空）而写入侧 v1.0.68 兜底从 auditFindings 派生（非空）→ blocked 无 blockers 签名首次补写后，`normalizedBlockers(派生) === normalizedBlockers([])` 恒不等 → before_agent_start 每 turn 重复补写、audit-log 无界增长（v1.0.61 同型污染）。修复：兜底计算移到存在性检查**之前**，检查与写入共用同一派生值（v1.0.72 对称原则的延伸）。测试⑥空 findings 恰好掩盖的盲区已补（findings 非空泄漏型场景 + 幂等断言）。
+- **D-076 入链**（decision_add）：存在性检查与写入侧同源 blockers。
+- 测试：泄漏型幂等场景（findings 派生 + 重复调用不补），65/65 通过，tsc 0。
+
 ## [1.0.72] - 2026-08-15
 
 审计者 blocker（v1.0.71 blockersKey 与写入侧 clean 不对称——多空白重复补写）：
