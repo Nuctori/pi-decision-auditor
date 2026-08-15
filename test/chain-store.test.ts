@@ -23,9 +23,10 @@ import {
 	auditReportPath,
 	writeAuditReport,
 	backfillAuditLogIfNeeded,
+	clampFutureSignatureAt,
 	isPlaceholderFinding,
-	readAuditLog,
 	chainPath,
+	readAuditLog,
 	clampConvExtractedLine,
 	convLogLineCount,
 	convlogForeignRuns,
@@ -850,6 +851,11 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 			2,
 		"补写必须双保险：async-complete 事件路径 + before_agent_start 轮询兜底",
 	);
+	// v1.0.74：未来签名 at 钳制接线（审计者 Note②）
+	assert.ok(
+		src.includes("clampFutureSignatureAt(root, state)"),
+		"before_agent_start 必须接线未来 at 钳制（M2 漏审路径防线）",
+	);
 });
 
 test("appendAuditReport：append-only + 字段渲染 + 与 chain 同目录", () => {
@@ -1485,6 +1491,40 @@ test("backfillAuditLogIfNeeded：双保险补写入口（v1.0.63）", () => {
 	const s6b = readAuditState(dir6);
 	s6b.auditStartedAt = new Date("2026-08-15T23:00:00Z").getTime();
 	assert.equal(backfillAuditLogIfNeeded(dir6, s6b), false, "补写后幂等");
+});
+
+test("clampFutureSignatureAt：未来 at 钳制（v1.0.74 阈值语义锁定）", () => {
+	const dir = tmpDir();
+	const now = Date.now();
+	// 未来 at（+10min，LLM 换算错误实证形态）→ 钳制为当前时间
+	recordSignature(dir, { status: "passed" }, "head1");
+	patchAuditState(dir, {
+		signature: { status: "passed", at: now + 10 * 60 * 1000, head: "head1" },
+	});
+	const st = readAuditState(dir);
+	assert.equal(clampFutureSignatureAt(dir, st), true, "未来 at 必须钳制");
+	const after = readAuditState(dir);
+	assert.ok(
+		after.signature!.at <= now + 1000 && after.signature!.at >= now - 1000,
+		"钳制后 at ≈ 当前时间（落盘修正）",
+	);
+	// 容差内（+2min）→ 不钳制
+	recordSignature(dir, { status: "passed" }, "head2");
+	patchAuditState(dir, {
+		signature: { status: "passed", at: now + 2 * 60 * 1000, head: "head2" },
+	});
+	assert.equal(
+		clampFutureSignatureAt(dir, readAuditState(dir)),
+		false,
+		"容差内（5min）不钳制",
+	);
+	// 缺 at / 无签名 → noop
+	patchAuditState(dir, { signature: null });
+	assert.equal(clampFutureSignatureAt(dir, readAuditState(dir)), false, "无签名 noop");
+	patchAuditState(dir, {
+		signature: { status: "passed", at: 0, head: "head3" },
+	});
+	assert.equal(clampFutureSignatureAt(dir, readAuditState(dir)), false, "缺 at noop");
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {

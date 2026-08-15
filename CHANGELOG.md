@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.75] - 2026-08-15
+
+reviewer/审计者 Note 处理（clampFutureSignatureAt 测试与守卫锁定）：
+
+- **clampFutureSignatureAt 单测**（reviewer/审计者 Note①）：4 场景——未来 at（+10min 实证形态）钳制为当前并落盘 / 容差内（+2min）不钳制 / 无签名 noop / 缺 at noop——阈值语义锁定（5min 容差）。
+- **接线守卫断言**（审计者 Note②）：before_agent_start 必须接线 clampFutureSignatureAt。
+- **D-078 入链**（decision_add）：未来签名 at 钳制决策（钳制 vs 拒绝 vs 仅协议，采纳钳制双保险）。
+- Note③（lastAuditAt 与钳制后 at 语义分离）记录：钳制只改 signature.at，lastAuditAt 保留审计者原值——下轮审计窗口起点优先用钳制后 at，语义自洽。
+- 验证：66/66 通过（+1 clamp 测试），tsc 0。
+
 ## [1.0.74] - 2026-08-15
 
 reviewer 三路终审 M1/M2 根因修复（系统性漏审路径）：
