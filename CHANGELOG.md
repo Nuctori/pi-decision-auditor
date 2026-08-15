@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.69] - 2026-08-15
+
+reviewer 终审 Medium（同 head 双轮塌缩——存在性检查对 v1.0.65 的回归）：
+
+- **verdict 判别**（reviewer Medium）：runId 恒空环境退化为纯 head 匹配后，同 head 的次轮结论（修复轮 HEAD 未变：blocked→passed）被存在性检查吞掉——passed 结论永久丢失 / blocked 条目 stale → unclosedBlockers 假阳性。修复：存在性判定 = head 匹配 **且 verdict 相同** 才视为已记录；同 head 异 verdict 必须补写（新结论）。真实日志 3 条连续同 head c01c4ef 证明同 head 多轮是修复轮常态。
+- **D-073 入链**（reviewer Low）：supersedes D-067/D-068——补写判定终态 = 存在性 + verdict 判别（引用完整性）。
+- **Medium-2 确认已闭环**：v1.0.65（4c8b68c）条目 v1.0.68 已回填（audit-log 18 条，61→67 全覆盖）。
+- 测试：shouldBackfillAuditLog 7 场景（含同 head 异 verdict 补写 / 同 head 同 verdict 幂等），65/65 通过，tsc 0。
+
 ## [1.0.68] - 2026-08-15
 
 reviewer 双路终审 Medium/Low 处理：

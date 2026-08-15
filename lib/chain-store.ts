@@ -471,25 +471,28 @@ export function readAuditLog(cwd: string): AuditLogEntry[] {
 	}
 }
 
-/** 豁免补写判定（v1.0.66 重构，替代 v1.0.61~65 的 Date/审计状态方案）：
- *  存在性检查——audit-log 中是否已有该签名的条目（head 前缀匹配兼容回填短哈希 +
- *  runId 匹配），与 inFlight/auditStartedAt/最新条目时间无关：
- *  - 幂等：已存在（含回填/正常落盘）→ 不补，天然免疫 v1.0.61 恒真、v1.0.63 陈旧签名、
- *    v1.0.65 inFlight 门丢弃上轮待补（reviewer Medium 实证：新审计开始后 auditStartedAt
- *    更新，上轮签名被双门永久跳过）三类缺陷；
- *  - runId 恒空环境（本仓库实证）走 head 匹配——回填条目 head 短哈希用前缀双向匹配。 */
+/** 豁免补写判定（v1.0.69：存在性检查 + 同 head 双轮塌缩修复）：
+ *  audit-log 是否已有该签名的条目（runId 匹配 或 head 前缀匹配 **且 verdict 相同**）——
+ *  - 幂等：同 head 同 verdict 已存在 → 不补；
+ *  - 同 head 不同 verdict（v1.0.69 修复，reviewer Medium：修复轮 HEAD 未变时第二轮
+ *    blocked→passed 结论被存在性检查吞掉——真实日志 3 条连续同 head c01c4ef 证明
+ *    同 head 多轮是常态）→ 必须补写（新结论）；
+ *  - head 前缀双向匹配兼容回填短哈希；空 head 不参与匹配（v1.0.68 毒化守卫）。 */
 export function shouldBackfillAuditLog(
 	entries: AuditLogEntry[],
 	sigRunId: string,
 	sigHead: string,
+	sigVerdict: string,
 ): boolean {
 	if (entries.length === 0) return true; // 从未落盘 → 补写
 	const headMatch = (h: string): boolean =>
 		!!sigHead &&
-		!!h && // v1.0.68（reviewer Low-4）：空 head 条目不得匹配任意签名（startsWith("") 恒真毒化）
+		!!h && // v1.0.68：空 head 条目不得匹配任意签名（startsWith("") 恒真毒化）
 		(h === sigHead || sigHead.startsWith(h) || h.startsWith(sigHead));
 	return !entries.some(
-		(e) => (sigRunId && e.runId === sigRunId) || headMatch(e.head),
+		(e) =>
+			(sigRunId && e.runId === sigRunId) ||
+			(headMatch(e.head) && e.verdict === sigVerdict),
 	);
 }
 
@@ -510,7 +513,14 @@ export function backfillAuditLogIfNeeded(
 	}
 	const log = readAuditLog(cwd);
 	const sigRunId = sig.runId ?? state.auditRunId ?? "";
-	if (!shouldBackfillAuditLog(log, sigRunId, sig.head ?? "")) {
+	if (
+		!shouldBackfillAuditLog(
+			log,
+			sigRunId,
+			sig.head ?? "",
+			sig.status === "blocked" ? "blocked" : "passed",
+		)
+	) {
 		return false; // 已有该签名条目（含回填/正常落盘）
 	}
 	// v1.0.68（reviewer Medium-1）：blocked 签名无 blockers（审计者漏写实证）→

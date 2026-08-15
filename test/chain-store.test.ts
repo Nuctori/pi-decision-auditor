@@ -1218,10 +1218,10 @@ test("queryGaps：gaps.md 数据源合并（v1.0.60 泛化通道不依赖 audit-
 	assert.equal(gaps.generalization.frequentPaths[0].count, 2);
 });
 
-test("shouldBackfillAuditLog：存在性检查（v1.0.66 重构，替代 Date/审计状态方案）", () => {
-	const entry = (runId: string, head: string) => ({
+test("shouldBackfillAuditLog：存在性检查 + verdict 判别（v1.0.69 同 head 双轮塌缩修复）", () => {
+	const entry = (runId: string, head: string, verdict = "passed") => ({
 		id: "AUDIT-1",
-		verdict: "passed",
+		verdict,
 		head,
 		window: "w",
 		blockers: [],
@@ -1232,38 +1232,62 @@ test("shouldBackfillAuditLog：存在性检查（v1.0.66 重构，替代 Date/�
 	});
 	// runId 匹配（正常落盘）→ 不补写
 	assert.equal(
-		shouldBackfillAuditLog([entry("run-1", "h")], "run-1", "sighead1"),
+		shouldBackfillAuditLog([entry("run-1", "h")], "run-1", "sighead1", "passed"),
 		false,
 		"runId 匹配 = 已落盘，不补写",
 	);
 	// runId 不同 + head 不匹配 → 补写
 	assert.equal(
-		shouldBackfillAuditLog([entry("run-0", "h")], "run-1", "sighead1"),
+		shouldBackfillAuditLog([entry("run-0", "h")], "run-1", "sighead1", "passed"),
 		true,
 		"runId 不同且 head 不匹配 = 未落盘，补写",
 	);
-	// head 精确匹配（全哈希）→ 不补写
+	// head 精确匹配 + verdict 相同 → 不补写
 	assert.equal(
 		shouldBackfillAuditLog(
 			[entry("", "abcdef1234567890abcdef1234567890abcdef12")],
 			"",
 			"abcdef1234567890abcdef1234567890abcdef12",
+			"passed",
 		),
 		false,
-		"head 精确匹配 = 已落盘，不补写",
+		"head 精确匹配且 verdict 相同 = 已落盘，不补写",
 	);
-	// head 前缀匹配（回填条目短哈希）→ 不补写
+	// head 前缀匹配（回填条目短哈希）+ verdict 相同 → 不补写
 	assert.equal(
 		shouldBackfillAuditLog(
 			[entry("", "abcdef12")],
 			"",
 			"abcdef1234567890abcdef1234567890abcdef12",
+			"passed",
 		),
 		false,
 		"回填短哈希条目按前缀匹配 = 已落盘，不补写",
 	);
+	// v1.0.69 同 head 双轮塌缩：同 head 不同 verdict（修复轮 blocked→passed，HEAD 未变）→ 补写
+	assert.equal(
+		shouldBackfillAuditLog(
+			[entry("", "H", "blocked")],
+			"",
+			"H",
+			"passed",
+		),
+		true,
+		"同 head 不同 verdict（修复轮新结论）必须补写——v1.0.65 回归防线",
+	);
+	// 同 head 同 verdict → 不补写（幂等）
+	assert.equal(
+		shouldBackfillAuditLog(
+			[entry("", "H", "blocked")],
+			"",
+			"H",
+			"blocked",
+		),
+		false,
+		"同 head 同 verdict = 已记录，不补写",
+	);
 	// 无条目 → 补写
-	assert.equal(shouldBackfillAuditLog([], "run-1", "h"), true);
+	assert.equal(shouldBackfillAuditLog([], "run-1", "h", "passed"), true);
 });
 
 test("backfillAuditLogIfNeeded：双保险补写入口（v1.0.63）", () => {
