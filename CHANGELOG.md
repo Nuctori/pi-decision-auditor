@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.65] - 2026-08-15
+
+reviewer 终审 High（轮询路径陈旧签名重复补写，v1.0.61 同型污染）：
+
+- **新鲜度门**（reviewer High）：backfillAuditLogIfNeeded 入口加双门——① `state.inFlight` 时不补（新审计 in-flight 期间 signature 是上轮陈旧值，补写 = 每轮重复 + blocker 复活 + 假修复轮 + 真实结论延迟）；② `sig.at < auditStartedAt` 不补（签名早于本轮审计开始 = 陈旧，与事件路径 sigCompleted 语义对称）。实证前置条件已存在（state: signature blocked at=1786804612297 / 新审计 in-flight auditStartedAt=1786805302537）。
+- **测试补场景⑥⑦**（reviewer Note）：in-flight 陈旧签名不补 + 陈旧签名（at < auditStartedAt）不补。
+- 验证：65/65 通过，tsc 0。
+
 ## [1.0.64] - 2026-08-15
 
 reviewer 终审 Medium（幂等缺陷，v1.0.61 同型复发路径）：

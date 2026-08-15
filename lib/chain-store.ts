@@ -481,10 +481,16 @@ export function backfillAuditLogIfNeeded(cwd: string, st?: AuditState): boolean 
 	if (!sig || (sig.status !== "passed" && sig.status !== "blocked")) {
 		return false; // failed/passed-with-warning 不补（非审计者真实结论）
 	}
+	// v1.0.65 新鲜度门（reviewer High）：轮询路径必须与事件路径 sigCompleted 对称——
+	// ① in-flight 时 signature 是上轮陈旧值（新审计结论未知）→ 不补，否则每轮为
+	// 陈旧签名重复补写（v1.0.61 同型污染：blocker 复活 + 假修复轮 + 真实结论延迟）；
+	// ② 签名早于本轮审计开始 = 陈旧签名（sig.at >= auditStartedAt 同 sigCompleted 语义）
+	if (state.inFlight) return false;
+	if (!state.auditStartedAt || sig.at < state.auditStartedAt) return false;
 	const log = readAuditLog(cwd);
 	const latest = log[log.length - 1];
 	const sigRunId = sig.runId ?? state.auditRunId ?? "";
-	if (!shouldBackfillAuditLog(latest, sigRunId, state.auditStartedAt ?? 0)) {
+	if (!shouldBackfillAuditLog(latest, sigRunId, state.auditStartedAt)) {
 		return false; // 已落盘
 	}
 	appendAuditReport(cwd, {

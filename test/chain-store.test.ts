@@ -1279,16 +1279,15 @@ test("backfillAuditLogIfNeeded：双保险补写入口（v1.0.63）", () => {
 	// ① 签名已写但 audit-log 无条目 → 补写
 	recordSignature(dir, { status: "passed" }, "head1");
 	const s1 = readAuditState(dir);
+	s1.auditStartedAt = (s1.signature?.at ?? 0) - 60_000; // 审计开始早于签名（真实流程）
 	assert.equal(backfillAuditLogIfNeeded(dir, s1), true, "未落盘必须补写");
 	const entries1 = readAuditLog(dir);
 	assert.equal(entries1.length, 1);
 	assert.equal(entries1[0].verdict, "passed");
 	// ② 幂等：再调不补
-	assert.equal(
-		backfillAuditLogIfNeeded(dir, readAuditState(dir)),
-		false,
-		"已补写不重复",
-	);
+	const s1b = readAuditState(dir);
+	s1b.auditStartedAt = (s1b.signature?.at ?? 0) - 60_000;
+	assert.equal(backfillAuditLogIfNeeded(dir, s1b), false, "已补写不重复");
 	// ③ failed 签名不补
 	const dir2 = tmpDir();
 	recordSignature(dir2, { status: "failed" }, "head2");
@@ -1333,10 +1332,36 @@ test("backfillAuditLogIfNeeded：双保险补写入口（v1.0.63）", () => {
 		"run-4",
 		"补写条目 runId 必须与判定同源（sig.runId ?? auditRunId）",
 	);
+	const s4b = readAuditState(dir4);
+	s4b.auditStartedAt = (s4b.signature?.at ?? 0) - 60_000;
 	assert.equal(
-		backfillAuditLogIfNeeded(dir4, readAuditState(dir4)),
+		backfillAuditLogIfNeeded(dir4, s4b),
 		false,
 		"同源 runId 幂等：不得每轮重复补写（v1.0.61 同型复发防线）",
+	);
+	// ⑥ in-flight 不补（reviewer High v1.0.65）：新审计进行中签名是上轮陈旧值
+	const dir5 = tmpDir();
+	recordSignature(dir5, { status: "blocked" }, "head5"); // 陈旧签名（上轮）
+	const s5 = readAuditState(dir5);
+	s5.inFlight = true; // 新审计 in-flight
+	s5.auditStartedAt = new Date("2026-08-15T10:05:00Z").getTime();
+	assert.equal(
+		backfillAuditLogIfNeeded(dir5, s5),
+		false,
+		"in-flight 时陈旧签名不得补写（否则每轮重复污染证明链）",
+	);
+	// ⑦ 陈旧签名（sig.at < auditStartedAt）不补：签名早于本轮审计开始 = 上轮结论
+	const dir6 = tmpDir();
+	recordSignature(dir6, { status: "passed" }, "head6");
+	const s6 = readAuditState(dir6);
+	s6.inFlight = false;
+	// 审计开始晚于签名 = 签名是上轮结论（陈旧）；11:00Z 早于当前签名时间，
+	// 须用未来时间构造 at < auditStartedAt
+	s6.auditStartedAt = new Date("2026-08-15T23:00:00Z").getTime();
+	assert.equal(
+		backfillAuditLogIfNeeded(dir6, s6),
+		false,
+		"陈旧签名（at < auditStartedAt）不得补写（与事件路径 sigCompleted 对称）",
 	);
 });
 
