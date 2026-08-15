@@ -680,6 +680,11 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 			src.includes("不升级为 blocker"),
 		"审计任务必须含修复轮收敛纪律（只核验 blockers，Low/Note 不升级 blocker——防无限唤起）",
 	);
+	// v1.0.45 Note：L2 reviewer 同步低价值窗口纪律（纯文档提交不 fanout 全维度审查）
+	assert.ok(
+		src.includes("低价值窗口轻量退出（v1.0.45 收敛纪律，与 L1 同构）"),
+		"L2 reviewer prompt 必须含低价值窗口轻量退出指令（与 L1 同构，防纯文档提交全量 fanout）",
+	);
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {
