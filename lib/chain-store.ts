@@ -494,7 +494,12 @@ export function shouldBackfillAuditLog(
 		(h === sigHead || sigHead.startsWith(h) || h.startsWith(sigHead));
 	const verdictMatched = (v: string): boolean =>
 		v === sigVerdict || (sigVerdict === "passed" && v === "low-value");
-	const blockersKey = (b: string[]): string => b.join(" | ");
+	// v1.0.71（reviewer Low）：blockers 内容比较必须顺序无关 + 分隔符安全——
+	// " | " join 顺序敏感（不同来源顺序不同 → 误判新结论重复补写）且分隔符冲突
+	// （sig blocker 文本含 " | " 时撞 key → 真实新结论被抑制，lossy 方向）。
+	// sort + JSON.stringify：顺序无关，且 JSON 不会拆分含分隔符的文本。
+	const blockersKey = (b: string[]): string =>
+		JSON.stringify([...b].sort());
 	return !entries.some(
 		(e) =>
 			(sigRunId && e.runId === sigRunId) ||

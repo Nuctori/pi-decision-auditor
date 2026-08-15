@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.71] - 2026-08-15
+
+reviewer 终审 Low 处理（blockers 比较健壮性）：
+
+- **blockersKey 顺序无关 + 分隔符安全**（reviewer Low）：`" | "` join 比较顺序敏感（不同来源顺序不同 → 误判新结论重复补写）且分隔符冲突（sig blocker 文本含 `" | "` 时撞 key → 真实新结论被抑制，lossy 方向）。修复：`JSON.stringify([...b].sort())`——顺序无关，JSON 不拆分含分隔符文本。
+- **空洞回填**（reviewer Note）：v1.0.68（118789d）/ v1.0.69（38b11f8）/ style（9efe91b，low-value）手工回填——audit-log 21 条，61→70 窗口全覆盖。
+- 测试：blockers 顺序无关 + 分隔符安全 2 场景，65/65 通过，tsc 0。
+
 ## [1.0.70] - 2026-08-15
 
 reviewer 终审 Medium/Low 处理（补写判定终态的判别维度补全）：

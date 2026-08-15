@@ -1331,6 +1331,30 @@ test("shouldBackfillAuditLog：存在性 + verdict + blockers 判别（v1.0.70�
 		false,
 		"low-value 条目对 passed 签名视为已记录（轻量退出窗口不重复补写）",
 	);
+	// v1.0.71：blockers 顺序无关（同集合不同顺序 = 已记录，不补）
+	assert.equal(
+		shouldBackfillAuditLog(
+			[entry("", "H", "blocked", ["b", "a"])],
+			"",
+			"H",
+			"blocked",
+			["a", "b"],
+		),
+		false,
+		"blockers 内容比较必须顺序无关（sort + JSON.stringify）",
+	);
+	// v1.0.71：blockers 含分隔符文本不撞 key（JSON 序列化安全）
+	assert.equal(
+		shouldBackfillAuditLog(
+			[entry("", "H", "blocked", ["a", "b"])],
+			"",
+			"H",
+			"blocked",
+			["a", "b | c"],
+		),
+		true,
+		"含分隔符的 blocker 文本不得撞 key（JSON 不拆分文本）",
+	);
 	// v1.0.68：空 head 条目不匹配任意签名 → 补写
 	assert.equal(
 		shouldBackfillAuditLog([entry("", "")], "", "sighead1", "passed", []),
