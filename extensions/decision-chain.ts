@@ -239,7 +239,7 @@ function buildIncrementalAuditTask(cwd: string, runId: string): string {
 		"**若本轮纯咨询**（如技术对比问答、信息查询，无决策无产物）：**快速退出**——用 write 更新 state.json：inFlight=false、convExtractedLine 推进到当前对话行总数（只数 `## 👤`/`## 🤖` 行，不是文件行号）、auditFindings=['本轮纯咨询，无审计对象']，**不写 signature 不注入任何价值点**（用户零感知）。退出后立即停止。",
 	);
 	lines.push(
-		"**若本轮产物为低价值窗口**（v1.0.45 收敛纪律）：产物仅文档/格式改动（.md/CHANGELOG/README/package.json 版本号等，无代码逻辑改动）**且窗口内无新决策**——**轻量退出**：按收尾流程签名 passed（inFlight=false、convExtractedLine/signatureConvLine 推进），auditFindings=['本轮仅文档/格式改动，无审计对象']，**不做五维度进攻**（文档内容一致性核对可 1-2 行概述）。这是对抗式审计的主动收敛：低风险产物不值得全量成本，价值 = 首轮全量 + 修复轮核验。**注意**：若文档改动实际隐含行为/设计决策（如 CHANGELOG 描述功能、README 改架构说明），不得轻量退出——照常全量审计。",
+		"**若本轮产物为低价值窗口**（v1.0.45 收敛纪律）：产物仅文档/格式改动（.md/CHANGELOG/README/package.json 版本号等，无代码逻辑改动）**且窗口内无新决策**——**轻量退出**：按收尾流程签名 passed（inFlight=false、convExtractedLine/signatureConvLine 推进），auditFindings=['本轮仅文档/格式改动，无审计对象']，**不做五维度进攻**（文档内容一致性核对可 1-2 行概述）。这是对抗式审计的主动收敛：低风险产物不值得全量成本，价值 = 首轮全量 + 修复轮核验。**注意**：若文档改动实际隐含行为/设计决策（如 CHANGELOG 描述功能、README 改架构说明），不得轻量退出——照常全量审计。**修复轮守卫（v1.0.46，reviewer Medium）**：上轮 signature.status==='blocked' 且 blockers 非空时**不得轻量退出**——先执行【上轮缺口核对】核验 blockers 闭环（修复提交恰为纯文档是常见型：blocker 是'CHANGELOG 缺记'类文档问题时修复即文档提交，轻量退出会绕过'仍成立必重报'不变量），核验后再签名。",
 	);
 	lines.push(
 		"**若有决策性工作或产物**：继续以下步骤——提取决策入链 + 审决策/产物质量 + 签名。",

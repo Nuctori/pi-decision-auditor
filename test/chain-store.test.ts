@@ -685,6 +685,13 @@ test("接线守卫：目标架构（单层审计 + fresh spawn + L2 门禁 + 价
 		src.includes("低价值窗口轻量退出（v1.0.45 收敛纪律，与 L1 同构）"),
 		"L2 reviewer prompt 必须含低价值窗口轻量退出指令（与 L1 同构，防纯文档提交全量 fanout）",
 	);
+	// v1.0.46 reviewer Medium：轻量退出必须排除修复轮场景（上轮 blocked 且 blockers
+	// 非空时先核验闭环再签名——修复提交恰为纯文档是常见型，轻量退出会绕过重报不变量）
+	assert.ok(
+		src.includes("修复轮守卫（v1.0.46") &&
+			src.includes("上轮 signature.status==='blocked'"),
+		"低价值窗口轻量退出必须含修复轮守卫（blocked 且 blockers 非空 → 先核验闭环再签名）",
+	);
 });
 
 test("appendProcessSignal：信号词命中才记录", () => {
